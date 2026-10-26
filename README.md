@@ -15,7 +15,7 @@ icon in Chrome.
 
 ## Installation
 
-1. Run `DeepSeek-Monitor.msi` from this folder.
+1. Download the latest DeepSeek-Monitor.msi from the [Releases page](https://github.com/shtakan/deepseek-monitor-desktop/releases).
 2. Open the installed **DeepSeek-Monitor**.
 3. Sign in to DeepSeek and open any chat.
 

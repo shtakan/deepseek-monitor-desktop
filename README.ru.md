@@ -14,7 +14,7 @@
 
 ## Установка
 
-1. Запустите `DeepSeek-Monitor.msi` из этой папки.
+1. Скачайте последнюю версию DeepSeek-Monitor.msi со [страницы релизов](https://github.com/shtakan/deepseek-monitor-desktop/releases).
 2. Откройте установленный **DeepSeek-Monitor**.
 3. Войдите в DeepSeek и откройте любой чат.
 
