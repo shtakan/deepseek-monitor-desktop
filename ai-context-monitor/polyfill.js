@@ -52,7 +52,7 @@ if (typeof window.__aiCmSetDebugLogs === 'undefined') {
   window.chrome.runtime.id = 'pake-ai-context-monitor';
   window.chrome.runtime.getURL = window.chrome.runtime.getURL || function(path) { return path; };
   window.chrome.runtime.getManifest = window.chrome.runtime.getManifest || function() {
-    return { version: '2.0.28', manifest_version: 3, name: 'AI Context Monitor' };
+    return { version: '2.0.29', manifest_version: 3, name: 'AI Context Monitor' };
   };
   window.chrome.runtime.onMessage = onMessageStub;
   window.chrome.runtime.onInstalled = createEventStub();
