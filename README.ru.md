@@ -84,22 +84,22 @@ API-ключ (BYOK) хранится в `sessionStorage` и очищается �
 1. Собрать расширение в источнике:
 
    ```powershell
-   cd C:\Users\oleg\Desktop\Prompts\ai-context-monitor-clean
+   cd <path_to_source_repo>
    node build.mjs
    ```
 
 2. Скопировать **всё** содержимое `dist` в `ai-context-monitor` (с заменой):
 
    ```powershell
-   $src = 'C:\Users\oleg\Desktop\Prompts\ai-context-monitor-clean\dist'
-   $dst = 'C:\Users\oleg\Desktop\~AI~\ai-desktop-app\ai-context-monitor'
+   $src = '<path_to_source_repo>\dist'
+   $dst = '<path_to_desktop_app>\ai-context-monitor'
    Copy-Item -Path (Join-Path $src '*') -Destination $dst -Recurse -Force
    ```
 
 3. Перейдите в папку приложения и проверьте версию, затем синхронизируйте `polyfill.js`:
 
    ```powershell
-   cd C:\Users\oleg\Desktop\~AI~\ai-desktop-app
+   cd <path_to_desktop_app>
    (Get-Content .\ai-context-monitor\manifest.json -Raw | ConvertFrom-Json).version
    Select-String -Path .\ai-context-monitor\polyfill.js -Pattern "version: '"
    ```
@@ -117,7 +117,7 @@ API-ключ (BYOK) хранится в `sessionStorage` и очищается �
 5. Собрать и проверить бандл:
 
    ```powershell
-   cd C:\Users\oleg\Desktop\~AI~\ai-desktop-app
+   cd <path_to_desktop_app>
    node .\build-pake-bundle.js
    node --check .\ai-context-monitor\pake-bundle.deepseek.js
    ```
@@ -149,7 +149,7 @@ pake https://chat.deepseek.com --name "DeepSeek-Monitor" --identifier com.deepse
 ### 1. Положите иконку в папку `icons`
 
 ```
-C:\Users\oleg\Desktop\ai-desktop-app\icons\app.png
+<path_to_desktop_app>\icons\app.png
 ```
 
 Требования к PNG:
@@ -166,7 +166,7 @@ C:\Users\oleg\Desktop\ai-desktop-app\icons\app.png
 Если меняли `ai-context-monitor`:
 
 ```powershell
-cd C:\Users\oleg\Desktop\ai-desktop-app
+cd <path_to_desktop_app>
 node .\build-pake-bundle.js
 ```
 
@@ -200,7 +200,7 @@ pake https://chat.deepseek.com `
   `Custom icon path may be invalid` и собирает с иконкой по умолчанию.
 - Относительный путь считается от текущей папки, поэтому запускайте команду
   из корня проекта. Можно указать абсолютный путь:
-  `--icon "C:\Users\oleg\Desktop\ai-desktop-app\icons\app.png"`.
+  `--icon "<path_to_desktop_app>\icons\app.png"`.
 - Если после переустановки видна старая иконка — Windows кэширует её по
   `identifier`. Удалите старую версию, при необходимости смените
   `--app-version` или `--identifier` и пересоберите.

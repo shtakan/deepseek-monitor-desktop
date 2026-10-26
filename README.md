@@ -87,22 +87,22 @@ from the source repository. The full update cycle:
 1. Build the extension in the source repo:
 
    ```powershell
-   cd C:\Users\oleg\Desktop\Prompts\ai-context-monitor-clean
+   cd <path_to_source_repo>
    node build.mjs
    ```
 
 2. Copy **everything** from `dist` into `ai-context-monitor` (overwriting):
 
    ```powershell
-   $src = 'C:\Users\oleg\Desktop\Prompts\ai-context-monitor-clean\dist'
-   $dst = 'C:\Users\oleg\Desktop\~AI~\ai-desktop-app\ai-context-monitor'
+   $src = '<path_to_source_repo>\dist'
+   $dst = '<path_to_desktop_app>\ai-context-monitor'
    Copy-Item -Path (Join-Path $src '*') -Destination $dst -Recurse -Force
    ```
 
 3. Change to the app folder, check the version, then synchronize `polyfill.js`:
 
    ```powershell
-   cd C:\Users\oleg\Desktop\~AI~\ai-desktop-app
+   cd <path_to_desktop_app>
    (Get-Content .\ai-context-monitor\manifest.json -Raw | ConvertFrom-Json).version
    Select-String -Path .\ai-context-monitor\polyfill.js -Pattern "version: '"
    ```
@@ -120,7 +120,7 @@ from the source repository. The full update cycle:
 5. Build and verify the bundle:
 
    ```powershell
-   cd C:\Users\oleg\Desktop\~AI~\ai-desktop-app
+   cd <path_to_desktop_app>
    node .\build-pake-bundle.js
    node --check .\ai-context-monitor\pake-bundle.deepseek.js
    ```
@@ -152,7 +152,7 @@ multi-size `.ico` itself (16–256 px frames), so no manual conversion is needed
 ### 1. Put the icon into the `icons` folder
 
 ```
-C:\Users\oleg\Desktop\ai-desktop-app\icons\app.png
+<path_to_desktop_app>\icons\app.png
 ```
 
 PNG requirements:
@@ -169,7 +169,7 @@ You can also drop in a ready-made `.ico` — it will be used as is (preferably w
 If you changed `ai-context-monitor`:
 
 ```powershell
-cd C:\Users\oleg\Desktop\ai-desktop-app
+cd <path_to_desktop_app>
 node .\build-pake-bundle.js
 ```
 
@@ -203,7 +203,7 @@ the app window and the installer.
   `Custom icon path may be invalid` and builds with the default icon.
 - A relative path is resolved from the current folder, so run the command from the
   project root. You can also pass an absolute path:
-  `--icon "C:\Users\oleg\Desktop\ai-desktop-app\icons\app.png"`.
+  `--icon "<path_to_desktop_app>\icons\app.png"`.
 - If the old icon is still visible after reinstalling, Windows caches it by `identifier`.
   Uninstall the old version, change `--app-version` or `--identifier` if needed, and
   rebuild.
