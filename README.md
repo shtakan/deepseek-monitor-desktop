@@ -1,95 +1,97 @@
+[English](README.md) | [Русский](README.ru.md)
+
 # DeepSeek-Monitor
 
-**DeepSeek-Monitor** — десктопное приложение на [Pake](https://github.com/tw93/Pake)
-(Rust + Tauri + WebView2) для веб-версии `chat.deepseek.com` со встроенным расширением
-**AI Context Monitor**: бейдж показывает загрузку контекста, модель и лимит, а настройки
-открываются прямо на странице — аналог клика по иконке расширения в Chrome.
+**DeepSeek-Monitor** is a desktop app built with [Pake](https://github.com/tw93/Pake)
+(Rust + Tauri + WebView2) for the `chat.deepseek.com` web client, with the
+**AI Context Monitor** extension built in: the badge shows context usage, the model and
+the limit, and settings open right on the page — the equivalent of clicking the extension
+icon in Chrome.
 
-- **Репозиторий расширения:** [shtakan/ai-context-monitor](https://github.com/shtakan/ai-context-monitor)
-- **Стек:** Pake 3.x (Rust, Tauri, WebView2), Node.js — только для сборки инжектируемого бандла
-- **Платформа:** Windows (MSI-установщик, WebView2 Runtime)
-- **Текущая версия:** 1.0.0 — см. [CHANGELOG.md](CHANGELOG.md)
+- **Extension repository:** [shtakan/ai-context-monitor](https://github.com/shtakan/ai-context-monitor)
+- **Stack:** Pake 3.x (Rust, Tauri, WebView2); Node.js is used only to build the injected bundle
+- **Platform:** Windows (MSI installer, WebView2 Runtime)
+- **Current version:** 1.0.0 — see [CHANGELOG.md](CHANGELOG.md)
 
-## Установка
+## Installation
 
-1. Запустите `DeepSeek-Monitor.msi` из этой папки.
-2. Откройте установленный **DeepSeek-Monitor**.
-3. Войдите в DeepSeek и откройте любой чат.
+1. Run `DeepSeek-Monitor.msi` from this folder.
+2. Open the installed **DeepSeek-Monitor**.
+3. Sign in to DeepSeek and open any chat.
 
-Ожидаемый бейдж на тестовом чате: **57.1%**, модель **DeepSeek V4.1 Flash**,
-токены **570 929**, окно **1 000 000** (570 929 / 1 000 000 = 57.1%).
+## Extension settings
 
-## Настройки расширения
+1. Click the round badge in the bottom-right corner.
+2. In the panel that opens, click **⚙ Extension settings**.
+3. The settings page appears (like the extension popup in Chrome):
+   - statistics for the current chat (site, model, tokens, limit, fill level, source);
+   - model: "Auto-detect" or a forced selection;
+   - context limit: "Auto" or a percentage of the auto threshold;
+   - the "Show indicator" toggle;
+   - other extension options.
 
-1. Нажмите на круглый бейдж внизу справа.
-2. В открывшейся панели нажмите **⚙ Настройки расширения**.
-3. Появится страница настроек (как попап расширения в Chrome):
-   - статистика по текущему чату (сайт, модель, токены, лимит, заполнение, источник);
-   - модель: «Автоопределение» или принудительный выбор;
-   - лимит контекста: «Авто» или % от авто-порога;
-   - переключатель «Показывать индикатор»;
-   - прочие параметры расширения.
+To close: the **✕** button, the **Esc** key, or a click on the dimmed background.
 
-Закрыть: кнопка **✕**, клавиша **Esc** или клик по затемнённому фону.
+Changes apply immediately, with no restart: clearing the "Show indicator" checkbox hides
+the badge, and checking it again brings the badge back.
 
-Изменения применяются сразу, без перезапуска: например, снятие галочки
-«Показывать индикатор» скрывает бейдж, а возврат галочки — показывает.
+## Hotkeys
 
-## Горячие клавиши
+- **Ctrl+Alt+,** — open/close settings. Works even when the indicator is hidden.
+- **Ctrl+Alt+H** — show/hide the indicator on the page.
 
-- **Ctrl+Alt+,** — открыть/закрыть настройки. Работает, даже если индикатор скрыт.
-- **Ctrl+Alt+H** — показать/скрыть индикатор на странице.
+A hint about these shortcuts is shown on the settings page itself, right below the
+"Show indicator on the page" checkbox.
 
-Подсказка про эти сочетания добавлена прямо на страницу настроек, под чекбоксом
-«Показывать индикатор на странице».
+## Collapsed reasoning chains
 
-## Свёрнутые цепочки рассуждений
+"Thought for N seconds" blocks are **collapsed** by default — both when a chat is opened
+and for new responses. Collapsing is done with a native click on the DeepSeek header, so
+the behavior and animation are the stock ones.
 
-Блоки «Думал N секунд» по умолчанию **свёрнуты** — и при открытии чата, и у новых
-ответов. Сворачивание делается нативным кликом по заголовку DeepSeek, поэтому
-поведение и анимация штатные.
+- Click the header to expand.
+- Click again to collapse.
+- If the user expanded a block manually, the background auto-collapse leaves it alone.
 
-- Клик по заголовку — раскрыть.
-- Повторный клик — свернуть.
-- Если пользователь раскрыл блок вручную, фоновый автосворот его больше не трогает.
+About export: if the "Include reasoning and neighboring extensions' injections in export"
+option is enabled in the settings, reasoning ends up in the file via network interception —
+even when the blocks are collapsed. If the option is disabled, reasoning is intentionally
+left out of the export; that is a deliberate extension setting, not a consequence of
+collapsing.
 
-Про экспорт: если в настройках включена опция «Включать reasoning и инъекции соседних
-расширений в экспорт», reasoning попадает в файл из сетевого перехвата — даже когда
-блоки свёрнуты. Если опция выключена, reasoning намеренно не попадает в экспорт; это
-штатная настройка расширения, а не следствие свёртывания.
+Limitation: when collapsing, DeepSeek removes the reasoning text from the DOM. The
+DOM-only fallback therefore may not see the reasoning without the network; the primary
+network path preserves it.
 
-Ограничение: при сворачивании DeepSeek убирает текст рассуждения из DOM. Поэтому
-DOM-фолбэк без сети может не увидеть reasoning; основной сетевой путь его сохраняет.
+## What is saved
 
-## Что сохраняется
+Settings are stored in the WebView2 profile (localStorage) and survive an app restart.
+Verified: `showWidget=false` persists after closing and relaunching the app.
 
-Настройки хранятся в профиле WebView2 (localStorage) и переживают перезапуск приложения.
-Проверено: `showWidget=false` остаётся после закрытия и повторного запуска.
+The API key (BYOK) is stored in `sessionStorage` and is cleared when the app closes — this
+is closer to the behavior of `chrome.storage.session` in Chrome.
 
-API-ключ (BYOK) хранится в `sessionStorage` и очищается при закрытии приложения —
-это ближе к поведению `chrome.storage.session` в Chrome.
+## Embedded panel limitations
 
-## Ограничения встроенной панели
+- The settings page is a `srcdoc` iframe with an inline version of `options.html` +
+  `options.css` + `options.js` + `polyfill.js`. The external "Privacy Policy" and "Help"
+  links open externally (in the default browser).
+- Export and diagnostics use `chrome.tabs.sendMessage`; in Pake they work through the
+  polyfill and the `chrome.runtime.onMessage` handler in `content.js`.
 
-- Страница настроек — это `srcdoc`-iframe с инлайн-версией `options.html` + `options.css` +
-  `options.js` + `polyfill.js`. Внешние ссылки «Политика» и «Помощь» открываются
-  как внешние (в браузере по умолчанию).
-- Экспорт и диагностика используют `chrome.tabs.sendMessage`; в Pake они работают через
-  polyfill и обработчик `chrome.runtime.onMessage` в `content.js`.
+## Updating the extension from `ai-context-monitor-clean`
 
-## Обновление расширения из `ai-context-monitor-clean`
+`ai-context-monitor/` is not a place for manual edits: it is a copy of the built `dist`
+from the source repository. The full update cycle:
 
-`ai-context-monitor/` — не место для ручных правок: это копия собранного `dist` из
-репозитория-источника. Полный цикл обновления:
-
-1. Собрать расширение в источнике:
+1. Build the extension in the source repo:
 
    ```powershell
    cd C:\Users\oleg\Desktop\Prompts\ai-context-monitor-clean
    node build.mjs
    ```
 
-2. Скопировать **всё** содержимое `dist` в `ai-context-monitor` (с заменой):
+2. Copy **everything** from `dist` into `ai-context-monitor` (overwriting):
 
    ```powershell
    $src = 'C:\Users\oleg\Desktop\Prompts\ai-context-monitor-clean\dist'
@@ -97,7 +99,7 @@ API-ключ (BYOK) хранится в `sessionStorage` и очищается �
    Copy-Item -Path (Join-Path $src '*') -Destination $dst -Recurse -Force
    ```
 
-3. Перейдите в папку приложения и проверьте версию, затем синхронизируйте `polyfill.js`:
+3. Change to the app folder, check the version, then synchronize `polyfill.js`:
 
    ```powershell
    cd C:\Users\oleg\Desktop\~AI~\ai-desktop-app
@@ -105,17 +107,17 @@ API-ключ (BYOK) хранится в `sessionStorage` и очищается �
    Select-String -Path .\ai-context-monitor\polyfill.js -Pattern "version: '"
    ```
 
-   Версия в `manifest.json` должна совпадать с `package.json` источника, а версия в
-   `chrome.runtime.getManifest()` внутри `polyfill.js` — с `manifest.json`. Файла
-   `polyfill.js` в `dist` нет, поэтому копирование его не обновляет: правьте вручную.
+   The version in `manifest.json` must match the source `package.json`, and the version in
+   `chrome.runtime.getManifest()` inside `polyfill.js` must match `manifest.json`.
+   `polyfill.js` is not part of `dist`, so copying does not update it: edit it by hand.
 
-4. Проверить список MAIN-world модулей. Если в `dist` появился новый
-   `core/deepseek-*.js`, он должен быть добавлен в `MAIN_WORLD_FILES` в
-   `build-pake-bundle.js` до `core/deepseek-intercept.js`. Сборщик теперь падает с
-   ошибкой, если какой-то `core/deepseek-*.js` не включён в список. Именно пропуск
-   `core/deepseek-files.js` однажды лишил экспорт текстов вложений.
+4. Check the list of MAIN-world modules. If a new `core/deepseek-*.js` appeared in `dist`,
+   it must be added to `MAIN_WORLD_FILES` in `build-pake-bundle.js` before
+   `core/deepseek-intercept.js`. The builder now fails with an error if any
+   `core/deepseek-*.js` is not on the list. Missing `core/deepseek-files.js` once broke
+   attachment-text export.
 
-5. Собрать и проверить бандл:
+5. Build and verify the bundle:
 
    ```powershell
    cd C:\Users\oleg\Desktop\~AI~\ai-desktop-app
@@ -123,16 +125,16 @@ API-ключ (BYOK) хранится в `sessionStorage` и очищается �
    node --check .\ai-context-monitor\pake-bundle.deepseek.js
    ```
 
-6. Собрать MSI (см. «Пересборка» и «Сборка MSI со своей иконкой»), затем **удалить
-   старую версию приложения**, установить новый MSI и запустить заново. Старый процесс
-   может держать прежний бандл.
+6. Build the MSI (see "Rebuild" and "Building an MSI with a custom icon"), then
+   **uninstall the old app version**, install the new MSI and launch it again. An old
+   process can keep the previous bundle alive.
 
-Быстрая проверка после запуска (CDP/DevTools): `chrome.runtime.getManifest().version`
-совпадает с `manifest.json`, в экспорте присутствуют вложения с текстом.
+Quick post-launch check (CDP/DevTools): `chrome.runtime.getManifest().version` matches
+`manifest.json`, and the export contains attachments with their text.
 
-## Пересборка
+## Rebuild
 
-Из папки проекта:
+From the project folder:
 
 ```powershell
 node .\build-pake-bundle.js
@@ -140,47 +142,47 @@ node .\build-pake-bundle.js
 pake https://chat.deepseek.com --name "DeepSeek-Monitor" --identifier com.deepseek.monitor --icon .\icons\app.png --inject .\ai-context-monitor\pake-bundle.deepseek.js
 ```
 
-Готовый установщик: `DeepSeek-Monitor.msi` в корне проекта.
+Ready installer: `DeepSeek-Monitor.msi` in the project root.
 
-## Сборка MSI со своей иконкой
+## Building an MSI with a custom icon
 
-Иконка задаётся флагом `--icon`. На Windows Pake сам конвертирует PNG/JPG/WebP/SVG
-в многоразмерный `.ico` (кадры 16–256 px), поэтому вручную конвертировать не нужно.
+The icon is set with the `--icon` flag. On Windows, Pake converts PNG/JPG/WebP/SVG into a
+multi-size `.ico` itself (16–256 px frames), so no manual conversion is needed.
 
-### 1. Положите иконку в папку `icons`
+### 1. Put the icon into the `icons` folder
 
 ```
 C:\Users\oleg\Desktop\ai-desktop-app\icons\app.png
 ```
 
-Требования к PNG:
+PNG requirements:
 
-- квадрат, лучше **1024×1024** (минимум 256×256);
-- прозрачный фон;
-- без скруглений и теней по краям — их добавляет Windows/установщик.
+- square, preferably **1024×1024** (256×256 minimum);
+- transparent background;
+- no rounded corners or edge shadows — Windows/the installer adds them.
 
-Можно положить и готовый `.ico` — он будет использован как есть (желательно
-с кадром 256×256 внутри).
+You can also drop in a ready-made `.ico` — it will be used as is (preferably with a
+256×256 frame inside).
 
-### 2. Соберите бандл расширения
+### 2. Build the extension bundle
 
-Если меняли `ai-context-monitor`:
+If you changed `ai-context-monitor`:
 
 ```powershell
 cd C:\Users\oleg\Desktop\ai-desktop-app
 node .\build-pake-bundle.js
 ```
 
-### 3. Соберите MSI с иконкой
+### 3. Build the MSI with the icon
 
-Одной строкой:
+As a single line:
 
 ```powershell
 pake https://chat.deepseek.com --name "DeepSeek-Monitor" --identifier com.deepseek.monitor --icon .\icons\app.png --inject .\ai-context-monitor\pake-bundle.deepseek.js
 ```
 
-Или с переносами (в PowerShell обратная кавычка должна быть **последним**
-символом строки, без пробелов после неё):
+Or with line breaks (in PowerShell the backtick must be the **last** character of the line,
+with no spaces after it):
 
 ```powershell
 pake https://chat.deepseek.com `
@@ -190,50 +192,50 @@ pake https://chat.deepseek.com `
   --inject .\ai-context-monitor\pake-bundle.deepseek.js
 ```
 
-### 4. Результат
+### 4. Result
 
-`DeepSeek-Monitor.msi` в корне проекта. Иконка попадёт в exe, ярлык, окно
-приложения и установщик.
+`DeepSeek-Monitor.msi` in the project root. The icon is applied to the exe, the shortcut,
+the app window and the installer.
 
-### Если иконка не применилась
+### If the icon did not apply
 
-- Проверьте, что файл существует. При неверном пути Pake пишет
-  `Custom icon path may be invalid` и собирает с иконкой по умолчанию.
-- Относительный путь считается от текущей папки, поэтому запускайте команду
-  из корня проекта. Можно указать абсолютный путь:
+- Make sure the file exists. With a wrong path, Pake prints
+  `Custom icon path may be invalid` and builds with the default icon.
+- A relative path is resolved from the current folder, so run the command from the
+  project root. You can also pass an absolute path:
   `--icon "C:\Users\oleg\Desktop\ai-desktop-app\icons\app.png"`.
-- Если после переустановки видна старая иконка — Windows кэширует её по
-  `identifier`. Удалите старую версию, при необходимости смените
-  `--app-version` или `--identifier` и пересоберите.
-- Файл `.msi` в Проводнике может показывать стандартную иконку установщика —
-  это нормально. Кастомная иконка будет у установленного приложения и ярлыка.
+- If the old icon is still visible after reinstalling, Windows caches it by `identifier`.
+  Uninstall the old version, change `--app-version` or `--identifier` if needed, and
+  rebuild.
+- The `.msi` file in Explorer may show the standard installer icon — that is normal. The
+  custom icon will be on the installed app and its shortcut.
 
-### Иконка в системном трее (опционально)
+### System tray icon (optional)
 
 ```powershell
 pake https://chat.deepseek.com --name "DeepSeek-Monitor" --identifier com.deepseek.monitor --icon .\icons\app.png --show-system-tray --system-tray-icon .\icons\tray.ico --inject .\ai-context-monitor\pake-bundle.deepseek.js
 ```
 
-Для трея подходят `.ico` и `.png`. Если `--system-tray-icon` не указан,
-используется иконка приложения.
+Both `.ico` and `.png` work for the tray. If `--system-tray-icon` is not specified, the app
+icon is used.
 
-### Другие провайдеры
+### Other providers
 
-Схема та же: для каждого сайта свой `--name`, `--identifier`, `--icon` и свой
-собранный бандл `--inject` (например, `pake-bundle.chatgpt.js`). Иконки можно
-держать в той же папке: `icons\chatgpt.png`, `icons\gemini.png` и т.д.
+The pattern is the same: for each site its own `--name`, `--identifier`, `--icon`, and its
+own built `--inject` bundle (for example `pake-bundle.chatgpt.js`). Icons can live in the
+same folder: `icons\chatgpt.png`, `icons\gemini.png`, and so on.
 
-Для отладки можно добавить `--debug` и запустить exe с CDP:
+For debugging, you can add `--debug` and launch the exe with CDP:
 
 ```powershell
 $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS='--remote-debugging-port=9222 --remote-allow-origins=*'
 ```
 
-## Файлы
+## Files
 
-- `build-pake-bundle.js` — сборка бандла, инлайн страницы настроек и кнопки в панели бейджа.
-- `ai-context-monitor/pake-bundle.deepseek.js` — готовый инжектируемый бандл.
-- `ai-context-monitor/polyfill.js` — шим `chrome.*` для WebView2 (storage, tabs, session).
-- `ai-context-monitor/options/options.html`, `options.css` — страница настроек.
-- `ai-context-monitor/options.js` — логика настроек (минифицирована).
-- `icons\` — сюда кладётся иконка приложения для `--icon` (например, `icons\app.png`).
+- `build-pake-bundle.js` — builds the bundle, inlines the settings page and the buttons in the badge panel.
+- `ai-context-monitor/pake-bundle.deepseek.js` — the ready-to-inject bundle.
+- `ai-context-monitor/polyfill.js` — the `chrome.*` shim for WebView2 (storage, tabs, session).
+- `ai-context-monitor/options/options.html`, `options.css` — the settings page.
+- `ai-context-monitor/options.js` — settings logic (minified).
+- `icons\` — put the app icon for `--icon` here (e.g. `icons\app.png`).
