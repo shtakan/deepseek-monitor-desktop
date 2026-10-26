@@ -288,9 +288,20 @@
           if (md && md.render) return md.render(text);
           return escapeText(text);
         }
+        function setPrintHtml(el, html) {
+          var doc = new DOMParser().parseFromString("<body>" + html + "</body>", "text/html");
+          var frag = document.createDocumentFragment();
+          var node = doc.body.firstChild;
+          while (node) {
+            var next = node.nextSibling;
+            frag.appendChild(document.importNode(node, true));
+            node = next;
+          }
+          el.replaceChildren(frag);
+        }
         function showEmpty() {
           printDiag("print-pdf-empty", { reason: "history-not-found" });
-          document.getElementById("print-content").innerHTML = "";
+          document.getElementById("print-content").replaceChildren();
           document.getElementById("empty-state").style.display = "block";
         }
         function showContent(history) {
@@ -312,7 +323,7 @@
             diagBaseMsgs = 0;
           }
           document.getElementById("empty-state").style.display = "none";
-          document.getElementById("print-content").innerHTML = render(history);
+          setPrintHtml(document.getElementById("print-content"), render(history));
         }
         function waitForRenderer(cb) {
           if (typeof window.MarkdownRenderer !== "undefined" && window.MarkdownRenderer) {

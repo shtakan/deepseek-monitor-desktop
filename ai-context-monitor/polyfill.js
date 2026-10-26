@@ -1,4 +1,4 @@
-// Заглушки для логгера и отладочных функций расширения
+﻿// Р—Р°РіР»СѓС€РєРё РґР»СЏ Р»РѕРіРіРµСЂР° Рё РѕС‚Р»Р°РґРѕС‡РЅС‹С… С„СѓРЅРєС†РёР№ СЂР°СЃС€РёСЂРµРЅРёСЏ
 if (typeof window.debugLog === 'undefined') {
   window.debugLog = function(...args) {
     console.log('[AI CM DEBUG]', ...args);
@@ -8,7 +8,7 @@ if (typeof window.__aiCmSetDebugLogs === 'undefined') {
   window.__aiCmSetDebugLogs = function() {};
 }
 
-// Эмулятор Chrome API для Pake / Tauri
+// Р­РјСѓР»СЏС‚РѕСЂ Chrome API РґР»СЏ Pake / Tauri
 (function() {
   window.chrome = window.chrome || {};
 
@@ -59,7 +59,7 @@ if (typeof window.__aiCmSetDebugLogs === 'undefined') {
   window.chrome.runtime.onStartup = createEventStub();
   window.chrome.runtime.lastError = null;
 
-  // Отправка сообщений между фоновым сервисом и страницей
+  // РћС‚РїСЂР°РІРєР° СЃРѕРѕР±С‰РµРЅРёР№ РјРµР¶РґСѓ С„РѕРЅРѕРІС‹Рј СЃРµСЂРІРёСЃРѕРј Рё СЃС‚СЂР°РЅРёС†РµР№
   window.chrome.runtime.sendMessage = function(message, callback) {
     return new Promise(function(resolve) {
       var responded = false;
@@ -78,7 +78,7 @@ if (typeof window.__aiCmSetDebugLogs === 'undefined') {
         try {
           listener(message, sender, sendResponse);
         } catch (e) {
-          console.error('[AI CM Polyfill] Ошибка обработчика:', e);
+          console.error('[AI CM Polyfill] РћС€РёР±РєР° РѕР±СЂР°Р±РѕС‚С‡РёРєР°:', e);
         }
       });
 
@@ -98,8 +98,8 @@ if (typeof window.__aiCmSetDebugLogs === 'undefined') {
   window.chrome.storage = window.chrome.storage || {};
   window.chrome.storage.onChanged = onChangedStub;
 
-  // Настройки открываются в iframe поверх страницы (аналог иконки расширения).
-  // Запись из iframe должна сразу доходить до content.js в родительском окне.
+  // РќР°СЃС‚СЂРѕР№РєРё РѕС‚РєСЂС‹РІР°СЋС‚СЃСЏ РІ iframe РїРѕРІРµСЂС… СЃС‚СЂР°РЅРёС†С‹ (Р°РЅР°Р»РѕРі РёРєРѕРЅРєРё СЂР°СЃС€РёСЂРµРЅРёСЏ).
+  // Р—Р°РїРёСЃСЊ РёР· iframe РґРѕР»Р¶РЅР° СЃСЂР°Р·Сѓ РґРѕС…РѕРґРёС‚СЊ РґРѕ content.js РІ СЂРѕРґРёС‚РµР»СЊСЃРєРѕРј РѕРєРЅРµ.
   var IS_OPTIONS_FRAME = (typeof window !== 'undefined') && window.__AI_CM_OPTIONS_FRAME__ === true;
 
   function notifyStorage(changes, area) {
@@ -125,8 +125,8 @@ if (typeof window.__aiCmSetDebugLogs === 'undefined') {
           showWidget: true,
           showBadge: true,
           enabled: true
-          // ai_cm_safe_pct_<site> НЕ задаём: как и в Chrome, порог по умолчанию
-          // не задан (100% окна), пока пользователь сам не выставит его в панели.
+          // ai_cm_safe_pct_<site> РќР• Р·Р°РґР°С‘Рј: РєР°Рє Рё РІ Chrome, РїРѕСЂРѕРі РїРѕ СѓРјРѕР»С‡Р°РЅРёСЋ
+          // РЅРµ Р·Р°РґР°РЅ (100% РѕРєРЅР°), РїРѕРєР° РїРѕР»СЊР·РѕРІР°С‚РµР»СЊ СЃР°Рј РЅРµ РІС‹СЃС‚Р°РІРёС‚ РµРіРѕ РІ РїР°РЅРµР»Рё.
         };
 
         var keysArr = Array.isArray(keys) ? keys : (typeof keys === 'object' && keys !== null ? Object.keys(keys) : [keys]);
@@ -191,7 +191,7 @@ if (typeof window.__aiCmSetDebugLogs === 'undefined') {
     };
   }
 
-  // session: как в Chrome — отдельное хранилище (BYOK-ключи не должны попадать в local)
+  // session: РєР°Рє РІ Chrome вЂ” РѕС‚РґРµР»СЊРЅРѕРµ С…СЂР°РЅРёР»РёС‰Рµ (BYOK-РєР»СЋС‡Рё РЅРµ РґРѕР»Р¶РЅС‹ РїРѕРїР°РґР°С‚СЊ РІ local)
   if (!window.chrome.storage.session) {
     window.chrome.storage.session = {
       get: function(keys, callback) {
@@ -254,7 +254,7 @@ if (typeof window.__aiCmSetDebugLogs === 'undefined') {
   window.chrome.tabs.query = function(q, cb) {
     var href = (typeof location !== 'undefined' ? location.href : '');
     var title = (typeof document !== 'undefined' ? document.title : '');
-    // Настройки живут в srcdoc-iframe: активная "вкладка" — это родительская страница.
+    // РќР°СЃС‚СЂРѕР№РєРё Р¶РёРІСѓС‚ РІ srcdoc-iframe: Р°РєС‚РёРІРЅР°СЏ "РІРєР»Р°РґРєР°" вЂ” СЌС‚Рѕ СЂРѕРґРёС‚РµР»СЊСЃРєР°СЏ СЃС‚СЂР°РЅРёС†Р°.
     if (IS_OPTIONS_FRAME) {
       try { if (parent && parent.location) href = parent.location.href; } catch (e) {}
       try { if (parent && parent.document) title = parent.document.title; } catch (e) {}
