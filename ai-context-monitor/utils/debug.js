@@ -1,0 +1,307 @@
+// utils/debug.js — единый флаг отладки и обёртка-логгер для AI Context Monitor
+// v31: DEBUG управляется чекбоксом «Подробные логи» (ключ aiCmDebugLogs в chrome.storage.local).
+// По умолчанию ВЫКЛ: скрываются [gemini-autoscroll], [gemini-base-diag], token-diag-scan,
+// content-trace EMIT/DRAW и прочие v4x-логи. Всегда остаются (console.log напрямую):
+// версия расширения, инициализация адаптеров, «база полной истории», логи экспорта.
+// console.warn и console.error видны ВСЕГДА, независимо от флага.
+var DEBUG = false;
+
+// v31: сеттер флага (вызывается из content.js при загрузке ключа и по onChanged;
+// в MAIN-мире перехватчики получают значение через событие 'ai-cm-debug-logs').
+function __aiCmSetDebugLogs(v) {
+  DEBUG = !!v;
+  try { if (typeof window !== 'undefined') window.__aiCmDebugLogs = !!v; } catch (e) { }
+}
+
+// Ring-буфер логов (≤200 строк) для дампа диагностики. console.* НЕ затрагивается.
+// Каждая строка, проходящая через debugLog, дополнительно пишется в ring текущего мира
+// (у перехватчика MAIN-мир и у content.js ISOLATED-мир — отдельные буферы).
+var __aiCmLogRing = [];
+var __aiCmLogRingMax = 200;
+
+function __aiCmStringifyArg(a) {
+  if (typeof a === 'string') return a;
+  try {
+    var s = JSON.stringify(a);
+    if (s === undefined) return String(a);
+    if (s.length > 500) s = s.slice(0, 500) + '…';
+    return s;
+  } catch (e) { return String(a); }
+}
+
+function __aiCmPushLogRing(line) {
+  try {
+    __aiCmLogRing.push(line);
+    if (__aiCmLogRing.length > __aiCmLogRingMax) __aiCmLogRing.shift();
+  } catch (e) { }
+}
+
+// Копия ring-буфера текущего мира (для дампа диагностики).
+function __aiCmGetLogRing() {
+  try { return __aiCmLogRing.slice(); } catch (e) { return []; }
+}
+
+/**
+ * Обёртка над console-методами. Заменяет прямой console.log во всём проекте.
+ * @param {string} level — 'log', 'info', 'debug', 'warn', 'error'
+ *
+ * Принимает переменное число аргументов (как console[level]): они уходят дальше
+ * без изменений. Отдельным @param их не описать — функция читает `arguments`.
+ *
+ * Правила:
+ *   - 'warn' и 'error' → выводятся ВСЕГДА (сигнал реальной проблемы, не спам)
+ *   - 'log' / 'info' / 'debug' → выводятся ТОЛЬКО при DEBUG === true
+ */
+function debugLog(level) {
+  var args = Array.prototype.slice.call(arguments, 1);
+  try {
+    var line = args.map(__aiCmStringifyArg).join(' ');
+    __aiCmPushLogRing(line);
+  } catch (e) { }
+  if (level === 'error' || level === 'warn') {
+    (console[level] || console.log).apply(console, args);
+    return;
+  }
+  // v31: динамическая проверка — флаг может меняться в рантайме из любого мира
+  var enabled = DEBUG;
+  try { if (typeof window !== 'undefined' && window.__aiCmDebugLogs === true) enabled = true; } catch (e) { }
+  if (enabled) {
+    (console[level] || console.log).apply(console, args);
+  }
+}
+
+/**
+ * ЕДИНАЯ точка молчаливого catch → диагностируемого (Step E.2a, П.5/П.6).
+ * Тонкая обёртка над debugLog('error', …): строка идёт в ring ≤200 И в console.error —
+ * ВСЕГДА, как любой 'error' (utils/debug.js:61-64). Поток управления НЕ меняется:
+ * возврат undefined, исключение не пробрасывается, catch остаётся заглушкой.
+ * Дедуп/счётчики/троттлинг здесь НЕ живут (отложено на E.2c).
+ * typeof-гард обязателен: срез-песочницы тестов грузят исходники БЕЗ utils/debug.js,
+ * и прямой вызов debugLog там бросил бы ReferenceError — т.е. убил бы исходный catch.
+ * @param {any} error пойманное исключение
+ * @param {string} tag контекст точки вида '<domain>:<function>' ('deepseek:parseSSELines')
+ * @returns {void}
+ */
+function swallow(error, tag) {
+  try {
+    if (typeof debugLog !== 'function') return;   // песочница без utils/debug.js: тихо и без броска
+    debugLog('error', '[swallow][' + (tag || 'unlabeled') + ']', error);
+  } catch (eSwallow) { /* сам логгер не должен бросать: swallow безопасен всегда */ }
+}
+
+// =============================================================================
+// O-27/O-32 (ДИАГНОСТИКА, только измерение): единый гейт инструментирования и печать
+// строк «точки скачивания / точки записи базы / точки сброса состояния».
+//
+// Гейт — aiCmDebug: sessionStorage 'aiCmDebug' === '1' (тот же флаг, что у СЕКЦИИ 13
+// DeepSeek и санации экспорта) ИЛИ чекбокс «Подробные логи» (chrome.storage.local
+// aiCmDebugLogs → window.__aiCmDebugLogs). Гейт выключен → НИ ОДНОЙ новой строки.
+//
+// Контракт инструментирования (поведение не меняется):
+//   - функции только ЧИТАЮТ уже посчитанные значения (content/fileName/url/threadId);
+//   - ни одна из них не пишет в базу/storage/DOM и не трогает байты экспорта;
+//   - вызовы в чужом коде защищены typeof-гардом, поэтому срез-песочницы тестов без
+//     этих хелперов видят прежнее поведение 1:1.
+// =============================================================================
+function aiCmDiagOn() {
+  try {
+    if (typeof sessionStorage !== 'undefined' && sessionStorage &&
+      sessionStorage.getItem('aiCmDebug') === '1') return true;
+  } catch (eSess) { }
+  try {
+    if (typeof window !== 'undefined' && window && window.__aiCmDebugLogs === true) return true;
+  } catch (eWin) { }
+  return false;
+}
+
+// Тип документа для логов сброса состояния: captcha / chat / search / unknown.
+function aiCmDiagDocKind() {
+  var href = '';
+  var host = '';
+  try { href = String((typeof location !== 'undefined' && location && location.href) || ''); } catch (eHref) { }
+  try { host = String((typeof location !== 'undefined' && location && location.hostname) || ''); } catch (eHost) { }
+  var isGoogle = (host === 'google.com' || host === 'www.google.com');
+  try {
+    if (href.indexOf('/sorry/') !== -1) return 'captcha';
+    if (isGoogle && (document.querySelector('#captcha-form') ||
+      document.querySelector('form[action*="sorry"]') ||
+      document.querySelector('iframe[src*="recaptcha"]'))) return 'captcha';
+  } catch (eCap) { }
+  try {
+    var tid = '';
+    var el = document.querySelector('[data-session-thread-id]');
+    if (el) tid = String(el.getAttribute('data-session-thread-id') || '').trim();
+    if (tid) return 'chat';
+    if (document.querySelector('[data-scope-id="turn"]') ||
+      document.querySelector('[data-subtree="aimfl"]')) return 'chat';
+  } catch (eChat) { }
+  if (isGoogle) return 'search';
+  return 'chat';
+}
+
+// Первые n символов (по умолчанию 100) базы/тела ОДНОЙ строкой; пустое — явно.
+function aiCmDiagHead(v, n) {
+  try {
+    var lim = (typeof n === 'number' && n > 0) ? n : 100;
+    if (v === undefined || v === null) return '(пусто)';
+    var s = String(v);
+    if (!s) return '(пусто)';
+    var flat = s.replace(/\s+/g, ' ').trim();
+    if (!flat) return '(пусто/пробелы)';
+    return (flat.length > lim) ? (flat.slice(0, lim) + '…') : flat;
+  } catch (eHead) { return '(ошибка)'; }
+}
+
+// Источник вызова (dev-режим/подробные логи): верхние кадры стека одной строкой.
+function aiCmDiagStack(skip) {
+  try {
+    var st = String((new Error()).stack || '');
+    if (!st) return '';
+    var lines = st.split('\n');
+    var out = [];
+    var from = 1 + ((typeof skip === 'number' && skip >= 0) ? skip : 0);
+    for (var i = from; i < lines.length && out.length < 4; i++) {
+      var s = String(lines[i] || '').replace(/\s+/g, ' ').trim();
+      if (!s || s.indexOf('aiCmDiag') !== -1) continue;
+      out.push(s);
+    }
+    return out.join(' <- ');
+  } catch (eStack) { return ''; }
+}
+
+// Печать строки диагностики: tag + key=value… Только под гейтом aiCmDebug.
+function aiCmDiagLine(tag, fields) {
+  if (!aiCmDiagOn()) return false;
+  try {
+    var parts = [];
+    var f = fields || {};
+    for (var k in f) {
+      if (!Object.prototype.hasOwnProperty.call(f, k)) continue;
+      var v = f[k];
+      parts.push(k + '=' + ((v === undefined || v === null) ? '(нет)' : String(v)));
+    }
+    console.log('[AI CM][diag] ' + tag + ' ' + parts.join(' '));
+  } catch (eLine) { }
+  return true;
+}
+
+// ЕДИНАЯ точка лога скачивания: триггер, имя файла (пустое — словом «пустое»),
+// первые 100 символов базы, длина, URL документа, threadId, источник вызова.
+function aiCmDiagDownload(trigger, content, fileName, extra) {
+  if (!aiCmDiagOn()) return false;
+  var e = extra || {};
+  var url = '';
+  try { url = String((typeof location !== 'undefined' && location && location.href) || ''); } catch (eUrl) { }
+  return aiCmDiagLine('download', {
+    trigger: trigger || '(нет)',
+    file: (fileName === undefined || fileName === null || String(fileName) === '') ? 'пустое' : String(fileName),
+    bytes100: aiCmDiagHead(content, 100),
+    len: (content === undefined || content === null) ? 0 : String(content).length,
+    mime: e.mime,
+    url: url,
+    threadId: e.threadId,
+    site: e.site,
+    reason: e.reason,
+    src: aiCmDiagStack(1)
+  });
+}
+
+// O-27 (защитный фикс): ЕДИНСТВЕННАЯ точка скачивания ОТКАЗАЛА в выдаче файла.
+// reason=xssi-prefix — первые байты контента начинаются XSSI-префиксом Google (`)]}'`,
+// живой артефакт `f.txt`); reason=empty-name — имя файла пустое/не задано (живой путь
+// автоэкспорта на captcha-странице). Строка — только под гейтом aiCmDebug; reason идёт
+// ПЕРВЫМ полем, поэтому в логе всегда читается `download-blocked reason=<причина>`.
+function aiCmDiagDownloadBlocked(trigger, content, fileName, reason, extra) {
+  if (!aiCmDiagOn()) return false;
+  var e = extra || {};
+  var url = '';
+  try { url = String((typeof location !== 'undefined' && location && location.href) || ''); } catch (eUrlB) { }
+  return aiCmDiagLine('download-blocked', {
+    reason: reason || '(нет)',
+    trigger: trigger || '(нет)',
+    file: (fileName === undefined || fileName === null || String(fileName) === '') ? 'пустое' : String(fileName),
+    bytes100: aiCmDiagHead(content, 100),
+    len: (content === undefined || content === null) ? 0 : String(content).length,
+    mime: e.mime,
+    url: url,
+    threadId: e.threadId,
+    site: e.site,
+    src: aiCmDiagStack(1)
+  });
+}
+
+// Step E.2a: window-зеркало хелпера — по прецеденту прочих __aiCm*-хуков файла
+// (window.__aiCmDebugLogs:13) и выносов D.1-D.9 (window.__aiCmDeepseek*). try/catch —
+// потому что window может отсутствовать (unit-песочница, print/options-мир).
+try { if (typeof window !== 'undefined') window.__aiCmSwallow = swallow; } catch (eSwallowExport) { }
+
+// =============================================================================
+// Step E.2c-A: канал B — «мягкие» события (swallowSoft / aiCmDiagWarn).
+//
+// Почему хелперы в ХВОСТЕ файла, а не рядом с swallow (utils/debug.js:85): любая
+// вставка выше сдвинула бы номера строк catch, запинутые построчно в
+// tests/fixtures/catch-whitelist.json (13, 36, 60, 67, 89, 110, 113, 121, 122, 129,
+// 137, 184, 194, 218, 236). Страж tests/catch-hygiene.test.js сверяет дерево с этим
+// whitelist ЗАПИСЬ-В-ЗАПИСЬ, а сам whitelist в шаге E.2c-A не обновляется — значит
+// номера строк всех существующих catch обязаны остаться прежними. Побочный плюс:
+// не сдвигаются и строки 62/69, на которые ссылается allow-list стража
+// tests/no-bare-console-warn.test.js. Для core/background.js действует то же правило.
+// =============================================================================
+
+/**
+ * Мягкий перехват (Step E.2c-A, канал B): ошибка, которую НЕ эскалируем.
+ * Отличие от swallow (utils/debug.js:85): console.error не вызывается НИКОГДА.
+ *   - ring-буфер: строка пишется ВСЕГДА (единственный безусловный канал);
+ *   - консоль: только под гейтом aiCmDiagOn(), через aiCmDiagLine('swallow-soft', …).
+ * Поток управления не меняется: возврат undefined, исключение не пробрасывается.
+ * typeof-гард обязателен — срез-песочницы тестов грузят исходники БЕЗ utils/debug.js,
+ * и прямой вызов хелперов там бросил бы ReferenceError, т.е. убил бы исходный catch.
+ * Дедуп/счётчики/троттлинг здесь НЕ живут (отложено на E.2d).
+ * @param {any} error пойманное исключение
+ * @param {string} tag контекст точки вида '<domain>:<function>' ('deepseek:parseSSELines')
+ * @returns {void}
+ */
+function swallowSoft(error, tag) {
+  var label = tag || 'unlabeled';
+  var msg = '';
+  try { msg = (error && error.message) ? String(error.message) : String(error); } catch (eSoftMsg) { msg = '(нечитаемая ошибка)'; }
+  try {
+    if (typeof __aiCmPushLogRing === 'function') __aiCmPushLogRing('[swallow-soft][' + label + '] ' + msg);
+  } catch (eSoftRing) { return undefined; }
+  try {
+    if (typeof aiCmDiagLine !== 'function') return;   // песочница без utils/debug.js: тихо и без броска
+    aiCmDiagLine('swallow-soft', { tag: label, err: error });
+  } catch (eSoftDiag) { return undefined; }
+}
+
+/**
+ * Warn-уровень канала B (Step E.2c-A): сохраняет уровень warn для отладочной сессии,
+ * но НЕ эскалирует его в chrome://extensions/errors вне гейта — в отличие от
+ * debugLog('warn', …), который печатается всегда (utils/debug.js:61-64).
+ *   - ring-буфер: строка пишется ВСЕГДА;
+ *   - консоль: ровно один console.warn под гейтом aiCmDiagOn(); вне гейта — ничего.
+ * Возврат undefined, исключение не пробрасывается, typeof-гард как у swallowSoft.
+ * @param {string} tag контекст точки
+ * @param {string} message короткое сообщение
+ * @param {any} [detail] необязательная деталь (уходит вторым аргументом console.warn)
+ * @returns {void}
+ */
+function aiCmDiagWarn(tag, message, detail) {
+  var label = tag || 'unlabeled';
+  var text = (message === undefined || message === null) ? '' : String(message);
+  try {
+    var tail = '';
+    if (detail !== undefined) tail = ' ' + ((typeof __aiCmStringifyArg === 'function') ? __aiCmStringifyArg(detail) : String(detail));
+    if (typeof __aiCmPushLogRing === 'function') __aiCmPushLogRing('[ai-cm-warn][' + label + '] ' + text + tail);
+  } catch (eWarnRing) { return undefined; }
+  try {
+    if (typeof aiCmDiagOn !== 'function' || !aiCmDiagOn()) return;
+    console.log('[AI CM][warn][' + label + '] ' + text, detail);
+  } catch (eWarnPrint) { return undefined; }
+}
+
+// Step E.2c-A: window-зеркало swallowSoft — прецедент window.__aiCmSwallow:236.
+// Тело catch НЕ пустое намеренно: новый молчаливый catch сделал бы красным страж
+// tests/catch-hygiene.test.js (его whitelist в этом шаге не обновляется), поэтому сбой
+// экспорта фиксируется в ring — правило канала B: не бросаем и не эскалируем.
+try { if (typeof window !== 'undefined') window.__aiCmSwallowSoft = swallowSoft; } catch (eSoftExport) { __aiCmPushLogRing('[swallow-soft-export] ' + eSoftExport); }

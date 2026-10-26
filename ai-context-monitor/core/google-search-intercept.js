@@ -1,0 +1,1792 @@
+// core/google-search-intercept.js
+// Перехватчик Google Search AI (udm=50) в MAIN world.
+// Регистрируется через background.js.
+//
+// v6: поддержка folwr (полная история) + folif (realtime), модель из сети,
+//     фолбэк вопросов из TgQPHd, полные ответы через compareDocumentPosition.
+// v7: единый источник правды — window.parseGoogleFolwrOpen. detail.text и
+//     detail.messages строятся из одних данных (parser.messages), поэтому таблицы
+//     и подзаголовки попадают и в расчёт, и в экспорт одинаково.
+// v8: кэш полных снимков по threadId (Map ≤ 10 записей) + опрос DOM раз в 1000мс.
+//     При SPA-возврате на уже посещённый тред сайт отдаёт его из памяти без сетевого
+//     folwr — перехватчик эмитит кэшированный снимок по threadId, а content.js
+//     по смене threadId сначала сбрасывает состояние виджета.
+// v1.27 (O-31): сетевая база СЕГМЕНТИРОВАНА по разговору (threadId). Смена треда
+//     сбрасывает накопитель, ответ чужого треда не дописывается в активную базу
+//     (см. activateThread/absorbForeignSnapshot).
+
+(function () {
+  if (window.__aiCmGoogleSearchInterceptInstalled) return;
+  window.__aiCmGoogleSearchInterceptInstalled = true;
+
+  // v31: флаг «Подробные логи» транслируется из content.js (ISOLATED) через CustomEvent
+  try { window.addEventListener('ai-cm-debug-logs', function (ev) { __aiCmSetDebugLogs(!!(ev && ev.detail)); }); } catch (e) {}
+
+  var MAX_CACHE_ENTRIES = 10;
+
+  // ---- хранилище ----
+  var seenKeys = {};
+  var detectedModelSlug = null;
+  var lastFullTurns = [];       // turns последнего активного снимка
+  var lastFullMessages = [];    // messages последнего активного снимка
+  var lastFullSnapshot = null;  // detail последнего активного снимка
+  var currentThreadId = '';     // threadId активного треда (по DOM)
+  var emittedThreadId = '';     // threadId, на котором зафиксирована база
+  var baseThreadId = '';        // v1.27 (O-31): разговор, которому принадлежит активная база
+  var lastFolwrOpenUrl = '';    // полный URL последнего GET /async/folwr (шаблон для активной загрузки)
+  var activeFolwrBusy = false;  // защита от параллельной активной загрузки
+  // v1.5.2: сериализация активных folwr и дедуп пассивных по ключу threadId|authuser.
+  var activeFolwrInFlight = {}; // ключ -> true, пока активная загрузка этого threadId|authuser в полёте
+  var lastPassiveFolwrTs = {};  // ключ -> ts последнего пассивного folwr (для защиты от гонки <3с)
+  var lastFolwrSig = '';        // сигнатура последнего напечатанного folwr-open (антиспам)
+
+  // v1.24: circuit-breaker антилимита Google (429 + редирект /sorry/index).
+  // До sorryCooldownUntil собственные запросы расширения (досбор по курсору,
+  // рефетч folwr) отключены; пассивный перехват и EMIT/DRAW работают как раньше.
+  var SORRY_COOLDOWN_MS = 10 * 60 * 1000;
+  var FOLWR_PAGE_DELAY_MS = 400; // вежливость досбора: пауза между страничными запросами
+  var FOLWR_MAX_PAGES = 12;      // не более 12 страниц за одно открытие
+  // Петля GSA (наблюдения владельца, вердикт High): капы FOLWR_MAX_PAGES/FOLWR_PROBE_MAX_STEPS
+  // ограничивали ОДИН прогон, а не тред и не время, а тело folwr на 1.36–1.97 МБ приходило
+  // каденсом 400 мс = FOLWR_PAGE_DELAY_MS. Два порога ниже — границы прогонов НА ТРЕД:
+  //   FOLWR_RUN_MIN_COOLDOWN_MS — «один прогон на тред за окно» (безусловный барьер);
+  //   FOLWR_NO_GAIN_COOLDOWN_MS — тот же тред ПОСЛЕ прогона без прироста базы: cooldown
+  //   держится дольше, снимается досрочно только РЕАЛЬНЫМ приростом (markFolwrRunGain).
+  var FOLWR_RUN_MIN_COOLDOWN_MS = 2000;
+  var FOLWR_NO_GAIN_COOLDOWN_MS = 30000;
+  var sorryCooldownUntil = 0;    // timestamp, до которого свои запросы запрещены
+
+  function ownRequestsAllowed() {
+    return Date.now() > sorryCooldownUntil;
+  }
+
+  function triggerSorryCooldown() {
+    var wasActive = Date.now() <= sorryCooldownUntil;
+    sorryCooldownUntil = Date.now() + SORRY_COOLDOWN_MS;
+    if (!wasActive) {
+      console.log('[ai-cm-google-search] 429/sorry → cooldown 10min: свои запросы отключены');
+    }
+  }
+
+  // Детект антилимита на любом перехваченном ответе: status 429 или итоговый URL /sorry/.
+  function isSorryResponse(status, finalUrl) {
+    try {
+      if (status === 429) return true;
+      return String(finalUrl || '').indexOf('/sorry/') !== -1;
+    } catch (e) { return false; }
+  }
+
+  // кэш полных снимков по threadId (порядок вставки сохраняем для вытеснения)
+  var threadCache = new Map(); // threadId -> { turns, messages, snapshot }
+
+  function cacheSet(threadId, entry) {
+    if (!threadId) return;
+    if (threadCache.has(threadId)) {
+      threadCache.delete(threadId);
+    }
+    threadCache.set(threadId, entry);
+    // вытесняем старейшие сверх лимита
+    while (threadCache.size > MAX_CACHE_ENTRIES) {
+      var oldestKey = threadCache.keys().next().value;
+      threadCache.delete(oldestKey);
+    }
+  }
+
+  // ---- диагностика ----
+  function isDiagTarget(rawUrl) {
+    if (!rawUrl) return false;
+    try {
+      var u = new URL(rawUrl, location.href);
+      var host = u.hostname.toLowerCase();
+      if (host !== 'google.com' && host !== 'www.google.com') return false;
+      var s = u.href;
+      if (s.indexOf('.js') !== -1) return false;
+      if (s.indexOf('.css') !== -1) return false;
+      if (s.indexOf('.png') !== -1) return false;
+      if (s.indexOf('.svg') !== -1) return false;
+      if (s.indexOf('.woff') !== -1) return false;
+      if (s.indexOf('gstatic') !== -1) return false;
+      if (s.indexOf('googleapis') !== -1) return false;
+      if (s.indexOf('_next/static') !== -1) return false;
+      return true;
+    } catch (e) { return false; }
+  }
+
+  function diagPreview(txt) {
+    if (!txt) return '';
+    if (txt.indexOf(")]}'") === 0) {
+      var rest = txt.slice(4).replace(/^\s+/, '');
+      var idx = -1;
+      for (var i = 0; i < rest.length; i++) {
+        if (rest[i] === '{' || rest[i] === '[') { idx = i; break; }
+      }
+      if (idx >= 0) rest = rest.slice(idx);
+      return rest.slice(0, 300);
+    }
+    return txt.slice(0, 300);
+  }
+
+  // v1.17: короткое превью тела для строки лога (схлопываем переводы строк).
+  function rawSnippet(txt, limit) {
+    var n = (typeof limit === 'number' && limit > 0) ? limit : 120;
+    if (!txt) return '';
+    var s = String(txt).replace(/\s+/g, ' ').trim();
+    return s.length > n ? (s.slice(0, n) + '…') : s;
+  }
+
+  // ---- O-27/O-32 (ДИАГНОСТИКА, только измерение): точки записи базы и сброса состояния ----
+  // Гейт — aiCmDebug: sessionStorage 'aiCmDebug' === '1' или чекбокс «Подробные логи»
+  // (utils/debug.js: aiCmDiagOn/aiCmDiagLine/aiCmDiagDocKind, тот же MAIN-мир).
+  // Функции только ЧИТАЮТ turns/счётчики/threadId и печатают строку: база, эмит,
+  // baseComplete и байты экспорта не меняются. В срез-песочницах тестов этих хелперов
+  // нет — вызовы в пиннутых функциях защищены typeof-гардом.
+  function gsaDiagTurnsShape(turns) {
+    var n = 0, empty = 0, userLen = 0, asstLen = 0, maxLen = 0;
+    try {
+      n = (turns && turns.length) ? turns.length : 0;
+      for (var i = 0; i < n; i++) {
+        var t = turns[i] || {};
+        var u = (t.userText == null) ? '' : String(t.userText).trim();
+        var a = (t.assistantText == null) ? '' : String(t.assistantText).trim();
+        if (!u && !a) empty++;
+        userLen += u.length;
+        asstLen += a.length;
+        if (u.length > maxLen) maxLen = u.length;
+        if (a.length > maxLen) maxLen = a.length;
+      }
+    } catch (eShape) { }
+    return 'turns=' + n + ' empty=' + empty + ' userLen=' + userLen +
+      ' asstLen=' + asstLen + ' maxLen=' + maxLen;
+  }
+
+  // Строка о попытке записи базы: путь (open/чанк/pagination/XHR/probe), форма хода,
+  // результат валидации (isUsableTurn/hasUsableTurns), активный и DOM threadId.
+  function gsaDiagBaseWrite(path, turns, verdict, tid, extra) {
+    try {
+      if (typeof aiCmDiagOn !== 'function' || !aiCmDiagOn()) return false;
+      if (typeof aiCmDiagLine !== 'function') return false;
+      var f = {
+        path: path,
+        verdict: verdict,
+        tid: tid || '(пусто)',
+        doc: (typeof aiCmDiagDocKind === 'function') ? aiCmDiagDocKind() : 'unknown',
+        shape: gsaDiagTurnsShape(turns),
+        activeTid: baseThreadId || '',
+        domTid: readDomThreadId() || '',
+        baseTurns: lastFullTurns.length
+      };
+      if (extra) {
+        for (var k in extra) {
+          if (Object.prototype.hasOwnProperty.call(extra, k)) f[k] = extra[k];
+        }
+      }
+      return aiCmDiagLine('gsa-base-write', f);
+    } catch (eDiagWrite) { return false; }
+  }
+
+  // Строка о сбросе/несбросе состояния: тип документа (captcha/чат/поиск) и причина.
+  function gsaDiagState(point, verdict, reason, extra) {
+    try {
+      if (typeof aiCmDiagOn !== 'function' || !aiCmDiagOn()) return false;
+      if (typeof aiCmDiagLine !== 'function') return false;
+      var f = {
+        point: point,
+        verdict: verdict,
+        reason: reason,
+        doc: (typeof aiCmDiagDocKind === 'function') ? aiCmDiagDocKind() : 'unknown',
+        activeTid: baseThreadId || '',
+        domTid: readDomThreadId() || '',
+        baseTurns: lastFullTurns.length
+      };
+      if (extra) {
+        for (var k in extra) {
+          if (Object.prototype.hasOwnProperty.call(extra, k)) f[k] = extra[k];
+        }
+      }
+      return aiCmDiagLine('gsa-state', f);
+    } catch (eDiagStateG) { return false; }
+  }
+  // Антиспам диагностических строк опроса DOM (checkThreadSwitch зовётся раз в 1с).
+  var lastDiagSwitchSig = '';
+
+  // Строка гарда виртуального скролла (петля GSA): печатается ТОЛЬКО при срабатывании
+  // гарда — re-entrancy (skip-active) или смена треда внутри скролла (abort).
+  function gsaDiagVs(point, fields) {
+    try {
+      if (typeof aiCmDiagOn !== 'function' || !aiCmDiagOn()) return false;
+      if (typeof aiCmDiagLine !== 'function') return false;
+      var f = {
+        point: point,
+        site: 'google_search',
+        doc: (typeof aiCmDiagDocKind === 'function') ? aiCmDiagDocKind() : 'unknown',
+        activeTid: baseThreadId || '',
+        domTid: readDomThreadId() || ''
+      };
+      if (fields) {
+        for (var k in fields) {
+          if (Object.prototype.hasOwnProperty.call(fields, k)) f[k] = fields[k];
+        }
+      }
+      return aiCmDiagLine(point, f);
+    } catch (eDiagVs) { return false; }
+  }
+
+  // v1.17: единая диагностика страницы ПРОДОЛЖЕНИЯ folwr. Классификация — по содержимому
+  // (utils/google-search-folwr-parser.classifyFolwrContinuation), НЕ по длине тела.
+  // Возврат: { cls, line } — line всегда печатается (status/ok/len/ходы/курсор + raw-превью),
+  // полное raw-превью уходит в ring-буфер через debugLog у вызывающего кода.
+  function describeFolwrPage(resp, txt, newTurns, cursor, sentCursor) {
+    var body = (txt == null) ? '' : String(txt);
+    var cls = null;
+    try {
+      if (window.GoogleFolwrUtils && window.GoogleFolwrUtils.classifyFolwrContinuation) {
+        cls = window.GoogleFolwrUtils.classifyFolwrContinuation({
+          ok: !!(resp && resp.ok),
+          status: (resp && resp.status) || 0,
+          bodyLength: body.length,
+          newTurns: newTurns,
+          cursor: cursor,
+          sentCursor: sentCursor
+        });
+      }
+    } catch (e) { }
+    if (!cls) {
+      cls = {
+        kind: 'no-classifier', complete: false, canContinue: false,
+        log: 'kind=no-classifier status=' + ((resp && resp.status) || 0) +
+          ' ok=' + ((resp && resp.ok) ? 1 : 0) + ' len=' + body.length + 'B ходов=+' + (newTurns || 0)
+      };
+    }
+    var line = cls.log + ' raw="' + rawSnippet(body, 120) + '"' +
+      (resp && resp.url ? ' finalUrl="' + rawSnippet(resp.url, 160) + '"' : '');
+    return { cls: cls, line: line };
+  }
+
+  // ---- модель из сетевого ответа ----
+  function extractModel(htmlText) {
+    try {
+      var re = new RegExp('model:\\s*&' + 'quot;([A-Za-z0-9.\\-]+)&' + 'quot;', 'g');
+      var match;
+      var lastModel = null;
+      while ((match = re.exec(htmlText)) !== null) {
+        lastModel = match[1];
+      }
+      return lastModel;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  // ---- чтение threadId из DOM ----
+  function readDomThreadId() {
+    try {
+      var el = document.querySelector('[data-session-thread-id]');
+      if (el) {
+        var v = el.getAttribute('data-session-thread-id');
+        return v ? v.trim() : '';
+      }
+    } catch (e) { }
+    return '';
+  }
+
+  // ---- O-27: валидация сетевого тела перед записью базы (защитный фикс по форме мусора) ----
+  // Живой артефакт (GSA, captcha-страница): файл `f.txt` = `)]}'\n[""]\n` — XSSI-префикс
+  // Google с ПУСТЫМ payload; парсер извлекает из такого тела 0 ходов. Живые логи (прогон
+  // 18:47) доказывают, что на легитимном теле GSA гард не отклоняет НИ ОДНОГО хода ни на
+  // одном пути (open / applyTurns / probe: shape=turns=5 empty=0, validation=hasUsableTurns=true),
+  // поэтому критерий СУЖЕН до точной формы мусора и не зависит от типа документа/страницы:
+  //   (1) ход пригоден, если в нём есть непустой текст (userText ИЛИ assistantText) —
+  //       контейнер без содержимого (пустой payload, интерстишиал) ходом не считается;
+  //   (2) форма мусора решается ТЕЛОМ (а не текстом отдельного хода): тело начинается
+  //       четырёхсимвольным XSSI-префиксом `)]}'` И не распарсилось ни в один непустой ход.
+  // Легитимный ответ, который сам начинается тем же префиксом, но содержит ходы, гардом НЕ
+  // отклоняется: префикс и результат разбора решаются ВМЕСТЕ (isGarbageBody). Снимок без
+  // ходов не строится вовсе — значит и baseComplete (buildDetail.historyComplete, по
+  // умолчанию true) по мусору не взводится.
+  //
+  // Сравнение префикса — по кодам символов: исходник функции не должен содержать фигурной
+  // скобки в литерале (source-пин-тесты режут функции по балансу скобок).
+  function isRawXssiPayload(s) {
+    if (!s || s.length < 4) return false;
+    return s.charCodeAt(0) === 41 && s.charCodeAt(1) === 93 &&
+      s.charCodeAt(2) === 125 && s.charCodeAt(3) === 39;
+  }
+
+  function isUsableTurn(t) {
+    if (!t) return false;
+    var u = (t.userText == null) ? '' : String(t.userText).trim();
+    var a = (t.assistantText == null) ? '' : String(t.assistantText).trim();
+    return !!(u || a);
+  }
+
+  function hasUsableTurns(turns) {
+    if (!turns || !turns.length) return false;
+    for (var i = 0; i < turns.length; i++) {
+      if (isUsableTurn(turns[i])) return true;
+    }
+    return false;
+  }
+
+  // Точная форма мусора: тело с XSSI-префиксом и НУЛЁМ непустых ходов. bodyText — сырое
+  // тело ответа; на путях без тела (DOM-добор, кэш, повторный эмит) он undefined → формы
+  // мусора нет, поведение прежнее.
+  function isGarbageBody(bodyText, turns) {
+    if (!isRawXssiPayload(bodyText)) return false;
+    return !hasUsableTurns(turns);
+  }
+
+  // ---- O-32: КАНОНИЧЕСКИЙ КЛЮЧ ХОДА (fallback к единому парсеру) ----
+  // Живой дефект (лог 2026-09-23 16:47:48): один и тот же ход одного и того же треда жил в
+  // базе ДВУМЯ формами текста, и дедуп по сырой паре (userText||assistantText) их не видел —
+  // база росла 6 → 12 ходов (18 сообщений, textLen 12255 → 24764, бейдж 4.4% → 9%) без
+  // единого нового сообщения пользователя:
+  //   форма ДОБОРА/ЭМИТА: userText=null, assistantText='Ответ в режиме ИИ, исходный
+  //                       запрос: "Q" A' — вопрос ВНУТРИ текста ответа;
+  //   форма СЕТИ:         userText='Q', assistantText='A' — вопрос отдельным ходом.
+  // Источник правды — utils/google-search-folwr-parser.js (canonicalTurnKeyOf); здесь тот же
+  // алгоритм продублирован ЛОКАЛЬНО ради срез-песочниц тестов, которые вырезают функции
+  // перехватчика поимённо (обращение к необъявленному хелперу дало бы ReferenceError).
+  // Правило ключа: normalized(userText | вопрос из обёртки) + '||' + normalized(тело ответа).
+  // Текст хода при этом НЕ меняется: reference 12255 знаков / 5658 токенов / 4.4% сохранён.
+  function gsaTurnKeyOfLocal(turn) {
+    if (!turn) return '';
+    function squash(s) {
+      return String(s == null ? '' : s).toLowerCase().replace(/\u00a0/g, ' ').replace(/[^a-zа-яё0-9]+/g, '');
+    }
+    function wrapperOf(text) {
+      var s = String(text == null ? '' : text);
+      var head = s.slice(0, 96);
+      var at = head.indexOf(':');
+      if (at === -1) return null;
+      var m = /^\s*"/.exec(head.slice(at + 1));
+      if (!m) return null;
+      var rest = s.slice(at + 1 + m[0].length);
+      var close = rest.indexOf('"');
+      if (close === -1) return null;
+      var tail = rest.slice(close + 1).replace(/^["»”']{0,2}/, '').replace(/^[\s.,:;-]{0,4}/, '');
+      if (!tail.replace(/\s+/g, '').length) return null;
+      var question = rest.slice(0, close).trim();
+      if (!question) return null;
+      return { question: question, body: tail.replace(/^[\s.,:;-]+/, '') };
+    }
+    var w = wrapperOf(turn.assistantText);
+    var u = squash(turn.userText);
+    if (!u && w) u = squash(w.question);
+    var a = squash(w ? w.body : turn.assistantText);
+    return u + '||' + a;
+  }
+
+  // Канонический ключ через единый парсер (window.GoogleFolwrUtils), фолбэк — локальный
+  // дубль. Возврат — строка ключа; ход без содержимого даёт '||'.
+  function gsaTurnKey(turn) {
+    try {
+      if (window.GoogleFolwrUtils && typeof window.GoogleFolwrUtils.canonicalTurnKeyOf === 'function') {
+        var k = window.GoogleFolwrUtils.canonicalTurnKeyOf(turn);
+        if (typeof k === 'string' && k) return k;
+      }
+    } catch (e) { }
+    return gsaTurnKeyOfLocal(turn);
+  }
+
+  // Сид накопителя ключей ходов: единая точка для activateThread/applySnapshot/mergeTurns/
+  // applyTurns (раньше одна и та же пара строк дублировалась в четырёх местах — и одна из
+  // форм хода в них не учитывалась).
+  function seedSeenKeys(turns) {
+    seenKeys = {};
+    for (var i = 0; i < turns.length; i++) {
+      var key = gsaTurnKey(turns[i]);
+      if (key && key !== '||') seenKeys[key] = true;
+    }
+    return seenKeys;
+  }
+
+  // ---- плоские messages из turns (fallback) ----
+  function messagesFromTurns(turns) {
+    var msgs = [];
+    for (var i = 0; i < turns.length; i++) {
+      var t = turns[i];
+      if (t.userText) msgs.push({ role: 'user', text: t.userText });
+      if (t.assistantText) msgs.push({ role: 'assistant', text: t.assistantText });
+    }
+    return msgs;
+  }
+
+  // ---- сборка detail снимка ----
+  function buildDetail(turns, messages, threadId, historyComplete) {
+    if (!messages) messages = messagesFromTurns(turns);
+    var messageTexts = messages.map(function (m) { return m.text; });
+    var messageIds = [];
+    for (var i = 0; i < turns.length; i++) {
+      var t = turns[i];
+      if (t.userText) messageIds.push(t.id + '_user');
+      if (t.assistantText) messageIds.push(t.id + '_assistant');
+    }
+    var text = messageTexts.join('\n');
+    return {
+      convId: '',
+      threadId: threadId || '',
+      text: text,
+      count: messageTexts.length,
+      effectiveLen: text.length,
+      lastMessageText: messageTexts.length ? messageTexts[messageTexts.length - 1] : '',
+      modelSlug: detectedModelSlug || '',
+      messageTexts: messageTexts,
+      messageIds: messageIds,
+      messages: messages,
+      attachTokens: 0,
+      attachBreak: { imgTokens: 0, docTokens: 0, imgCount: 0, docCount: 0 },
+      // O-32: полнота — ДОКАЗАННОЕ свойство, а не дефолт. Было `historyComplete !== false`:
+      // вызов без третьего аргумента (все DOM-доборы и накопительные merge) помечал снимок
+      // ПОЛНЫМ, и content.js взводил baseComplete=true по неполной базе — гейт автоэкспорта
+      // и метрики работали по недоказанной полноте. Теперь true только при явном вердикте
+      // (probe-классификатор classifyFolwrContinuation → applyTurns(..., true)).
+      historyComplete: historyComplete === true
+    };
+  }
+
+  // O-43 (ДИАГНОСТИКА, только измерение): ts+msgs+textLen КАЖДОГО сетевого эмита базы —
+  // опорная точка «network-finalize» для дельты memory→network (живой дефект 21:15:04.533
+  // файл по memory-базе 22 msgs → 21:15:04.795 сетевая база 32 msgs).
+  //
+  // Инструментирование стоит ВНУТРИ emitDetail, а не отдельным хелпером: срез-песочницы
+  // тестов вырезают функции по имени/балансу скобок (tests/diag-o27-o32-instrumentation.test.js
+  // GSA_FNS) и вызов необъявленного хелпера дал бы ReferenceError вместо прежнего поведения.
+  // Здесь только чтение уже построенного снимка под гейтом aiCmDebug (aiCmDiagLine,
+  // utils/debug.js): detail, база, threadId и байты эмита не меняются; гейт выключен → ни
+  // одной строки. Возврат функции прежний (undefined) — контракт emitDetail 1:1.
+  //
+  // O-32 (ДИАГНОСТИКА, только измерение): тот же вызов печатает ОТПЕЧАТОК ТРЕДА —
+  // hash(sorted(канонические ключи ходов)) + count + textLen. Критерий приёмки O-32:
+  // отпечаток одного и того же треда обязан совпасть на холодном старте, F5 и SPA-возврате
+  // (живой дефект 2026-09-23 давал hash(6 ключей) на старте и hash(12 ключей) после
+  // SPA-возврата при count 18 против 6). Локальные функции — ради срез-песочниц тестов.
+  function emitDetail(detail) {
+    try {
+      if (typeof aiCmDiagLine === 'function') {
+        aiCmDiagLine('gsa-net-finalize', {
+          ts: Date.now(),
+          path: 'emitDetail',
+          threadId: (detail && detail.threadId) || '',
+          msgs: (detail && typeof detail.count === 'number') ? detail.count : 0,
+          textLen: (detail && typeof detail.text === 'string') ? detail.text.length : 0,
+          historyComplete: (detail && detail.historyComplete === true) ? 1 : 0,
+          activeTid: baseThreadId || '',
+          domTid: readDomThreadId() || ''
+        });
+      }
+    } catch (eNetFin) { }
+    try {
+      if (typeof aiCmDiagLine === 'function') {
+        var fpKeys = [];
+        var fpTurns = (detail && Array.isArray(detail.messageTexts) && Array.isArray(detail.messages))
+          ? detail.messages : [];
+        for (var fpI = 0; fpI < fpTurns.length; fpI++) {
+          var fpM = fpTurns[fpI] || {};
+          if (fpM.role === 'user') {
+            var fpNext = fpTurns[fpI + 1] || {};
+            fpKeys.push(gsaTurnKey({
+              userText: (detail.messageTexts[fpI] == null) ? null : detail.messageTexts[fpI],
+              assistantText: (fpNext.role === 'assistant' && detail.messageTexts[fpI + 1] != null) ? detail.messageTexts[fpI + 1] : null
+            }));
+            if (fpNext.role === 'assistant') fpI++;
+          } else {
+            fpKeys.push(gsaTurnKey({ userText: null, assistantText: (detail.messageTexts[fpI] == null) ? null : detail.messageTexts[fpI] }));
+          }
+        }
+        fpKeys.sort();
+        var fpJoined = fpKeys.join('\u0001');
+        var fpH = 0x811c9dc5;
+        for (var fpC = 0; fpC < fpJoined.length; fpC++) {
+          fpH ^= fpJoined.charCodeAt(fpC);
+          fpH = Math.imul(fpH, 0x01000193) >>> 0;
+        }
+        aiCmDiagLine('gsa-thread-fingerprint', {
+          threadId: (detail && detail.threadId) || '',
+          hash: ('0000000' + fpH.toString(16)).slice(-8),
+          count: (fpKeys.length > 0) ? fpKeys.length : ((detail && detail.count) || 0),
+          msgs: (detail && typeof detail.count === 'number') ? detail.count : 0,
+          textLen: (detail && typeof detail.text === 'string') ? detail.text.length : 0,
+          historyComplete: (detail && detail.historyComplete === true) ? 1 : 0,
+          activeTid: baseThreadId || ''
+        });
+      }
+    } catch (eFp) { }
+    try {
+      window.dispatchEvent(new CustomEvent('ai-cm-full-history', { detail: detail }));
+    } catch (e) { }
+  }
+
+  // ---- v1.27 (O-31): сегментация сетевой базы по разговору (threadId) ----
+  // Живой дефект (GSA, прогон 2026-09-16 12:15): сетевой ответ СТАРОГО разговора,
+  // пришедший после SPA-переключения, дописывался в базу НОВОГО — mergeTurns/applyTurns
+  // брали currentThreadId||emittedThreadId, а threadId самого ответа не сверяли. Итог:
+  // netMsgs рос 8→10→18→20 при domMsgs 8↔2, а файл экспорта B нёс хвост разговора A.
+  // Теперь база принадлежит РОВНО одному разговору: активный сегмент — ходы своего
+  // threadId; снимок чужого треда пишется ТОЛЬКО в свой сегмент (threadCache) и не
+  // трогает lastFull*/seenKeys/baseText/pct/экспорт.
+  function isForeignThread(tid) {
+    if (!tid) return false; // тело без threadId — атрибуцию не выдумываем (прежнее поведение)
+    var domTid = readDomThreadId();
+    if (domTid) return tid !== domTid;       // живой DOM — источник правды о текущем разговоре
+    if (currentThreadId) return tid !== currentThreadId;
+    if (baseThreadId) return tid !== baseThreadId;
+    return false;
+  }
+
+  function segmentTurnsOf(tid) {
+    var seg = tid ? threadCache.get(tid) : null;
+    return (seg && Array.isArray(seg.turns)) ? seg.turns : [];
+  }
+
+  // Активный разговор: база становится сегментом ровно этого threadId (или пустой, если
+  // сегмента нет). Возврат true — активный разговор сменился (накопитель сброшен).
+  function activateThread(tid) {
+    tid = tid || '';
+    if (tid === baseThreadId) return false;
+    var prevBaseTid = baseThreadId;
+    baseThreadId = tid;
+    var seg = tid ? threadCache.get(tid) : null;
+    lastFullTurns = (seg && Array.isArray(seg.turns)) ? seg.turns.slice() : [];
+    lastFullMessages = (seg && Array.isArray(seg.messages)) ? seg.messages.slice() : [];
+    lastFullSnapshot = (seg && seg.snapshot) ? seg.snapshot : null;
+    // O-32: сид ключей — канонический (форма хода не важна), единой точкой seedSeenKeys.
+    seedSeenKeys(lastFullTurns);
+    emittedThreadId = lastFullSnapshot ? tid : '';
+    // O-27/O-32 (диагностика): сброс накопителя при смене активного разговора + тип документа.
+    if (typeof gsaDiagState === 'function') gsaDiagState('activateThread', 'reset', 'active-thread-switch', { from: prevBaseTid || '(пусто)', to: tid || '(пусто)', segTurns: lastFullTurns.length, emitted: emittedThreadId || '(пусто)' });
+    debugLog('log', '[ai-cm-google-search] активный разговор → ' + (tid || '(пусто)') +
+      ', ходов=' + lastFullTurns.length);
+    return true;
+  }
+
+  // Снимок чужого разговора: пишем ТОЛЬКО в его сегмент (пригодится при возврате в тред),
+  // активную базу/эмит/экспорт не трогаем. Возврат true — снимок поглощён (вызывающий выходит).
+  function absorbForeignSnapshot(tid, turns, complete) {
+    if (!isForeignThread(tid)) return false;
+    if (turns && turns.length > 0) {
+      var mergeFn = (window.GoogleFolwrUtils && window.GoogleFolwrUtils.mergeTurnsById) ||
+        function (a, b) { return a.concat(b); };
+      var segTurns = mergeFn(segmentTurnsOf(tid), turns);
+      var segMsgs = messagesFromTurns(segTurns);
+      cacheSet(tid, {
+        turns: segTurns,
+        messages: segMsgs,
+        snapshot: buildDetail(segTurns, segMsgs, tid, complete === true)
+      });
+    }
+    debugLog('log', '[ai-cm-google-search] снимок чужого разговора не применён: tid=' + tid +
+      ', ходов=' + ((turns && turns.length) || 0) + ', активный=' + (baseThreadId || '(пусто)'));
+    return true;
+  }
+
+  // ---- установка активной базы из готового снимка (для сетевого и кэш-эмита) ----
+  function applySnapshot(parsed, threadId) {
+    if (!parsed || !parsed.turns || parsed.turns.length === 0) return;
+    lastFullTurns = parsed.turns.slice();
+    lastFullMessages = Array.isArray(parsed.messages) ? parsed.messages.slice() : messagesFromTurns(lastFullTurns);
+    // O-32: тот же канонический ключ, что у mergeTurns/applyTurns (было — сырая пара).
+    seedSeenKeys(lastFullTurns);
+    lastFullSnapshot = buildDetail(lastFullTurns, lastFullMessages, threadId);
+    emittedThreadId = threadId || '';
+    if (threadId) cacheSet(threadId, { turns: lastFullTurns, messages: lastFullMessages, snapshot: lastFullSnapshot });
+  }
+
+  // ---- слияние стрим-ходов с полной базой (без уменьшения) ----
+  function mergeStreamTurns(streamTurns, threadId) {
+    var merged = [];
+    var seen = {};
+    function addTurn(t) {
+      // O-32: ключ дедупа — канонический (форма текста хода не важна): стрим-ход и ход базы,
+      // описанные разными формами одного и того же ответа, больше не удваивают базу.
+      var key = gsaTurnKey(t);
+      if (key !== '||' && seen[key]) return;
+      seen[key] = true;
+      merged.push({ id: (t && t.id) || ('x' + merged.length), userText: t ? t.userText : null, assistantText: t ? t.assistantText : null });
+    }
+    for (var i = 0; i < lastFullTurns.length; i++) addTurn(lastFullTurns[i]);
+    for (var j = 0; j < streamTurns.length; j++) addTurn(streamTurns[j]);
+    lastFullTurns = merged;
+    lastFullMessages = messagesFromTurns(lastFullTurns);
+    lastFullSnapshot = buildDetail(lastFullTurns, lastFullMessages, threadId || currentThreadId || emittedThreadId);
+    emittedThreadId = lastFullSnapshot.threadId || '';
+    if (emittedThreadId) cacheSet(emittedThreadId, { turns: lastFullTurns, messages: lastFullMessages, snapshot: lastFullSnapshot });
+    emitDetail(lastFullSnapshot);
+  }
+
+  // ---- слияние новых ходов ----
+  // tidOfResponse — threadId из ТЕЛА ответа (parseWithParser), если он там есть.
+  // bodyText — СЫРОЕ тело ответа (O-27): по нему решается, что тело — форма мусора.
+  function mergeTurns(newTurns, isFull, tidOfResponse, bodyText) {
+    // O-27 (защитный фикс): тело ТОЧНОЙ формы мусора (XSSI-префикс Google + 0 непустых
+    // ходов) базой не является — ни запись, ни эмит, ни baseComplete. Причина видна в
+    // диаг-строке (reason=xssi-prefix); живой путь — captcha-страница GSA (`f.txt`).
+    if (isGarbageBody(bodyText, newTurns)) {
+      if (typeof gsaDiagBaseWrite === 'function') gsaDiagBaseWrite('mergeTurns', newTurns, 'reject', tidOfResponse, { full: (isFull === true) ? 1 : 0, validation: 'hasUsableTurns=false', reason: 'xssi-prefix' });
+      debugLog('log', '[ai-cm-google-search] O-27: форма мусора (XSSI-префикс без полезного payload) — база не тронута' +
+        ' (merge, ходов=' + ((newTurns && newTurns.length) || 0) + ')');
+      return;
+    }
+    // O-27: тело, не распарсившееся в ≥1 НЕПУСТОЙ ход, базой не является — ни запись,
+    // ни эмит, ни baseComplete (снимок не строится вовсе).
+    if (!hasUsableTurns(newTurns)) {
+      if (typeof gsaDiagBaseWrite === 'function') gsaDiagBaseWrite('mergeTurns', newTurns, 'reject', tidOfResponse, { full: (isFull === true) ? 1 : 0, validation: 'hasUsableTurns=false' });
+      debugLog('log', '[ai-cm-google-search] O-27: тело без непустых ходов — база не тронута' +
+        ' (merge, ходов=' + ((newTurns && newTurns.length) || 0) + ')');
+      return;
+    }
+    // v1.27 (O-31): разговор ответа — threadId тела, фолбэк — живой DOM. Ответ чужого
+    // разговора не дописывается в активную базу (absorbForeignSnapshot).
+    var threadId = tidOfResponse || readDomThreadId() || currentThreadId || emittedThreadId;
+    if (absorbForeignSnapshot(threadId, newTurns, false)) {
+      if (typeof gsaDiagBaseWrite === 'function') gsaDiagBaseWrite('mergeTurns', newTurns, 'foreign-not-applied', threadId, { full: (isFull === true) ? 1 : 0 });
+      return;
+    }
+    activateThread(threadId);
+    if (isFull) {
+      if (lastFullTurns.length > 0 && newTurns.length < lastFullTurns.length) {
+        mergeStreamTurns(newTurns, threadId);
+        return;
+      }
+      // O-32: полный снимок заменяет базу, но ключи — КАНОНИЧЕСКИЕ (seedSeenKeys): иначе
+      // следующий чанк того же хода в другой форме текста считался бы новым и база росла.
+      lastFullTurns = newTurns.slice();
+      seedSeenKeys(lastFullTurns);
+    } else {
+      for (var j = 0; j < newTurns.length; j++) {
+        var nt = newTurns[j];
+        var key2 = gsaTurnKey(nt);
+        if (key2 === '||') continue;
+        if (!seenKeys[key2]) {
+          seenKeys[key2] = true;
+          lastFullTurns.push(nt);
+        }
+      }
+    }
+    lastFullMessages = messagesFromTurns(lastFullTurns);
+    if (lastFullTurns.length > 0) {
+      lastFullSnapshot = buildDetail(lastFullTurns, lastFullMessages, threadId);
+      emittedThreadId = lastFullSnapshot.threadId || '';
+      if (emittedThreadId) cacheSet(emittedThreadId, { turns: lastFullTurns, messages: lastFullMessages, snapshot: lastFullSnapshot });
+      if (typeof gsaDiagBaseWrite === 'function') gsaDiagBaseWrite('mergeTurns', lastFullTurns, 'accept', threadId, { full: (isFull === true) ? 1 : 0, incoming: (newTurns && newTurns.length) || 0, emitted: emittedThreadId || '' });
+      emitDetail(lastFullSnapshot);
+    } else if (typeof gsaDiagBaseWrite === 'function') {
+      gsaDiagBaseWrite('mergeTurns', newTurns, 'accept-empty-base', threadId, { full: (isFull === true) ? 1 : 0, incoming: (newTurns && newTurns.length) || 0 });
+    }
+  }
+
+  // ---- парсинг через единый парсер ----
+  function parseWithParser(htmlText) {
+    try {
+      if (window.parseGoogleFolwrOpen) {
+        var p = window.parseGoogleFolwrOpen(htmlText);
+        if (p && p.turns && p.turns.length > 0) {
+          return p;
+        }
+      }
+    } catch (e) { }
+    var turns = parseTurns(htmlText);
+    var messages = messagesFromTurns(turns);
+    return {
+      threadId: readDomThreadId(),
+      turns: turns,
+      messages: messages,
+      text: messages.map(function (m) { return m.text; }).join('\n'),
+      count: messages.length
+    };
+  }
+
+  function parseTurns(htmlText) {
+    var doc;
+    try {
+      doc = new DOMParser().parseFromString(htmlText, 'text/html');
+    } catch (e) {
+      return [];
+    }
+    var turns = doc.querySelectorAll('[data-scope-id="turn"]');
+    var allAimfl = doc.querySelectorAll('[data-subtree="aimfl"]');
+    var allN6 = doc.querySelectorAll('.n6owBd.awi2gc');
+
+    var questions = [];
+    for (var i = 0; i < turns.length; i++) {
+      var h2 = turns[i].querySelector('h2.iMqumd');
+      var questionText = null;
+      if (h2) {
+        var raw = h2.textContent.trim();
+        var match = raw.match(/^Вы сказали:\s*"([\s\S]*)"$/);
+        questionText = match ? match[1].trim() : raw;
+      }
+      questions.push(questionText);
+    }
+
+    var answers = [];
+    for (var ti = 0; ti < turns.length; ti++) answers[ti] = [];
+    var blocks = doc.querySelectorAll('.n6owBd.awi2gc');
+    for (var b = 0; b < blocks.length; b++) {
+      var block = blocks[b];
+      var assignedIdx = -1;
+      for (var ti2 = 0; ti2 < turns.length; ti2++) {
+        if (turns[ti2].compareDocumentPosition(block) & Node.DOCUMENT_POSITION_FOLLOWING) {
+          assignedIdx = ti2;
+        } else break;
+      }
+      if (assignedIdx >= 0 && assignedIdx < turns.length) {
+        var cloneBlock = block.cloneNode(true);
+        cloneBlock.querySelectorAll('script, style, button, svg').forEach(function (el) { el.remove(); });
+        var blockText = cloneBlock.textContent.trim();
+        if (blockText) answers[assignedIdx].push(blockText);
+      }
+    }
+
+    var assistantTexts = [];
+    for (var ti3 = 0; ti3 < turns.length; ti3++) {
+      var joined = answers[ti3].length > 0 ? answers[ti3].join('\n\n') : null;
+      if (!joined && allAimfl[ti3]) {
+        var aimText = allAimfl[ti3].textContent.trim();
+        if (aimText) joined = aimText;
+      }
+      assistantTexts.push(joined);
+    }
+
+    var result = [];
+    var count = questions.length;
+    for (var k = 0; k < count; k++) {
+      result.push({
+        id: (turns[k] && turns[k].getAttribute('jsuid')) || ('idx' + k),
+        userText: questions[k] || null,
+        assistantText: assistantTexts[k] || null
+      });
+    }
+
+    // Фолбэк вопросов из TgQPHd
+    var needTgBackfill = false;
+    for (var bi = 0; bi < result.length; bi++) {
+      if (!result[bi].userText) { needTgBackfill = true; break; }
+    }
+    if (needTgBackfill) {
+      var commentQuestions = [];
+      try {
+        var tgReB = /<!--TgQPHd\|[\s\S]*?-->/g;
+        var tgMatchB;
+        while ((tgMatchB = tgReB.exec(htmlText)) !== null) {
+          var commentB = tgMatchB[0];
+          commentB = commentB.replace(new RegExp('&' + 'quot;', 'g'), '"');
+          commentB = commentB.replace(new RegExp('&' + 'amp;', 'g'), '&');
+          var longStrReB = /"([^"]{20,})"/g;
+          var longMatchB, foundB = null;
+          while ((longMatchB = longStrReB.exec(commentB)) !== null) {
+            var candidateB = longMatchB[1];
+            if (candidateB.indexOf('\\u0026') !== -1) continue;
+            if (candidateB.indexOf('OLOoOd') !== -1) continue;
+            if (candidateB.indexOf('dRog6c') !== -1) continue;
+            if (candidateB.indexOf('TgQPHd') !== -1) continue;
+            if (!/[а-яёА-ЯЁ]/.test(candidateB) && candidateB.indexOf(' ') === -1) continue;
+            foundB = candidateB;
+            break;
+          }
+          commentQuestions.push(foundB);
+        }
+      } catch (e) { }
+      var cqi = 0;
+      for (var bi2 = 0; bi2 < result.length; bi2++) {
+        if (!result[bi2].userText && cqi < commentQuestions.length && commentQuestions[cqi]) {
+          result[bi2].userText = commentQuestions[cqi];
+          cqi++;
+        }
+      }
+    }
+
+    // Фолбэк folif
+    if (result.length === 0) {
+      try {
+        var tgRe2 = /<!--TgQPHd\|[\s\S]*?-->/g;
+        var tgMatch2;
+        var folifQuestion = null;
+        while ((tgMatch2 = tgRe2.exec(htmlText)) !== null) {
+          var comment = tgMatch2[0];
+          comment = comment.replace(new RegExp('&' + 'quot;', 'g'), '"');
+          comment = comment.replace(new RegExp('&' + 'amp;', 'g'), '&');
+          var longStrRe2 = /"([^"]{20,})"/g;
+          var longMatch2;
+          while ((longMatch2 = longStrRe2.exec(comment)) !== null) {
+            var candidate = longMatch2[1];
+            if (candidate.indexOf('\\u0026') !== -1) continue;
+            if (candidate.indexOf('OLOoOd') !== -1) continue;
+            if (candidate.indexOf('dRog6c') !== -1) continue;
+            if (candidate.indexOf('TgQPHd') !== -1) continue;
+            if (!/[а-яёА-ЯЁ]/.test(candidate) && candidate.indexOf(' ') === -1) continue;
+            folifQuestion = candidate;
+            break;
+          }
+        }
+        var folifAnswer = null;
+        if (allAimfl.length > 0) {
+          for (var aa = 0; aa < allAimfl.length; aa++) {
+            var atext = allAimfl[aa].textContent.trim();
+            if (atext) { folifAnswer = atext; break; }
+          }
+        }
+        if (!folifAnswer && allN6.length > 0) {
+          for (var bb = 0; bb < allN6.length; bb++) {
+            var clone2 = allN6[bb].cloneNode(true);
+            clone2.querySelectorAll('script, style, button, svg').forEach(function (el) { el.remove(); });
+            var ntext = clone2.textContent.trim();
+            if (ntext) { folifAnswer = ntext; break; }
+          }
+        }
+        if (folifQuestion || folifAnswer) {
+          result.push({ id: 'folif_' + Date.now(), userText: folifQuestion, assistantText: folifAnswer });
+        }
+      } catch (e) { }
+    }
+
+    return result;
+  }
+
+  // ---- v1.5.2: ключ threadId|authuser, гонки и пагинация курсором ----
+
+  // Изоляция по вкладке/authuser: authuser берём из URL folwr, фолбэк — из location.
+  function authUserFromUrl(rawUrl) {
+    try {
+      var u = new URL(rawUrl, location.href);
+      var a = u.searchParams.get('authuser');
+      if (a != null && a !== '') return a;
+    } catch (e) { }
+    try {
+      return new URL(location.href).searchParams.get('authuser') || '';
+    } catch (e) { return ''; }
+  }
+
+  function threadAuthKey(threadId, rawUrl) {
+    return (threadId || '') + '|' + authUserFromUrl(rawUrl);
+  }
+
+  // Подстановка курсора пагинации mstk в URL folwr.
+  function urlWithMstk(rawUrl, cursor) {
+    if (!cursor) return rawUrl;
+    try {
+      var u = new URL(rawUrl, location.href);
+      u.searchParams.set('mstk', cursor);
+      return u.href;
+    } catch (e) { return rawUrl; }
+  }
+
+  // ---- ПЕТЛЯ GSA: гард прогонов на тред (наблюдения владельца, вердикт High) ----
+  // Живой лог 2026-09-23: КАЖДЫЙ перехваченный GET /async/folwr — новый прогон. Капы
+  // FOLWR_MAX_PAGES=12 / FOLWR_PROBE_MAX_STEPS=10 ограничивают ОДИН прогон, а не тред и не
+  // время; гард «один раз на тред» был только у probe (probedTids), у пагинации аналога не
+  // было, а нулевой прирост уходил в virtualScrollBackfill('pagination-empty') без
+  // re-entrancy-гарда. Данные петлёй не страдают (O-31/O-32/v1.27) — шум сетевой/ресурсный.
+  // Теперь приём данных (applyTurns) НЕ гейтится никогда — гард стоит ровно на ДОРОГИХ
+  // прогонах треда (пагинация курсором / probe / невидимый скролл), поэтому потерять ходы
+  // он не может по построению.
+  var folwrRunAtMap = {};       // threadAuthKey (threadId|authuser) -> ts старта последнего прогона
+  var folwrNoGainMap = {};      // threadAuthKey -> ts последнего прогона БЕЗ прироста базы
+  var folwrRunLiveMap = {};     // threadAuthKey -> прогонов уже в полёте (гард «один прогон на тред»)
+  var folwrRunLastVerdict = {}; // threadAuthKey -> причина подавления последнего прогона
+  var folwrGainSeenAtMap = {};  // threadAuthKey -> ts последнего РЕАЛЬНОГО прироста базы
+
+  // Диагностика под гейтом aiCmDebug (utils/debug.js: aiCmDiagOn/aiCmDiagLine, MAIN-мир):
+  // одна строка на попытку прогона — path / threadId / sincePrevRunMs / gained / verdict.
+  // В срез-песочницах тестов хелперов может не быть — typeof-гард: нет хелпера, нет строки.
+  function gsaDiagLoopGuard(path, tid, key, sincePrevRunMs, gained, verdict, reason) {
+    try {
+      if (typeof aiCmDiagOn !== 'function' || !aiCmDiagOn()) return false;
+      if (typeof aiCmDiagLine !== 'function') return false;
+      return aiCmDiagLine('gsa-loop-guard', {
+        path: path,
+        threadId: tid || '(пусто)',
+        key: key || '',
+        sincePrevRunMs: (typeof sincePrevRunMs === 'number') ? sincePrevRunMs : -1,
+        gained: (typeof gained === 'number') ? gained : 0,
+        inFlight: folwrRunLiveMap[key] || 0,
+        noGain: folwrNoGainMap[key] ? 1 : 0,
+        verdict: verdict,
+        reason: reason || ''
+      });
+    } catch (eDiagLoop) { return false; }
+  }
+
+  function folwrRunSince(prev) {
+    var p = parseFloat(prev);
+    if (!(p >= 0)) return -1;
+    return Math.max(0, Math.round(Date.now() - p));
+  }
+
+  // Единая точка решения: permit (прогон стартует) / suppress (подавлен). Счётчики ставит
+  // только beginFolwrRun — «отказ» прогонов не отменяет и в полёте ничего не оставляет.
+  function folwrRunPermit(path, tid, key, opts) {
+    var prev = folwrRunAtMap[key];
+    var elapsed = folwrRunSince(prev);
+    var priorNoGain = !!folwrNoGainMap[key];
+    // Нулевой прирост держит тред до FOLWR_NO_GAIN_COOLDOWN_MS, пока в базу не пришли новые
+    // ходы (markFolwrRunGain). Иначе — безусловный барьер FOLWR_RUN_MIN_COOLDOWN_MS.
+    var cooldown = priorNoGain ? Math.max(FOLWR_NO_GAIN_COOLDOWN_MS, FOLWR_RUN_MIN_COOLDOWN_MS) : FOLWR_RUN_MIN_COOLDOWN_MS;
+    var verdict = 'start';
+    var reason = '';
+    // (1) прогон того же треда уже в полёте — второй не стартует; (2) окно cooldown треда.
+    if (folwrRunLiveMap[key]) { verdict = 'suppress'; reason = 'run-in-flight'; }
+    else if (prev != null && elapsed < cooldown) {
+      verdict = 'suppress';
+      reason = priorNoGain ? 'no-gain-cooldown' : 'cooldown';
+    }
+    // Прирост приоритетнее окна: снимок с НОВЫМИ ходами прогон не теряет никогда.
+    var force = !!(opts && opts.growthPriority && opts.gained > 0);
+    if (force) { verdict = 'start'; reason = 'gain-priority'; }
+    var gained = (typeof (opts && opts.gained) === 'number') ? opts.gained : 0;
+    // Причина уходит в строку ЯВНО (а не через folwrRunLastVerdict): словарь «последнего
+    // вердикта» заполняется ниже и на этой же попытке был бы ещё пуст.
+    gsaDiagLoopGuard(path, tid, key, elapsed, gained, verdict, reason);
+    if (verdict !== 'start') {
+      folwrRunLastVerdict[key] = reason;
+      return { permit: false, elapsed: elapsed, reason: reason, forced: false, key: key, tid: tid };
+    }
+    delete folwrRunLastVerdict[key];
+    // noGain пишет только прогон, который САМ ходил в сеть/скролл (pagination/probe/scroll).
+    // Дубль открытия сетевой попыткой не является — он лишь применяет уже пришедший снимок,
+    // поэтому 30-секундную метку «тред не растёт» он не ставит (иначе один переэмит открытия
+    // замораживал бы честную пагинацию следующего нового хода).
+    if (prev != null && gained <= 0 && !(opts && opts.recordNoGain === false)) folwrNoGainMap[key] = Date.now();
+    return { permit: true, elapsed: elapsed, reason: reason, forced: force, key: key, tid: tid };
+  }
+
+  function beginFolwrRun(path, tid, key, opts) {
+    var d = folwrRunPermit(path, tid, key, opts);
+    if (d.permit) {
+      folwrRunAtMap[key] = Date.now();
+      folwrRunLiveMap[key] = (folwrRunLiveMap[key] || 0) + 1;
+    }
+    return d;
+  }
+
+  // Прогон завершён — в полёте больше нет. Окно треда НЕ снимается: reset(delete) — только
+  // при реальном росте базы (markFolwrRunGain), иначе cooldown держится.
+  function endFolwrRun(key) {
+    if (!key) return;
+    var live = (folwrRunLiveMap[key] || 0) - 1;
+    if (live > 0) folwrRunLiveMap[key] = live; else delete folwrRunLiveMap[key];
+  }
+
+  // РЕАЛЬНЫЙ прирост базы (новые ходы добавлены) — единственное, что снимает окно досрочно.
+  function markFolwrRunGain(key) {
+    if (!key) return false;
+    delete folwrRunAtMap[key];
+    delete folwrNoGainMap[key];
+    delete folwrRunLastVerdict[key];
+    folwrGainSeenAtMap[key] = Date.now();
+    return true;
+  }
+
+  // Применяет готовые turns к базе + эмит (единая точка для folwr-open и пагинации).
+  // bodyText — СЫРОЕ тело ответа (O-27): по нему решается, что тело — форма мусора.
+  function applyTurns(turns, tid, historyComplete, bodyText) {
+    if (!turns || turns.length === 0) {
+      if (typeof gsaDiagBaseWrite === 'function') gsaDiagBaseWrite('applyTurns', turns, 'reject-empty', tid, { complete: (historyComplete === true) ? 1 : 0 });
+      return;
+    }
+    // O-27 (защитный фикс): та же точная форма мусора, что у mergeTurns — XSSI-префикс
+    // Google без полезного payload. Такое тело базой не становится и baseComplete не
+    // взводит: historyComplete=true здесь означал бы «история ПОЛНАЯ по сети».
+    if (isGarbageBody(bodyText, turns)) {
+      if (typeof gsaDiagBaseWrite === 'function') gsaDiagBaseWrite('applyTurns', turns, 'reject', tid, { complete: (historyComplete === true) ? 1 : 0, validation: 'hasUsableTurns=false', reason: 'xssi-prefix' });
+      debugLog('log', '[ai-cm-google-search] O-27: форма мусора (XSSI-префикс без полезного payload) — база не тронута' +
+        ' (apply, ходов=' + turns.length + ', complete=' + (historyComplete === true ? 1 : 0) + ')');
+      return;
+    }
+    // O-27: контейнеры без содержимого (captcha / «подозрительный трафик» / пустой payload)
+    // базой не становятся и baseComplete не взводят.
+    if (!hasUsableTurns(turns)) {
+      if (typeof gsaDiagBaseWrite === 'function') gsaDiagBaseWrite('applyTurns', turns, 'reject', tid, { complete: (historyComplete === true) ? 1 : 0, validation: 'hasUsableTurns=false' });
+      debugLog('log', '[ai-cm-google-search] O-27: тело без непустых ходов — база не тронута' +
+        ' (apply, ходов=' + turns.length + ', complete=' + (historyComplete === true ? 1 : 0) + ')');
+      return;
+    }
+    // v1.27 (O-31): поздний ответ чужого разговора (probe/пагинация, стартовавшие до
+    // SPA-переключения) в базу текущего не дописывается — только в свой сегмент.
+    if (absorbForeignSnapshot(tid, turns, historyComplete)) {
+      if (typeof gsaDiagBaseWrite === 'function') gsaDiagBaseWrite('applyTurns', turns, 'foreign-not-applied', tid, { complete: (historyComplete === true) ? 1 : 0 });
+      return;
+    }
+    activateThread(tid);
+    // O-32: снимок применяется МОНОТОННО — «накопитель ∪ снимок», а не замена.
+    // Живой дефект (16:47:48): при SPA-возврате снимок нёс ход-обёртку (null + 'Ответ в
+    // режиме ИИ …'), а сегмент кэша — тот же ход формой сети; замена/сырой ключ складывали
+    // обе формы (6 → 12 ходов → 18 сообщений, textLen 24764, бейдж 4.4% → 9%). Слияние по
+    // КАНОНИЧЕСКОМУ ключу (mergeTurnsMonotone = id + canonicalTurnKeyOf) оставляет у хода
+    // ровно одно представление, поэтому повторный снимок того же треда базу не раздувает.
+    var unionFn = (window.GoogleFolwrUtils && window.GoogleFolwrUtils.mergeTurnsMonotone) ||
+      function (a, b) { return a.concat(b); };
+    lastFullTurns = unionFn(lastFullTurns, turns);
+    lastFullMessages = messagesFromTurns(lastFullTurns);
+    seedSeenKeys(lastFullTurns);
+    lastFullSnapshot = buildDetail(lastFullTurns, lastFullMessages, tid, historyComplete);
+    emittedThreadId = tid || '';
+    if (tid) cacheSet(tid, { turns: lastFullTurns, messages: lastFullMessages, snapshot: lastFullSnapshot });
+    if (typeof gsaDiagBaseWrite === 'function') gsaDiagBaseWrite('applyTurns', lastFullTurns, 'accept', tid, { complete: (historyComplete === true) ? 1 : 0, emitted: emittedThreadId || '', baseComplete: (lastFullSnapshot && lastFullSnapshot.historyComplete === true) ? 1 : 0, validation: 'hasUsableTurns=true' });
+    emitDetail(lastFullSnapshot);
+  }
+
+  // Пагинация folwr курсором при открытии: ≤12 страниц, merge по id ходов, лог досбор=N.
+  // Первая страница уже применена вызывающим кодом (applyTurns); здесь догружаем хвост по cursor.
+  function followFolwrPagination(startUrl, startTurns, tid, firstCursor, gainedIn) {
+    if (!startUrl || !firstCursor) return;
+    var key = threadAuthKey(tid, startUrl);
+    // Гард прогонов на тред (петля GSA, High): окно считается ОТ ЗАПУСКА прогона, поэтому
+    // собственные шаги пагинации по 400 мс идут как прежде, а повторный перехваченный
+    // /async/folwr того же треда внутри окна прогон не стартует.
+    var gate = beginFolwrRun('pagination', tid, key, { gained: (typeof gainedIn === 'number') ? gainedIn : 0 });
+    if (!gate.permit) return;
+    var merged = Array.isArray(startTurns) ? startTurns.slice() : [];
+    var mergeFn = (window.GoogleFolwrUtils && window.GoogleFolwrUtils.mergeTurnsById) ||
+      function (a, b) { return a.concat(b); };
+    var extractToken = (window.GoogleFolwrUtils && window.GoogleFolwrUtils.extractContinuationToken) ||
+      function () { return null; };
+
+    var added = 0;
+    var pages = 0;
+    var accounted = 0; // уже зачтённый прирост базы (markFolwrRunGain — ровно на новых ходах)
+
+    // Прирост зачитывается ОДНОЙ точкой (там, где merge реально добавил ходы) — этим же
+    // снимается окно треда: следующий прогон после новых ходов стартует без ожидания.
+    function accountGain() {
+      if (added > accounted) {
+        accounted = added;
+        markFolwrRunGain(key);
+      }
+    }
+
+    function finish() {
+      activeFolwrInFlight[key] = false;
+      endFolwrRun(key);
+      if (added > 0) {
+        accountGain();
+        console.log('[ai-cm-google-search] пагинация folwr: досбор=' + added +
+          ' ходов, страниц=' + pages + ', итого=' + lastFullTurns.length);
+      } else {
+        // v1.25: API-пагинация не добавила ходов → фолбэк Вариант Б.
+        // vsDispatch — точка подмены реализации в срез-песочницах тестов; по умолчанию это
+        // сам virtualScrollBackfill (см. объявление рядом с реализацией скролла).
+        vsDispatch('pagination-empty');
+      }
+    }
+
+    function step(nextCursor) {
+      if (!nextCursor) { finish(); return; }
+      // v1.24: circuit-breaker — во время cooldown свои запросы запрещены.
+      if (!ownRequestsAllowed()) {
+        console.log('[ai-cm-google-search] досбор пропущен: cooldown 429/sorry активен');
+        activeFolwrInFlight[key] = false;
+        endFolwrRun(key);
+        return; // во время cooldown сетевой фолбэк невозможен
+      }
+      // v1.24: ≤12 страниц за одно открытие (первая уже применена вызывающим кодом).
+      if (pages >= FOLWR_MAX_PAGES - 1) {
+        if (added > 0) {
+          console.log('[ai-cm-google-search] пагинация folwr: лимит страниц, досбор=' + added +
+            ', итого=' + lastFullTurns.length);
+        }
+        activeFolwrInFlight[key] = false;
+        endFolwrRun(key);
+        return;
+      }
+      if (activeFolwrInFlight[key]) return; // не слать параллельно тот же тред
+      activeFolwrInFlight[key] = true;
+      pages++;
+      window.fetch(urlWithMstk(startUrl, nextCursor), { credentials: 'include' })
+        .then(function (resp) {
+          // v1.24: 429//sorry/ → cooldown и немедленный выход из цикла, БЕЗ ретраев.
+          if (isSorryResponse(resp && resp.status, resp && resp.url)) {
+            triggerSorryCooldown();
+            activeFolwrInFlight[key] = false;
+            endFolwrRun(key);
+            return null;
+          }
+          if (!resp) return { resp: null, txt: '' };
+          // v1.17: тело читаем ВСЕГДА (в т.ч. при не-ok и на коротком ответе) — иначе
+          // «пустая страница» неотличима от ошибки, а фолбэк Вариант Б не запускается.
+          return resp.text().then(function (t) {
+            return { resp: resp, txt: t || '' };
+          }, function () { return { resp: resp, txt: '' }; });
+        })
+        .then(function (page) {
+          activeFolwrInFlight[key] = false;
+          if (!page) return; // 429//sorry/ → cooldown, цикл уже остановлен
+          var txt = page.txt;
+          var parsed = parseWithParser(txt);
+          var before = merged.length;
+          merged = mergeFn(merged, parsed.turns);
+          var gained = merged.length - before;
+          added += gained;
+          var cursor = extractToken(txt);
+          var pageInfo = describeFolwrPage(page.resp, txt, gained, cursor, nextCursor);
+          console.log('[ai-cm-google-search] пагинация folwr шаг ' + pages + ': ' + pageInfo.line);
+          debugLog('log', '[ai-cm-google-search] пагинация folwr шаг ' + pages +
+            ' raw(' + txt.length + 'B): ' + diagPreview(txt));
+          if (gained > 0) {
+            if (typeof gsaDiagBaseWrite === 'function') gsaDiagBaseWrite('pagination', merged, 'submit', tid, { page: pages, gained: gained, kind: pageInfo.cls.kind, cursor: (cursor ? cursor.slice(0, 12) : 'нет') });
+            applyTurns(merged, tid, false, txt);
+            accountGain();
+          } else if (typeof gsaDiagBaseWrite === 'function') {
+            gsaDiagBaseWrite('pagination', parsed.turns, 'skip-no-gain', tid, { page: pages, gained: 0, kind: pageInfo.cls.kind, cursor: (cursor ? cursor.slice(0, 12) : 'нет') });
+          }
+          // v1.17: продолжаем, только если страница дала НОВЫЕ ходы и НОВЫЙ курсор.
+          if (pageInfo.cls.canContinue) {
+            setTimeout(function () { step(cursor); }, FOLWR_PAGE_DELAY_MS);
+          } else {
+            finish();
+          }
+        })
+        .catch(function () { activeFolwrInFlight[key] = false; finish(); });
+    }
+
+    step(firstCursor);
+  }
+
+  // v1.25: Вариант Б — фолбэк «невидимого виртуального скролла». Если API-пагинация
+  // не дала результата (курсор не извлечён / пустые страницы), прокручиваем
+  // scrollable-контейнер чата к началу (scrollTop = 0), пока растёт scrollHeight.
+  // Контейнер на время скролла делается прозрачным (opacity: 0). Новые ходы
+  // мержатся в базу по ключу (дедуп), эмит после каждого пополнения.
+  var VS_MAX_ITERATIONS = 20;
+  var VS_STEP_WAIT_MS = 800;
+  var VS_STALL_LIMIT = 3; // итераций без роста scrollHeight = конец истории
+  // Петля GSA (High): re-entrancy треда. Нулевой прогон пагинации уходил в невидимый
+  // скролл (до ~16 с) БЕЗ гарда, и каждый следующий перехваченный /async/folwr запускал
+  // ещё один скролл поверх активного. Флаг — ключ треда активного скролла.
+  var vsActive = null;
+  // Точка подмены Варианта Б для срез-песочниц тестов (в браузере — всегда сам скролл).
+  // Нужна потому, что заглушка с именем virtualScrollBackfill в песочнице перекрыла бы
+  // реальную функцию: bare-идентификатор внутри `with (ctx)` разрешается в пользу ctx.
+  var vsDispatch = function (reason) { return virtualScrollBackfill(reason); };
+
+  function findChatScroller() {
+    try {
+      var turns = document.querySelectorAll('[data-scope-id="turn"]');
+      var anchor = turns.length ? turns[0] : document.querySelector('[data-session-thread-id]');
+      var el = anchor;
+      while (el && el !== document.body) {
+        if (el.scrollHeight > el.clientHeight + 50) return el;
+        el = el.parentElement;
+      }
+    } catch (e) { }
+    return null;
+  }
+
+  function virtualScrollBackfill(reason) {
+    // Re-entrancy: невидимый скролл уже идёт (в т.ч. по ДРУГОМУ треду) — второй не стартует.
+    if (vsActive) {
+      gsaDiagVs('gsa-vs-reentry', { active: vsActive, verdict: 'skip-active', reason: reason });
+      return false;
+    }
+    if (!ownRequestsAllowed()) {
+      console.log('[ai-cm-google-search] виртуальный скролл пропущен: cooldown (' + reason + ')');
+      return false;
+    }
+    var scroller = findChatScroller();
+    if (!scroller) {
+      console.log('[ai-cm-google-search] виртуальный скролл: контейнер не найден (' + reason + ')');
+      return false;
+    }
+    var tid = currentThreadId || emittedThreadId || readDomThreadId();
+    vsActive = tid || '(пусто)';
+    var iterations = 0;
+    var stalls = 0;
+    var done = false;
+    var lastScrollHeight = scroller.scrollHeight;
+    var prevOpacity = scroller.style.opacity;
+    var prevScrollTop = scroller.scrollTop;
+    scroller.style.opacity = '0';
+    console.log('[ai-cm-google-search] виртуальный скролл запущен (' + reason + ')');
+
+    function restore() {
+      scroller.style.opacity = prevOpacity;
+      scroller.scrollTop = prevScrollTop;
+    }
+
+    // Терминальные выходы: снять флаг активного скролла (ровно один раз) + вернуть контейнер.
+    function finishVs(logLine) {
+      if (done) return;
+      done = true;
+      vsActive = null;
+      restore();
+      if (logLine) console.log(logLine);
+    }
+
+    function tick() {
+      if (iterations >= VS_MAX_ITERATIONS) {
+        finishVs('[ai-cm-google-search] виртуальный скролл: лимит итераций, итого=' + lastFullTurns.length);
+        return;
+      }
+      // Смена треда внутри скролла: scrollTop больше НЕ трогаем (иначе чужой тред уезжает
+      // в начало своей истории), состояние контейнера не восстанавливаем — сайт сам
+      // перестроил вид при смене разговора.
+      var tidNow = currentThreadId || '';
+      if (tidNow !== (tid || '')) {
+        if (done) return;
+        done = true;
+        vsActive = null;
+        gsaDiagVs('gsa-vs-thread-mismatch', { expected: tid || '', actual: tidNow, verdict: 'abort', reason: reason });
+        console.log('[ai-cm-google-search] виртуальный скролл прерван: тред сменился (' +
+          (tid || '(пусто)') + ' → ' + (tidNow || '(пусто)') + ')');
+        return;
+      }
+      iterations++;
+      scroller.scrollTop = 0; // сайт подгружает старые сообщения при подходе к верху
+      setTimeout(function () {
+        try {
+          var h = scroller.scrollHeight;
+          if (window.GoogleFolwrUtils && window.GoogleFolwrUtils.extractTurnsFromDocument) {
+            var domTurns = window.GoogleFolwrUtils.extractTurnsFromDocument(document);
+            if (domTurns.length > lastFullTurns.length) {
+              var mergeFn = window.GoogleFolwrUtils.mergeTurnsByKey || function (a, b) { return a.concat(b); };
+              if (typeof gsaDiagBaseWrite === 'function') gsaDiagBaseWrite('scroll-backfill', domTurns, 'submit', tid, { iterations: iterations, stalls: stalls, domTurns: domTurns.length, baseTurns: lastFullTurns.length });
+              // O-32: DOM-добор НЕ доказывает полноту истории — вердикт полноты выносит
+              // только probe-классификатор (classifyFolwrContinuation → applyTurns(..., true)).
+              // Здесь стоял вызов без третьего аргумента: полнота бралась ДЕФОЛТОМ
+              // (buildDetail: historyComplete !== false), и baseComplete взводился по
+              // добору из DOM — гейт автоэкспорта видел «полную» историю там, где её никто
+              // не подтверждал. Явный false: база растёт, вердикт полноты не выдумывается.
+              applyTurns(mergeFn(lastFullTurns, domTurns), tid, false);
+              stalls = 0;
+            } else {
+              stalls++;
+            }
+          } else {
+            stalls++;
+          }
+          if (h === lastScrollHeight && stalls >= VS_STALL_LIMIT) {
+            finishVs('[ai-cm-google-search] виртуальный скролл завершён: итого=' + lastFullTurns.length + ' ходов');
+            return;
+          }
+          if (h !== lastScrollHeight) stalls = 0;
+          lastScrollHeight = h;
+          tick();
+        } catch (e) { finishVs(); }
+      }, VS_STEP_WAIT_MS);
+    }
+    tick();
+    return true;
+  }
+
+  // v1.26: probe-полнота. Если распарсено == DOM-контейнеров и курсор есть — тихий
+  // probe-шаг пагинации с курсором (без скролла, по аналогии с тихим циклом Gemini).
+  // v1.17: полнота решается по СОДЕРЖИМОМУ страницы (describeFolwrPage), а не по её длине:
+  // новых ходов нет / тот же курсор / пустое тело при ok → ПОЛНАЯ=true и baseComplete=true
+  // (итог виден в обычной строке folwr-open, которая печатается всегда); +ходов>0 и новый
+  // курсор → продолжать тихий цикл (кап 10 шагов). Детальные логи probe — под debugLog.
+  var FOLWR_PROBE_MAX_STEPS = 10;
+  var probedTids = {}; // v43: гард «один probe на threadId» (handshake-реэмит / собственный probe-запрос не перезапускают probe)
+
+  // v1.18 (F5): состояние probe-полноты наружу (MAIN → ISOLATED через CustomEvent, как
+  // у ai-cm-full-history). Нужен ровно для ярлыка причины skip автоэкспорта: пока probe
+  // в полёте, у GSA нет вердикта полноты → 'probe-running', а не общий 'not-complete'.
+  // Сам вердикт полноты по-прежнему один — historyComplete снимка.
+  function emitProbeState(running, tid) {
+    try {
+      window.dispatchEvent(new CustomEvent('ai-cm-gsa-probe-state', {
+        detail: { running: running === true, threadId: tid || '' }
+      }));
+    } catch (e) { }
+  }
+
+  function probeFolwrCompleteness(startUrl, startTurns, tid, firstCursor, gainedIn) {
+    // Гард прогонов на тред (петля GSA, High): тот же словарь, что и у пагинации/дубля
+    // открытия. Подавлённый прогон НЕ взводит probedTids — «не выполнялся» остаётся правдой,
+    // и probe своего шанса не теряет.
+    var gateKey = threadAuthKey(tid, startUrl);
+    var gate = beginFolwrRun('probe', tid, gateKey, { gained: (typeof gainedIn === 'number') ? gainedIn : 0 });
+    if (!gate.permit) return;
+    if (probedTids[tid]) {
+      endFolwrRun(gateKey);
+      debugLog('log', '[ai-cm-google-search] probe пропущен: уже выполнялся для threadId=' + tid);
+      return;
+    }
+    probedTids[tid] = true;
+    console.log('[ai-cm-google-search] probe запущен: threadId=' + tid);
+    emitProbeState(true, tid); // v1.18: probe в полёте — content.js отличает probe-running от not-complete
+    var key = gateKey;
+    var merged = Array.isArray(startTurns) ? startTurns.slice() : [];
+    var mergeFn = (window.GoogleFolwrUtils && window.GoogleFolwrUtils.mergeTurnsById) ||
+      function (a, b) { return a.concat(b); };
+    var extractToken = (window.GoogleFolwrUtils && window.GoogleFolwrUtils.extractContinuationToken) ||
+      function () { return null; };
+    var steps = 0;
+    var addedTotal = 0;
+    var accounted = 0; // уже зачтённый прирост базы (markFolwrRunGain — ровно на новых ходах)
+    var done = false;
+    // O-27 (защитный фикс): тело последнего шага probe — для проверки формы мусора на
+    // финальном applyTurns (в probe этот путь всегда завершает базу вердиктом ПОЛНАЯ).
+    var lastBody = '';
+
+    // Прирост зачитывается ОДНОЙ точкой (там, где merge реально добавил ходы): этим же
+    // снимается окно треда — после новых ходов следующий прогон стартует без ожидания.
+    function accountGain() {
+      if (addedTotal > accounted) {
+        accounted = addedTotal;
+        markFolwrRunGain(key);
+      }
+    }
+
+    // v43: итоговая строка folwr-open печатается на ВСЕХ выходах.
+    // complete=true → applyTurns(..., true) (baseComplete=true); иначе база не трогается.
+    function finish(reason, complete) {
+      if (done) return;
+      done = true;
+      activeFolwrInFlight[key] = false;
+      if (complete) {
+        if (typeof gsaDiagBaseWrite === 'function') gsaDiagBaseWrite('probe', merged, 'submit-final', tid, { complete: 1, addedTotal: addedTotal, steps: steps, reason: reason });
+        applyTurns(merged.length > 0 ? merged : lastFullTurns, tid, true, lastBody);
+      } else if (typeof gsaDiagBaseWrite === 'function') {
+        gsaDiagBaseWrite('probe', merged, 'skip-incomplete', tid, { complete: 0, addedTotal: addedTotal, steps: steps, reason: reason });
+      }
+      accountGain();
+      endFolwrRun(key);
+      // v1.18 (F1): вердикт probe-классификатора уходит в content.js ОДНОЙ точкой —
+      // applyTurns(..., true) → buildDetail(historyComplete=true) → событие
+      // ai-cm-full-history → content.js baseComplete=1 (гейт shouldSkipAutoExport).
+      // Отдельного дублирующего вердикта у content.js нет.
+      emitProbeState(false, tid);
+      console.log('[ai-cm-google-search] folwr-open: ходов=' + lastFullTurns.length +
+        ', DOM-контейнеров=' + document.querySelectorAll('[data-scope-id="turn"]').length +
+        ', probe +ходов=' + addedTotal +
+        ', шагов=' + steps +
+        ', ПОЛНАЯ=' + !!complete +
+        ', threadId=' + tid);
+      debugLog('log', '[ai-cm-google-search] probe завершён: reason=' + reason);
+    }
+
+    function step(cursor) {
+      if (!cursor) { finish('курсор исчерпан', true); return; }
+      if (steps >= FOLWR_PROBE_MAX_STEPS) { finish('лимит шагов', true); return; }
+      // v1.24: circuit-breaker — во время cooldown свои запросы запрещены.
+      if (!ownRequestsAllowed()) {
+        debugLog('log', '[ai-cm-google-search] probe прерван: cooldown 429/sorry');
+        finish('cooldown-429-sorry', false);
+        return;
+      }
+      if (activeFolwrInFlight[key]) return; // не слать параллельно тот же тред
+      activeFolwrInFlight[key] = true;
+      steps++;
+      var pageUrl = urlWithMstk(startUrl, cursor);
+      window.fetch(pageUrl, { credentials: 'include' })
+        .then(function (resp) {
+          if (isSorryResponse(resp && resp.status, resp && resp.url)) {
+            triggerSorryCooldown();
+            activeFolwrInFlight[key] = false;
+            finish('429/sorry', false);
+            return null;
+          }
+          if (!resp) return { resp: null, txt: '' };
+          // v1.17: тело читаем ВСЕГДА — и при не-ok, и на коротком ответе. Прежний гейт
+          // `txt.length <= 100000` объявлял короткую страницу «пустой» до разбора.
+          return resp.text().then(function (t) {
+            return { resp: resp, txt: t || '' };
+          }, function () { return { resp: resp, txt: '' }; });
+        })
+        .then(function (page) {
+          if (!page) return; // 429//sorry/ → cooldown, probe уже завершён
+          activeFolwrInFlight[key] = false;
+          var txt = page.txt;
+          lastBody = txt; // O-27: тело шага probe — вход проверки формы мусора
+          var parsed = parseWithParser(txt);
+          var before = merged.length;
+          merged = mergeFn(merged, parsed.turns);
+          var added = merged.length - before;
+          addedTotal += added;
+          var next = extractToken(txt);
+          var pageInfo = describeFolwrPage(page.resp, txt, added, next, cursor);
+          // v1.17: детальный лог ответа страницы продолжения: статус, ok, длина, разбор,
+          // число новых ходов, курсор (новый/повтор) и raw-превью тела + finalUrl.
+          console.log('[ai-cm-google-search] probe шаг ' + steps + ': ' + pageInfo.line);
+          debugLog('log', '[ai-cm-google-search] probe шаг ' + steps + ': +ходов=' + added +
+            ' всего=' + merged.length + ' raw(' + txt.length + 'B): ' + diagPreview(txt));
+          if (added > 0) {
+            if (typeof gsaDiagBaseWrite === 'function') gsaDiagBaseWrite('probe', merged, 'submit', tid, { step: steps, added: added, kind: pageInfo.cls.kind, cursor: (next ? next.slice(0, 12) : 'нет') });
+            applyTurns(merged, tid, false, txt);
+            accountGain();
+          } else if (typeof gsaDiagBaseWrite === 'function') {
+            gsaDiagBaseWrite('probe', parsed.turns, 'skip-no-gain', tid, { step: steps, added: 0, kind: pageInfo.cls.kind, cursor: (next ? next.slice(0, 12) : 'нет') });
+          }
+          // v1.17: полнота по содержимому. Нет новых ходов / тот же курсор / пустое тело при
+          // ok → истории больше нет → ПОЛНАЯ=true. Продолжаем только при новых ходах и НОВОМ курсоре.
+          if (pageInfo.cls.complete) { finish('probe-' + pageInfo.cls.kind, true); return; }
+          if (!pageInfo.cls.canContinue) { finish('probe-' + pageInfo.cls.kind, false); return; }
+          setTimeout(function () { step(next); }, FOLWR_PAGE_DELAY_MS);
+        })
+        .catch(function () { activeFolwrInFlight[key] = false; finish('ошибка сети', false); });
+    }
+
+    step(firstCursor);
+  }
+
+  // Активная загрузка истории: пассивный folwr при открытии старого чата в Network не
+  // ловится (фильтр пуст) — расширение пере-запрашивает последний зафиксированный шаблон
+  // GET /async/folwr. Ответ обработается тем же перехваченным обработчиком folwr-open.
+  function activeLoadFolwr(reason) {
+    if (!lastFolwrOpenUrl) return;
+    // v1.24: circuit-breaker — рефетч истории запрещён во время cooldown 429/sorry.
+    if (!ownRequestsAllowed()) {
+      console.log('[ai-cm-google-search] активная загрузка пропущена: cooldown 429/sorry (' + reason + ')');
+      return;
+    }
+    var tid = readDomThreadId() || currentThreadId || emittedThreadId;
+    var key = threadAuthKey(tid, lastFolwrOpenUrl);
+    // сериализация активных folwr по threadId|authuser: не слать параллельно тот же тред.
+    if (activeFolwrInFlight[key]) return;
+    // гонка: если пассивный folwr того же threadId|authuser пришёл <3с назад — не дёргаем активный.
+    if (Date.now() - (lastPassiveFolwrTs[key] || 0) < 3000) {
+      console.log('[ai-cm-google-search] активная загрузка пропущена: пассивный folwr <3с (' + reason + ')');
+      return;
+    }
+    activeFolwrInFlight[key] = true;
+    console.log('[ai-cm-google-search] активная загрузка истории по шаблону folwr (' + reason + ')');
+    try {
+      window.fetch(lastFolwrOpenUrl, { credentials: 'include' })
+        .catch(function () { })
+        .then(function () { activeFolwrInFlight[key] = false; });
+    } catch (e) { activeFolwrInFlight[key] = false; }
+  }
+
+  // ---- применение кэша при смене threadId (SPA-возврат без сети) ----
+  function checkThreadSwitch() {
+    var tid = readDomThreadId();
+    if (!tid) {
+      // O-27/O-32 (диагностика): несброс — в DOM нет threadId (сервисная страница/поиск).
+      // Антиспам: опрос идёт раз в 1с, строка печатается только на смену сигнатуры.
+      var sigNoDom = 'no-thread-dom|' + (baseThreadId || '');
+      if (typeof lastDiagSwitchSig === 'string' && sigNoDom !== lastDiagSwitchSig) {
+        lastDiagSwitchSig = sigNoDom;
+        if (typeof gsaDiagState === 'function') gsaDiagState('checkThreadSwitch', 'no-reset', 'no-thread-dom', {});
+      }
+      return;
+    }
+    // v1.27 (O-31): «без смены» — только когда и активный тред, и принадлежность базы
+    // совпадают с DOM. Иначе (база осталась у другого разговора) — ре-синхронизация.
+    if (tid === currentThreadId && tid === baseThreadId) {
+      var sigSame = 'same|' + tid;
+      if (typeof lastDiagSwitchSig === 'string' && sigSame !== lastDiagSwitchSig) {
+        lastDiagSwitchSig = sigSame;
+        if (typeof gsaDiagState === 'function') gsaDiagState('checkThreadSwitch', 'no-reset', 'same-thread', { from: tid, to: tid });
+      }
+      return false;
+    }
+    // threadId сменился
+    var prevSwitchTid = currentThreadId || '';
+    currentThreadId = tid;
+    probedTids = {}; // v43: сброс гарда «один probe на threadId» при смене треда
+    // O-27/O-32 (диагностика): причина сброса — смена threadId в DOM; cache — был ли сегмент.
+    if (typeof gsaDiagState === 'function') gsaDiagState('checkThreadSwitch', 'switching', 'thread-id-switch', { from: prevSwitchTid || '(пусто)', to: tid, cache: threadCache.has(tid) ? 1 : 0 });
+    // v1.27 (O-31): смена разговора → активная база переключается на сегмент нового
+    // threadId (или сбрасывается, если сегмента нет). Ходы прежнего разговора в новый
+    // не переносятся и в экспорт/pct не попадают.
+    activateThread(tid);
+    var cached = threadCache.get(tid);
+    if (cached && cached.snapshot) {
+      lastFullTurns = (cached.turns || []).slice();
+      lastFullMessages = (cached.messages || []).slice();
+      lastFullSnapshot = cached.snapshot;
+      emittedThreadId = tid;
+      console.log('[ai-cm-google-search] threadId сменился → эмит кэша (' + tid + ')');
+      emitDetail(lastFullSnapshot);
+    } else {
+      // нет кэша — сбрасываем базу и пытаемся активно догрузить историю
+      lastFullTurns = [];
+      lastFullMessages = [];
+      lastFullSnapshot = null;
+      seenKeys = {};
+      emittedThreadId = '';
+      console.log('[ai-cm-google-search] threadId сменился → кэша нет (' + tid + ')');
+      activeLoadFolwr('thread-switch:' + tid);
+    }
+    return true;
+  }
+
+  // ---- инициализация/опрос threadId ----
+  currentThreadId = readDomThreadId();
+  baseThreadId = currentThreadId; // v1.27 (O-31): база с самого старта привязана к разговору страницы
+  // v1.13.1 (R2): guard-поллинг через aiCmCommon.setIntervalVisible — skip при
+  // скрытой вкладке; фолбэк на plain setInterval, если window.aiCmCommon недоступен.
+  var aiCmPoll = (typeof window !== 'undefined' && window.aiCmCommon && window.aiCmCommon.setIntervalVisible)
+    ? function (f, m) { return window.aiCmCommon.setIntervalVisible(f, m); }
+    : setInterval;
+  aiCmPoll(function () {
+    checkThreadSwitch();
+  }, 1000);
+
+  // ---- 1. Перехват window.fetch ----
+  var origFetch = window.fetch;
+
+  window.fetch = function (input, init) {
+    var url = '';
+    try { url = (typeof input === 'string') ? input : (input && input.url) || ''; } catch (e) { swallow(e, 'gsa:fetch-url-read'); }
+    var method = '';
+    try { method = (init && init.method) ? String(init.method).toUpperCase() : 'GET'; } catch (e) { swallow(e, 'gsa:fetch-method-read'); }
+
+    var isFolwr = url.indexOf('/folwr') !== -1;
+    var isFolif = url.indexOf('/folif') !== -1;
+    var isOpenFolwr = url.indexOf('/async/folwr') !== -1;
+
+    var promise;
+    try { promise = origFetch.apply(this, arguments); } catch (e) { return Promise.reject(e); }
+
+    // v1.24: детект антилимита на ЛЮБОМ перехваченном ответе (страницы или нашем):
+    // status 429 или итоговый URL содержит /sorry/ → cooldown собственных запросов.
+    try {
+      promise.then(function (resp) {
+        try {
+          if (isSorryResponse(resp && resp.status, resp && resp.url)) triggerSorryCooldown();
+        } catch (e) { swallow(e, 'gsa:sorry-detect-fetch'); }
+      }, function () { });
+    } catch (e) { swallow(e, 'gsa:fetch-then-hook'); }
+
+    if ((isFolwr || isFolif) && !isOpenFolwr) {
+      var isFull = isFolwr;
+      promise.then(function (resp) {
+        try {
+          // Наблюдение (ii) живой приёмки GSA 2026-09-26 11:27–11:34: fetch folwr упёрся
+          // в CORS/303 consent-редирект Google (гарды O-27/O-31/O-32 целы — мусорного
+          // экспорта и краша нет), но событие было НЕВИДИМО в логах. Строка ниже —
+          // read-only телеметрия ТОЧКИ ОТВЕТА: только поля response, ни одного изменения
+          // базы/экспорта. Печатается под гейтом aiCmDebug (как O-27 captcha, воспроизведение
+          // по требованию невозможно — верификация при следующем естественном срабатывании).
+          // Точка намеренно ПОСЛЕ получения response и ДО чтения тела (resp.clone().text()):
+          // consent-редирект виден даже тогда, когда тело не читается вовсе.
+          if (typeof aiCmDiagLine === 'function' && aiCmDiagOn()) {
+            var fetchRedirected = !!(resp && resp.redirected);
+            var fetchType = (resp && resp.type) || '';
+            var fetchStatus = (resp && resp.status) || 0;
+            var fetchFinalUrl = (resp && resp.url) || url;
+            var fetchFinalHost = '';
+            try { fetchFinalHost = new URL(fetchFinalUrl).host; } catch (eHost) { fetchFinalHost = ''; }
+            aiCmDiagLine('gsa-fetch-telemetry', {
+              point: isFull ? 'folwr' : 'folif',
+              threadId: currentThreadId || emittedThreadId || '',
+              redirected: fetchRedirected,
+              status: fetchStatus,
+              type: fetchType,
+              finalUrlHost: fetchFinalHost,
+              verdict: (fetchRedirected === true || fetchType === 'opaqueredirect' || fetchStatus === 303)
+                ? 'consent-redirect-candidate' : 'normal'
+            });
+          }
+          if (resp && resp.ok) {
+            // v1.5.2: фиксируем время пассивного folwr/folif (ключ threadId|authuser),
+            // чтобы активная загрузка не дёргалась сразу после него (<3с).
+            lastPassiveFolwrTs[threadAuthKey(currentThreadId || emittedThreadId, url)] = Date.now();
+            resp.clone().text().then(function (txt) {
+              var model = extractModel(txt);
+              if (model) detectedModelSlug = model;
+              var parsed = parseWithParser(txt);
+              if (parsed.turns.length > 0) {
+                // O-27/O-32 (диагностика): путь записи — пассивный folwr (полный) / folif (чанк).
+                if (typeof gsaDiagBaseWrite === 'function') gsaDiagBaseWrite(isFull ? 'passive-folwr' : 'passive-folif', parsed.turns, 'submit', parsed.threadId, { url: rawSnippet(url, 80), bodyLen: (txt ? txt.length : 0) });
+                mergeTurns(parsed.turns, isFull, parsed.threadId, txt);
+              } else if (typeof gsaDiagBaseWrite === 'function') {
+                gsaDiagBaseWrite(isFull ? 'passive-folwr' : 'passive-folif', parsed.turns, 'skip-no-turns', parsed.threadId, { url: rawSnippet(url, 80), bodyLen: (txt ? txt.length : 0) });
+              }
+            }).catch(function () { });
+          }
+        } catch (e) { }
+        return resp;
+      }, function () { });
+    }
+
+    // GET /async/folwr — полная история
+    if (isOpenFolwr && method !== 'POST') {
+      try { lastFolwrOpenUrl = url; } catch (e) { }
+      promise.then(function (resp) {
+        if (resp && resp.ok) {
+          resp.clone().text().then(function (txt) {
+            // v1.17: гейт по длине (было `txt.length > 100000`) убран — короткий ответ folwr
+            // тоже разбирается, иначе «пустая страница» неотличима от «ходов нет».
+            if (txt) {
+              var model = extractModel(txt);
+              if (model) detectedModelSlug = model;
+              try {
+                var parsed = parseWithParser(txt);
+                var tid = parsed.threadId || readDomThreadId();
+                // v1.27 (O-31): чужой ответ не подменяет активный разговор даже своим tid
+                if (tid && !isForeignThread(tid)) currentThreadId = tid;
+                if (parsed && parsed.turns && parsed.turns.length > 0) {
+                  // v1.5.2: полнота folwr vs DOM. Сравниваем счётчик turn-контейнеров
+                  // снимка folwr с числом turn-контейнеров в живом DOM. Если DOM больше —
+                  // folwr обрезан → досбор: merge хвоста/головы из DOM. Критерий «ПОЛНАЯ» —
+                  // только при совпадении счётчиков.
+                  var folwrTurnCount = 0;
+                  if (window.GoogleFolwrUtils && window.GoogleFolwrUtils.countTurnContainers) {
+                    folwrTurnCount = window.GoogleFolwrUtils.countTurnContainers(txt);
+                  }
+                  var domTurnCount = 0;
+                  try { domTurnCount = document.querySelectorAll('[data-scope-id="turn"]').length; } catch (e) { swallow(e, 'gsa:dom-turn-count'); }
+                  var domTurns = [];
+                  if (window.GoogleFolwrUtils && window.GoogleFolwrUtils.extractTurnsFromDocument) {
+                    domTurns = window.GoogleFolwrUtils.extractTurnsFromDocument(document);
+                  }
+                  var baseTurns = parsed.turns;
+                  var mergedTurns = baseTurns;
+                  var dopasbor = 0;
+                  if (domTurnCount > folwrTurnCount && domTurns.length > 0) {
+                    var mergeFn = (window.GoogleFolwrUtils && window.GoogleFolwrUtils.mergeTurnsByKey) || function (a, b) { return a.concat(b); };
+                    mergedTurns = mergeFn(baseTurns, domTurns);
+                    dopasbor = mergedTurns.length - baseTurns.length;
+                  }
+                  // v1.5.2+ «ПОЛНАЯ» только при «курсора нет И folwr>=DOM».
+                  // Курсор — скрытый div data-mstk (старый формат) / srtst-подобный токен.
+                  var folwrCursor = null;
+                  if (window.GoogleFolwrUtils && window.GoogleFolwrUtils.extractContinuationToken) {
+                    folwrCursor = window.GoogleFolwrUtils.extractContinuationToken(txt);
+                  }
+                  var historyComplete = (!folwrCursor) && (domTurnCount <= folwrTurnCount);
+
+                  // v1.5.2: guard от сжатия базы — floor по threadId, union вместо замены.
+                  // Повторный folwr-open того же threadId не должен уменьшать уже
+                  // накопленную базу (например, урезанный ответ активной загрузки).
+                  if (emittedThreadId === tid && lastFullTurns.length > mergedTurns.length) {
+                    var unionFn = (window.GoogleFolwrUtils && window.GoogleFolwrUtils.mergeTurnsById) ||
+                      function (a, b) { return a.concat(b); };
+                    mergedTurns = unionFn(lastFullTurns, mergedTurns);
+                    console.log('[ai-cm-google-search] база сжата — сохранён максимум (' +
+                      mergedTurns.length + ' ходов)');
+                  }
+
+                  // O-27/O-32 (диагностика): путь записи — folwr-open (GET /async/folwr):
+                  // распарсено, контейнеры folwr/DOM, досбор, курсор, вердикт ПОЛНАЯ.
+                  var openKey = threadAuthKey(tid, url);
+                  if (typeof gsaDiagBaseWrite === 'function') gsaDiagBaseWrite('open', mergedTurns, 'submit', tid, { parsed: baseTurns.length, folwrContainers: folwrTurnCount, domContainers: domTurnCount, dopasbor: dopasbor, complete: historyComplete ? 1 : 0, cursor: (folwrCursor ? folwrCursor.slice(0, 12) : 'нет'), bodyLen: (txt ? txt.length : 0) });
+                  // Прирост считается ДО записи: applyTurns присваивает lastFullTurns новый
+                  // массив, поэтому после вызова разницу уже не измерить.
+                  var openGained = mergedTurns.length - lastFullTurns.length;
+                  applyTurns(mergedTurns, tid, historyComplete, txt);
+
+                  // v1.5.2: антиспам — печатаем folwr-open только при изменении сигнатуры.
+                  var sig = [baseTurns.length, folwrTurnCount, domTurnCount, dopasbor,
+                  lastFullTurns.length, (folwrCursor ? folwrCursor.slice(0, 12) : 'нет'),
+                    historyComplete, tid].join('|');
+                  if (sig !== lastFolwrSig) {
+                    lastFolwrSig = sig;
+                    console.log('[ai-cm-google-search] folwr-open: распарсено=' + baseTurns.length +
+                      ', folwr-контейнеров=' + folwrTurnCount +
+                      ', DOM-контейнеров=' + domTurnCount +
+                      ', досбор=' + dopasbor +
+                      ', видимых ходов=' + lastFullTurns.length +
+                      ', курсор=' + (folwrCursor ? folwrCursor.slice(0, 12) : 'нет') +
+                      ', ПОЛНАЯ=' + historyComplete +
+                      ', threadId=' + tid);
+                  }
+
+                  // Петля GSA (High): дорогой хвост открытия (пагинация курсором / probe)
+                  // стартует только при свободном окне треда. Приём данных выше (applyTurns)
+                  // гардом НЕ гейтится — потерять ходы он не может по построению.
+                  if (openGained > 0) markFolwrRunGain(openKey);
+                  var openGate = (openGained > 0)
+                    ? folwrRunPermit('open', tid, openKey, { gained: openGained, growthPriority: true, recordNoGain: false })
+                    : null;
+                  var openTailAllowed = !(openGate && !openGate.permit);
+                  if (!openTailAllowed) {
+                    debugLog('log', '[ai-cm-google-search] хвост открытия (пагинация/probe) подавлен гардом петли: threadId=' + tid);
+                  }
+
+                  // v1.26: если распарсено == DOM-контейнеров и курсор есть — тихий probe
+                  // полноты (без скролла). Иначе — прежняя пагинация курсором.
+                  if (folwrCursor && openTailAllowed) {
+                    if (baseTurns.length === domTurnCount) {
+                      probeFolwrCompleteness(url, mergedTurns, tid, folwrCursor, openGained);
+                    } else {
+                      followFolwrPagination(url, mergedTurns, tid, folwrCursor, openGained);
+                    }
+                  }
+                } else {
+                  // v1.17: страница без ходов — печатаем фактическое содержимое (статус, длина,
+                  // курсор, raw-превью), чтобы отличать «истории нет» от ошибки/смены формата.
+                  var openPageInfo = describeFolwrPage(resp, txt, 0, null, null);
+                  console.log('[ai-cm-google-search] folwr-open: ходов не распарсено, ' + openPageInfo.line);
+                  debugLog('log', '[ai-cm-google-search] folwr-open raw(' + txt.length + 'B): ' + diagPreview(txt));
+                  // O-27/O-32 (диагностика): тело folwr-open БЕЗ ходов — первый байтовый след
+                  // мусора captcha (`)]}' [""]`): путь, вердикт парсера и первые 100 символов.
+                  if (typeof gsaDiagBaseWrite === 'function') gsaDiagBaseWrite('open', [], 'no-turns-parsed', tid, { bodyLen: (txt ? txt.length : 0), head: (typeof aiCmDiagHead === 'function') ? aiCmDiagHead(txt, 100) : String(txt || '').slice(0, 100), kind: openPageInfo.cls.kind, status: (resp && resp.status) || 0, ok: (resp && resp.ok) ? 1 : 0 });
+                }
+              } catch (e) {
+                console.log('[ai-cm-google-search] folwr-open: ошибка:', e && e.message);
+              }
+            }
+          }).catch(function () { });
+        }
+      }).catch(function () { });
+    }
+
+    return promise;
+  };
+
+  // ---- 2. Перехват XMLHttpRequest ----
+  var OrigXHR = window.XMLHttpRequest;
+  if (OrigXHR) {
+    var origOpen = OrigXHR.prototype.open;
+    var origSend = OrigXHR.prototype.send;
+
+    OrigXHR.prototype.open = function (method, url) {
+      try {
+        this.__aiCmUrl = String(url || '');
+        this.__aiCmMethod = String(method || 'GET');
+      } catch (e) {
+        this.__aiCmUrl = '';
+        this.__aiCmMethod = 'GET';
+      }
+      return origOpen.apply(this, arguments);
+    };
+
+    OrigXHR.prototype.send = function (body) {
+      var url = '';
+      try { url = this.__aiCmUrl || ''; } catch (e) { swallow(e, 'gsa:xhr-state-read'); }
+      var method = '';
+      try { method = (this.__aiCmMethod || 'GET').toUpperCase(); } catch (e) { swallow(e, 'gsa:xhr-method-read'); }
+
+      var isFolwr = url.indexOf('/folwr') !== -1;
+      var isFolif = url.indexOf('/folif') !== -1;
+
+      // v1.24: детект антилимита на любом XHR-ответе (status 429 или итоговый URL /sorry/).
+      this.addEventListener('load', function () {
+        try {
+          if (isSorryResponse(this.status, this.responseURL)) triggerSorryCooldown();
+        } catch (e) { swallow(e, 'gsa:sorry-detect-xhr'); }
+      });
+
+      if (isFolwr || isFolif) {
+        var isFullXhr = isFolwr;
+        var self = this;
+        this.addEventListener('load', function () {
+          try {
+            if (self.status >= 200 && self.status < 300 && self.responseText) {
+              // v1.5.2: фиксируем время пассивного folwr/folif (XHR) для защиты от гонки <3с.
+              lastPassiveFolwrTs[threadAuthKey(currentThreadId || emittedThreadId, url)] = Date.now();
+              var txt = self.responseText;
+              var modelXhr = extractModel(txt);
+              if (modelXhr) detectedModelSlug = modelXhr;
+              var parsed = parseWithParser(txt);
+              if (parsed.turns.length > 0) {
+                // O-27/O-32 (диагностика): путь записи — XHR (folwr полный / folif чанк).
+                if (typeof gsaDiagBaseWrite === 'function') gsaDiagBaseWrite('xhr', parsed.turns, 'submit', parsed.threadId, { full: (isFullXhr === true) ? 1 : 0, url: rawSnippet(url, 80), bodyLen: (txt ? txt.length : 0) });
+                mergeTurns(parsed.turns, isFullXhr, parsed.threadId, txt);
+              } else if (typeof gsaDiagBaseWrite === 'function') {
+                gsaDiagBaseWrite('xhr', parsed.turns, 'skip-no-turns', parsed.threadId, { full: (isFullXhr === true) ? 1 : 0, url: rawSnippet(url, 80), bodyLen: (txt ? txt.length : 0) });
+              }
+            }
+          } catch (e) { swallow(e, 'gsa:passive-xhr-parse'); }
+        });
+      }
+
+      return origSend.apply(this, arguments);
+    };
+  }
+
+  // Handshake
+  window.addEventListener('ai-cm-google-search-ready', function () {
+    if (lastFullSnapshot) {
+      console.log('[ai-cm-google-search] folwr-open: повторный эмит по handshake');
+      emitDetail(lastFullSnapshot);
+    } else {
+      activeLoadFolwr('handshake');
+    }
+  });
+
+  console.log('[ai-cm-google-search] Перехватчик установлен');
+  console.log('[ai-cm-google-search] parser available: ' + typeof window.parseGoogleFolwrOpen);
+})();
