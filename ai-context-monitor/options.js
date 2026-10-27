@@ -1531,6 +1531,7 @@
       var apiKeyInput = document.getElementById("api-key");
       var toggleApiKeyBtn = document.getElementById("toggle-api-key");
       var exactCountCheckbox = document.getElementById("exact-count");
+      var exactCountWarningEl = document.getElementById("exact-count-warning");
       var versionEl = document.querySelector(".version");
       var exportMdBtn = document.getElementById("export-md");
       var exportJsonBtn = document.getElementById("export-json");
@@ -1637,6 +1638,29 @@
         }
         aiCmPurgeLegacyByokKeys();
       }
+      var aiCmByokHasKeyState = null;
+      function aiCmRenderExactCountWarning(show) {
+        if (!exactCountWarningEl) return;
+        exactCountWarningEl.textContent = show ? aiCmI18nMessage(
+          "options_exact_count_nokey",
+          "\u041A\u043B\u044E\u0447 API \u043D\u0435 \u043D\u0430\u0439\u0434\u0435\u043D. \u0412\u0432\u0435\u0434\u0438\u0442\u0435 \u043A\u043B\u044E\u0447 \u0437\u0430\u043D\u043E\u0432\u043E, \u0447\u0442\u043E\u0431\u044B \u0432\u043A\u043B\u044E\u0447\u0438\u0442\u044C \u0442\u043E\u0447\u043D\u044B\u0439 \u043F\u043E\u0434\u0441\u0447\u0451\u0442"
+        ) : "";
+      }
+      function aiCmSyncExactCountWithByok(hasKey) {
+        if (hasKey !== true && hasKey !== false) return;
+        aiCmByokHasKeyState = hasKey;
+        if (hasKey || !exactCountCheckbox || !exactCountCheckbox.checked) {
+          aiCmRenderExactCountWarning(false);
+          return;
+        }
+        exactCountCheckbox.checked = false;
+        aiCmRenderExactCountWarning(true);
+        try {
+          chrome.storage.local.set({ ai_cm_exact_token_count: false });
+        } catch (eSync) {
+          console.warn("[AI CM][catch] aiCmSyncExactCountWithByok:", eSync);
+        }
+      }
       function aiCmLoadByokKey() {
         try {
           let onSession2 = function(data) {
@@ -1646,9 +1670,11 @@
             if (typeof key === "string" && key) {
               if (apiKeyInput) apiKeyInput.value = key;
               aiCmRenderApiKeyStatus(true);
+              aiCmSyncExactCountWithByok(true);
               return;
             }
             aiCmRenderApiKeyStatus(false);
+            aiCmSyncExactCountWithByok(false);
             try {
               chrome.storage.local.get(AI_CM_BYOK_LEGACY_KEYS, function(dl) {
                 var legacy = aiCmFirstLegacyByokKey(dl);
@@ -1656,6 +1682,7 @@
                 aiCmSaveByokKey(legacy);
                 if (apiKeyInput) apiKeyInput.value = legacy;
                 aiCmRenderApiKeyStatus(true);
+                aiCmSyncExactCountWithByok(true);
                 console.log("[AI CM][byok] migrated plaintext\u2192session");
               });
             } catch (eLeg) {
@@ -1674,6 +1701,7 @@
               if (!handled) {
                 handled = true;
                 aiCmRenderApiKeyStatus(false);
+                aiCmSyncExactCountWithByok(false);
               }
             });
           }
@@ -1682,7 +1710,9 @@
         }
       }
       chrome.storage.local.get(["ai_cm_exact_token_count"], function(data) {
-        if (data.ai_cm_exact_token_count !== void 0) exactCountCheckbox.checked = data.ai_cm_exact_token_count;
+        if (data.ai_cm_exact_token_count === void 0) return;
+        exactCountCheckbox.checked = !!data.ai_cm_exact_token_count;
+        if (aiCmByokHasKeyState === false) aiCmSyncExactCountWithByok(false);
       });
       aiCmLoadByokKey();
       modelSelect && modelSelect.addEventListener("change", function() {
@@ -1845,6 +1875,7 @@
       apiKeyInput && apiKeyInput.addEventListener("input", function() {
         aiCmSaveByokKey(apiKeyInput.value);
         aiCmRenderApiKeyStatus(!!apiKeyInput.value);
+        aiCmSyncExactCountWithByok(!!apiKeyInput.value);
       });
       removeApiKeyBtn && removeApiKeyBtn.addEventListener("click", function() {
         try {
@@ -1857,6 +1888,7 @@
         aiCmPurgeLegacyByokKeys();
         if (apiKeyInput) apiKeyInput.value = "";
         aiCmRenderApiKeyStatus(false);
+        aiCmSyncExactCountWithByok(false);
       });
       toggleApiKeyBtn && toggleApiKeyBtn.addEventListener("click", function() {
         if (apiKeyInput.type === "password") {
@@ -1870,6 +1902,11 @@
       });
       exactCountCheckbox && exactCountCheckbox.addEventListener("change", function() {
         chrome.storage.local.set({ ai_cm_exact_token_count: exactCountCheckbox.checked });
+        if (aiCmByokHasKeyState === false && exactCountCheckbox.checked) {
+          aiCmSyncExactCountWithByok(false);
+        } else {
+          aiCmRenderExactCountWarning(false);
+        }
       });
       var autoExportCheckbox = document.getElementById("aiCmAutoExport");
       var autoExportPctInput = document.getElementById("aiCmAutoExportPct");

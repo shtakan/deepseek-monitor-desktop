@@ -186,6 +186,17 @@
         });
         console.log("AI Context Monitor: \u043F\u0435\u0440\u0435\u0445\u0432\u0430\u0442\u0447\u0438\u043A Qwen \u0437\u0430\u0440\u0435\u0433\u0438\u0441\u0442\u0440\u0438\u0440\u043E\u0432\u0430\u043D (\u043C\u0438\u0440 \u0441\u0430\u0439\u0442\u0430, document_start)");
       }
+      if (ids.indexOf("ai-cm-aistudio-intercept") === -1) {
+        await registerSafe("ai-cm-aistudio-intercept", {
+          id: "ai-cm-aistudio-intercept",
+          matches: ["https://aistudio.google.com/*"],
+          js: ["utils/debug.js", "core/aistudio-intercept.js"],
+          runAt: "document_start",
+          world: "MAIN",
+          allFrames: false
+        });
+        console.log("AI Context Monitor: \u043F\u0435\u0440\u0435\u0445\u0432\u0430\u0442\u0447\u0438\u043A AI Studio \u0437\u0430\u0440\u0435\u0433\u0438\u0441\u0442\u0440\u0438\u0440\u043E\u0432\u0430\u043D (\u043C\u0438\u0440 \u0441\u0430\u0439\u0442\u0430, document_start)");
+      }
     } catch (err) {
       console.warn("AI Context Monitor: \u043D\u0435 \u0443\u0434\u0430\u043B\u043E\u0441\u044C \u0437\u0430\u0440\u0435\u0433\u0438\u0441\u0442\u0440\u0438\u0440\u043E\u0432\u0430\u0442\u044C \u043F\u0435\u0440\u0435\u0445\u0432\u0430\u0442\u0447\u0438\u043A:", err);
     }

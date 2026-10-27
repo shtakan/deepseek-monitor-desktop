@@ -1628,7 +1628,13 @@
           try {
             const hasMessageNodes = document.querySelector("ms-cmark-node") !== null;
             debugLog("log", `[AistudioAdapter] isOnDialogPage: ${hasMessageNodes}`);
-            return hasMessageNodes;
+            if (hasMessageNodes) return true;
+            const netCount = this._netMessages().length;
+            if (netCount > 0) {
+              debugLog("log", `[AistudioAdapter] isOnDialogPage: true (\u0441\u0435\u0442\u044C: ${netCount} \u0441\u043E\u043E\u0431\u0449\u0435\u043D\u0438\u0439)`);
+              return true;
+            }
+            return false;
           } catch (error) {
             debugLog("error", "[AistudioAdapter] \u041E\u0448\u0438\u0431\u043A\u0430 \u0432 isOnDialogPage:", error);
             return false;
@@ -1642,6 +1648,11 @@
          */
         extractMessages() {
           try {
+            const netMessages = this._netMessages();
+            if (netMessages.length > 0) {
+              debugLog("log", `[AistudioAdapter] \u0418\u0441\u0442\u043E\u0440\u0438\u044F \u0438\u0437 \u0441\u0435\u0442\u0438: ${netMessages.length} \u0441\u043E\u043E\u0431\u0449\u0435\u043D\u0438\u0439 (DOM \u043D\u0435 \u0447\u0438\u0442\u0430\u0435\u043C)`);
+              return netMessages;
+            }
             const messages = [];
             const nodes = document.querySelectorAll("ms-cmark-node.v3-font-body");
             debugLog("log", `[AistudioAdapter] \u041D\u0430\u0439\u0434\u0435\u043D\u043E \u0443\u0437\u043B\u043E\u0432 \u0440\u0435\u043F\u043B\u0438\u043A: ${nodes.length}`);
@@ -1666,13 +1677,71 @@
           }
         }
         /**
-         * Модель AI Studio: в DOM нет стабильного индикатора, распознавание не делаем —
-         * возвращаем фолбэк (ключ есть в utils/model-config.js, окно 128k). Заглушка:
-         * при появлении разметки переключателя модели сюда добавляется разбор DOM.
+         * Модель AI Studio (v2.0.32).
+         *
+         * ДО ЧЕГО БЫЛО: константа 'gemini-3.1-pro'. Бейдж называл её и после того, как студия
+         * переключилась на 'Gemini 3.8 Flash' — расхождение с самой студией читается как дефект.
+         *
+         * ОТКУДА ТЕПЕРЬ. Тело запроса GenerateContent всегда несёт model: models/<slug>, поэтому
+         * перехватчик (core/aistudio-intercept.js:modelFromBody) присылает его мостом
+         * ai-cm-model-slug, а core/content.js кладёт в window.__aiCmNetModelSlug (ISOLATED-мир
+         * один, отдельного канала не нужно) и в кэш истории — значит после F5 фолбэка в константу
+         * уже не будет.
+         *
+         * ПОЧЕМУ НЕ DOM. Индикатор модели в панели Run settings не имеет стабильного класса, а
+         * текстовая догадка по «Gemini <версия> <семейство>» ловила бы упоминания модели в самой
+         * реплике и подписывала чат чужой моделью. Сеть — единственный недвусмысленный источник.
          * @returns {string}
          */
         detectModel() {
+          try {
+            const slug = typeof window !== "undefined" ? window.__aiCmNetModelSlug : "";
+            if (typeof slug === "string" && slug) {
+              debugLog("log", `[AistudioAdapter] \u041C\u043E\u0434\u0435\u043B\u044C \u0438\u0437 \u0441\u0435\u0442\u0438: ${slug}`);
+              return slug;
+            }
+          } catch (error) {
+            debugLog("error", "[AistudioAdapter] \u041E\u0448\u0438\u0431\u043A\u0430 \u0447\u0442\u0435\u043D\u0438\u044F \u043C\u043E\u0434\u0435\u043B\u0438 \u0438\u0437 \u0441\u0435\u0442\u0438:", error);
+          }
           return "gemini-3.1-pro";
+        }
+        /**
+         * Сетевая история AI Studio: снимок, который MAIN-перехватчик
+         * (core/aistudio-intercept.js) положил в ISOLATED-мир через core/content.js
+         * (window.__aiCmNetMsgs = { msgs: [{role, text}], count, ts, href }).
+         *
+         * Снимок принимается только для ТЕКУЩЕГО пути (SPA: AI Studio меняет /prompts/<id>
+         * без перезагрузки) — иначе история прошлого разговора питала бы счётчик нового.
+         * Нет снимка/путь не тот → [] и обычный DOM-парсинг.
+         * @returns {AistudioExtractedMessage[]}
+         */
+        _netMessages() {
+          try {
+            const raw = typeof window !== "undefined" ? window.__aiCmNetMsgs : null;
+            if (!raw || !Array.isArray(raw.msgs) || raw.msgs.length === 0) return [];
+            const here = String(window.location && window.location.pathname || "");
+            const there = String(raw.href || "");
+            if (there && typeof URL === "function") {
+              let therePath = there;
+              try {
+                therePath = new URL(there).pathname;
+              } catch (eUrl) {
+                therePath = there;
+              }
+              if (therePath && here && therePath !== here) return [];
+            }
+            const messages = [];
+            Array.prototype.forEach.call(raw.msgs, (m) => {
+              if (!m || typeof m.text !== "string") return;
+              const content = this._cleanText(m.text);
+              if (content.length === 0) return;
+              messages.push({ role: m.role === "assistant" || m.role === "model" ? "assistant" : "user", content });
+            });
+            return messages;
+          } catch (error) {
+            debugLog("error", "[AistudioAdapter] \u041E\u0448\u0438\u0431\u043A\u0430 \u0447\u0442\u0435\u043D\u0438\u044F \u0441\u0435\u0442\u0435\u0432\u043E\u0439 \u0438\u0441\u0442\u043E\u0440\u0438\u0438:", error);
+            return [];
+          }
         }
         /**
          * Текст узла реплики. innerText предпочтителен (видимый текст, как в браузере);
@@ -7374,6 +7443,56 @@
         if (next > 100) next = 100;
         setSafePctFromInput(String(next));
       }
+      var AI_CM_SAFE_PCT_MIGRATIONS = { aistudio: "google_search" };
+      function aiCmSafePctMigrationSource() {
+        const svc = getServiceKey();
+        const from = AI_CM_SAFE_PCT_MIGRATIONS && AI_CM_SAFE_PCT_MIGRATIONS[svc] || "";
+        if (!from) return null;
+        return { own: "ai_cm_safe_pct_" + svc, legacy: "ai_cm_safe_pct_" + from };
+      }
+      function aiCmSafePctMigrationValue(own, legacy) {
+        if (own !== void 0) return null;
+        if (typeof legacy !== "number" || !(legacy > 0)) return null;
+        return legacy;
+      }
+      function aiCmMigrateSafePct(onDone) {
+        const cb = typeof onDone === "function" ? onDone : function() {
+        };
+        let done = false;
+        const finish = function(value) {
+          if (done) return;
+          done = true;
+          cb(value);
+        };
+        try {
+          const pair = aiCmSafePctMigrationSource();
+          if (!pair) return false;
+          if (!isExtensionValid()) return false;
+          chrome.storage.sync.get([pair.own, pair.legacy], function(d) {
+            try {
+              const migrated = aiCmSafePctMigrationValue(d ? d[pair.own] : void 0, d ? d[pair.legacy] : void 0);
+              if (typeof migrated !== "number") {
+                finish(null);
+                return;
+              }
+              try {
+                chrome.storage.sync.set({ [pair.own]: migrated });
+              } catch (eMigrateSet) {
+                swallowSoft(eMigrateSet, "widget:aiCmMigrateSafePct-set");
+              }
+              finish(migrated);
+            } catch (eMigrateApply) {
+              swallowSoft(eMigrateApply, "widget:aiCmMigrateSafePct-apply");
+              finish(null);
+            }
+          });
+          return true;
+        } catch (eMigrate) {
+          swallowSoft(eMigrate, "widget:aiCmMigrateSafePct");
+          finish(null);
+          return true;
+        }
+      }
       function resetConversationState() {
         if (typeof aiCmDiagLine === "function") {
           aiCmDiagLine("gsa-state", {
@@ -7414,6 +7533,9 @@
           preTrimExportFired = {};
           trimRetryByConv = {};
         } catch (eTrimReset) {
+        }
+        if (typeof aiCmAistudioHistoryCacheClear === "function") {
+          aiCmAistudioHistoryCacheClear();
         }
         lastBounded = false;
         maxTokenCount = 0;
@@ -7549,6 +7671,14 @@
           font: '"Google Sans", Roboto, helvetica, arial, sans-serif',
           light: { bgTrack: "#f1f3f4", bgFill: "#1a73e8", text: "#3c4043", tooltipBg: "#ffffff", tooltipText: "#3c4043", shadow: "0 1px 6px rgba(32,33,36,0.28)", border: "1px solid #dadce0" },
           dark: { bgTrack: "#3c4043", bgFill: "#8ab4f8", text: "#e8eaed", tooltipBg: "#303134", tooltipText: "#e8eaed", shadow: "0 1px 6px rgba(0,0,0,0.4)", border: "1px solid #5f6368" }
+        },
+        // AI Studio — палитра Google (байтово та же, что google_search): пока ключа не было,
+        // aistudio.google.com попадал в ветку google.com и получал эту же палитру. Ключ вводится
+        // ради per-service порога (safePctKey), внешний вид виджета на AI Studio не меняется.
+        aistudio: {
+          font: '"Google Sans", Roboto, helvetica, arial, sans-serif',
+          light: { bgTrack: "#f1f3f4", bgFill: "#1a73e8", text: "#3c4043", tooltipBg: "#ffffff", tooltipText: "#3c4043", shadow: "0 1px 6px rgba(32,33,36,0.28)", border: "1px solid #dadce0" },
+          dark: { bgTrack: "#3c4043", bgFill: "#8ab4f8", text: "#e8eaed", tooltipBg: "#303134", tooltipText: "#e8eaed", shadow: "0 1px 6px rgba(0,0,0,0.4)", border: "1px solid #5f6368" }
         }
       };
       function getServiceKey() {
@@ -7556,6 +7686,7 @@
         if (host.includes("chatgpt.com")) return "chatgpt";
         if (host.includes("deepseek.com")) return "deepseek";
         if (host.includes("gemini.google.com")) return "gemini";
+        if (host.includes("aistudio.google.com")) return "aistudio";
         if (host.includes("google.com")) return "google_search";
         return host.includes("perplexity.ai") ? "perplexity" : host.includes("chat.qwen.ai") ? "qwen" : host.includes("claude.ai") ? "claude" : "chatgpt";
       }
@@ -8076,6 +8207,10 @@
         Api.setSafePctFromInput = setSafePctFromInput;
         Api.resetSafePct = resetSafePct;
         Api.stepSafePct = stepSafePct;
+        Api.AI_CM_SAFE_PCT_MIGRATIONS = AI_CM_SAFE_PCT_MIGRATIONS;
+        Api.aiCmSafePctMigrationSource = aiCmSafePctMigrationSource;
+        Api.aiCmSafePctMigrationValue = aiCmSafePctMigrationValue;
+        Api.aiCmMigrateSafePct = aiCmMigrateSafePct;
         Api.resetConversationState = resetConversationState;
         Api.THEME_CONFIGS = THEME_CONFIGS;
         Api.getServiceKey = getServiceKey;
@@ -10206,6 +10341,7 @@
         });
       }
       function aiCmByokFlag(hasKey) {
+        if (!hasKey) exactCountEnabled = false;
         return hasKey ? "1" : "";
       }
       var aiCmLastSeenConvId = getCurrentConvId() || "";
@@ -10261,6 +10397,7 @@
         });
         resetConversationState();
         aiCmAdapterBaseCount = 0;
+        if (typeof aiCmIsAistudioHost === "function" && typeof aiCmAistudioHistoryCacheRestore === "function" && aiCmIsAistudioHost()) aiCmAistudioHistoryCacheRestore();
         try {
           if (typeof aiCmDiagLine === "function" && currentAdapter && currentAdapter.siteName === "qwen") {
             aiCmQwenSpaResetAt = Date.now();
@@ -10453,7 +10590,17 @@
       }
       window.addEventListener("ai-cm-model-slug", function(ev) {
         var md = ev && ev.detail;
-        if (md && typeof md.slug === "string" && md.slug) detectedModelSlug = md.slug;
+        if (md && typeof md.slug === "string" && md.slug) {
+          detectedModelSlug = md.slug;
+          try {
+            if (aiCmIsAistudioHost()) {
+              aiCmNetModelSlugAistudio = md.slug;
+              window.__aiCmNetModelSlug = md.slug;
+            }
+          } catch (eSlugAis) {
+            swallowSoft(eSlugAis, "content:aistudio-model-slug");
+          }
+        }
       });
       window.addEventListener("ai-cm-full-history", function(ev) {
         try {
@@ -10939,12 +11086,24 @@
           loadByokCache();
           aiCmLoadPopupOverrides();
           if (isExtensionValid()) {
-            chrome.storage.sync.get([safePctKey()], (d) => {
-              const v = d[safePctKey()];
-              safePct = typeof v === "number" && v > 0 ? v : null;
+            const aiCmReadSafePct = () => {
+              chrome.storage.sync.get([safePctKey()], (d) => {
+                const v = d[safePctKey()];
+                safePct = typeof v === "number" && v > 0 ? v : null;
+                updatePanel();
+                if (isInitialized) processAndSend();
+              });
+            };
+            const aiCmSafePctMigrating = typeof aiCmMigrateSafePct === "function" && aiCmMigrateSafePct((migrated) => {
+              if (typeof migrated !== "number") {
+                aiCmReadSafePct();
+                return;
+              }
+              safePct = migrated;
               updatePanel();
               if (isInitialized) processAndSend();
             });
+            if (!aiCmSafePctMigrating) aiCmReadSafePct();
           }
           if (isExtensionValid()) {
             chrome.storage.sync.get(["showWidget"], (data) => {
@@ -11577,6 +11736,10 @@
       }
       function aiCmMetricServerTokens(svc, text) {
         if (svc === "qwen") return 0;
+        if (svc === "aistudio" && typeof aiCmAistudioNativePromptTokens === "function") {
+          var nativeAis = aiCmAistudioNativePromptTokens();
+          if (nativeAis > 0) return nativeAis;
+        }
         var exact = typeof aiCmExactTokensFor === "function" ? aiCmExactTokensFor(text) : 0;
         if (exact > 0) return exact;
         return typeof netServerTokens === "number" && netServerTokens > 0 ? netServerTokens : 0;
@@ -11679,15 +11842,24 @@
         } catch (eO27c) {
           swallowSoft(eO27c, "content:processAndSend-gsa-stale-reset");
         }
+        var aiCmDomListS1 = null;
         try {
           var siteNameS1 = currentAdapter.siteName || "";
           if (siteNameS1 && siteNameS1 !== "gemini") {
             var histWritePathS1 = baseSeen && lastBaseTexts.length > 0 ? "network" : !baseSeen ? "adapter" : "none";
             var netMsgsS1 = lastBaseTexts.length;
-            var domMsgsS1 = typeof currentAdapter.extractMessages === "function" ? currentAdapter.extractMessages().length : 0;
+            aiCmDomListS1 = typeof currentAdapter.extractMessages === "function" ? currentAdapter.extractMessages() : [];
+            var domMsgsS1 = aiCmDomListS1.length;
             debugLog("log", "[AI CM][svc-emit-trace] site=" + siteNameS1 + " convId=" + (getCurrentConvId() || "") + " msgs=" + domMsgsS1 + " domMsgs=" + domMsgsS1 + " netMsgs=" + netMsgsS1 + " histWritePath=" + histWritePathS1);
           }
         } catch (eS1) {
+        }
+        if (aiCmDomListS1 && aiCmDomListS1.length > 0) {
+          try {
+            aiCmAistudioDomCacheSave(aiCmDomListS1);
+          } catch (eDomS1) {
+            swallowSoft(eDomS1, "content:processAndSend-aistudio-dom-cache");
+          }
         }
         try {
           var cidArc = getCurrentConvId() || "";
@@ -11701,7 +11873,7 @@
         if (!restoredTapeLoaded) {
           restoredTapeLoaded = true;
           var svc0 = getServiceKey();
-          if (svc0 === "gemini" || svc0 === "aistudio") {
+          if (svc0 === "gemini") {
             var convId = "";
             try {
               var m = location.pathname.match(/\/app\/(?!prompts(?:\/|$)|new(?:\/|$)|apikey(?:\/|$))([A-Za-z0-9_-]+)/);
@@ -11794,7 +11966,7 @@
         }
         try {
           var svcD8 = getServiceKey();
-          if (svcD8 === "gemini" || svcD8 === "aistudio") {
+          if (svcD8 === "gemini") {
             var cidD8 = "";
             try {
               var mD8 = location.pathname.match(/\/app\/(?!prompts(?:\/|$)|new(?:\/|$)|apikey(?:\/|$))([A-Za-z0-9_-]+)/);
@@ -11834,7 +12006,7 @@
         }
         try {
           const svc = getServiceKey();
-          const isGeminiLike = svc === "gemini" || svc === "aistudio";
+          const isGeminiLike = svc === "gemini";
           let messageCount;
           if (!baseSeen) {
             messageCount = isGeminiLike ? 0 : currentAdapter.extractMessages().length;
@@ -11869,6 +12041,9 @@
             tokenEstimate = Math.round(tokenEstimate * (netEffectiveLen / fullText.length));
           }
           tokenEstimate += netAttachTokens;
+          if (svc === "aistudio" && typeof aiCmAistudioNativePromptTokens === "function" && aiCmAistudioNativePromptTokens() > 0) {
+            tokenEstimate -= netAttachTokens;
+          }
           const contextLimit = ModelConfig.getContextLimit(modelId);
           const effectiveLimit = ModelConfig.getEffectiveLimit(modelId);
           const displayLimit = computeEffectiveLimit(modelId);
@@ -12095,7 +12270,7 @@
           }
           try {
             var svcS24 = getServiceKey();
-            var isGeminiS24 = svcS24 === "gemini" || svcS24 === "aistudio";
+            var isGeminiS24 = svcS24 === "gemini";
             if (!isGeminiS24 && isExtensionValid() && !baseSeen && !(lastEmitConvId && currentConvB && lastEmitConvId !== currentConvB)) {
               var cidS24 = getCurrentConvId() || "";
               var msgsS24 = buildHistoryMessages();
@@ -12331,6 +12506,9 @@
                 tokenEstimate = Math.round(tokenEstimate * (netEffectiveLen / fullText.length));
               }
               tokenEstimate += netAttachTokens;
+              if (currentAdapter.siteName === "aistudio" && typeof aiCmAistudioNativePromptTokens === "function" && aiCmAistudioNativePromptTokens() > 0) {
+                tokenEstimate -= netAttachTokens;
+              }
               const displayTokens = metricServerTokens > 0 ? tokenEstimate : Math.max(tokenEstimate, maxTokenCount);
               const contextLimit = ModelConfig.getContextLimit(modelId);
               const effectiveLimit = ModelConfig.getEffectiveLimit(modelId);
@@ -12585,6 +12763,321 @@
           }
         });
       }
+      function aiCmBridgeDetail(ev) {
+        var raw = ev && ev.detail !== void 0 ? ev.detail : null;
+        if (typeof raw !== "string") return raw || null;
+        try {
+          return JSON.parse(raw);
+        } catch (eBd) {
+          return null;
+        }
+      }
+      var aiCmNetMsgsAistudio = null;
+      var aiCmNetCountAistudio = 0;
+      var aiCmNetModelSlugAistudio = "";
+      function aiCmIsAistudioHost() {
+        try {
+          return String(window.location && window.location.hostname || "").indexOf("aistudio.google.com") !== -1;
+        } catch (eAih) {
+          swallowSoft(eAih, "content:aistudio-net-host");
+          return false;
+        }
+      }
+      var AI_CM_AISTUDIO_TOKENS_LABELS = [
+        "tokens",
+        "token",
+        "\u0442\u043E\u043A\u0435\u043D\u043E\u0432",
+        // «токенов»
+        "\u0442\u043E\u043A\u0435\u043D\u0430",
+        // «токена»
+        "\u0442\u043E\u043A\u0435\u043D"
+        // «токен»
+      ];
+      var aiCmAistudioNativeTs = 0;
+      var aiCmAistudioNativeValue = 0;
+      function aiCmAistudioParseCount(s) {
+        var raw = String(s == null ? "" : s).replace(/[\u00a0\u202f]/g, " ").trim();
+        if (!raw) return 0;
+        if (!/^\d+$/.test(raw) && !/^\d{1,3}(?:[\s.,]\d{3})+$/.test(raw)) return 0;
+        var digits = raw.replace(/[^\d]/g, "");
+        if (!digits) return 0;
+        var v = parseInt(digits, 10);
+        if (!isFinite(v) || v <= 0 || v >= 1e8) return 0;
+        return v;
+      }
+      function aiCmAistudioTokensInBox(box) {
+        if (!box || typeof box.querySelectorAll !== "function") return 0;
+        var nodes = box.querySelectorAll("*");
+        var limit = nodes.length > 400 ? 400 : nodes.length;
+        for (var i = 0; i < limit; i++) {
+          var el = nodes[i];
+          if (el.children && el.children.length > 0) continue;
+          var raw = String(el.textContent || "").trim();
+          var txt = raw.toLowerCase();
+          var comb = /(?:^|[^\d.,])(\d{1,3}(?:[\s.,]\d{3})+|\d+)\s*(?:tokens?|токен\w*)/i.exec(raw);
+          if (comb && AI_CM_AISTUDIO_TOKENS_LABELS.indexOf(txt) === -1) {
+            var cv = aiCmAistudioParseCount(comb[1]);
+            if (cv > 0) return cv;
+          }
+          if (AI_CM_AISTUDIO_TOKENS_LABELS.indexOf(txt) === -1) continue;
+          var prev = el.previousElementSibling;
+          var v = aiCmAistudioParseCount(prev ? prev.textContent : "");
+          if (v > 0) return v;
+          var pText = String(el.parentElement && el.parentElement.textContent || "").replace(/[\u00a0\u202f]/g, " ");
+          var m = /(?:^|[^\d.,])(\d{1,3}(?:[\s.,]\d{3})+|\d+)\s*(?:tokens?|токен\w*)/i.exec(pText);
+          var pv = m ? aiCmAistudioParseCount(m[1]) : 0;
+          if (pv > 0) return pv;
+        }
+        return 0;
+      }
+      function aiCmAistudioNativePromptTokens() {
+        try {
+          if (!aiCmIsAistudioHost()) return 0;
+          var nowTs = Date.now();
+          if (nowTs - aiCmAistudioNativeTs < 400) return aiCmAistudioNativeValue;
+          aiCmAistudioNativeTs = nowTs;
+          var found = aiCmAistudioNativeProbe();
+          aiCmAistudioNativeValue = found;
+          return found;
+        } catch (eNat) {
+          swallowSoft(eNat, "content:aistudio-native-tokens");
+          return 0;
+        }
+      }
+      function aiCmAistudioNativeProbe() {
+        try {
+          if (!aiCmIsAistudioHost()) return 0;
+          var h1 = document.querySelector("h1");
+          if (!h1) return 0;
+          var box = h1.parentElement;
+          for (var up = 0; up < 3 && box; up++) {
+            var boxLen = String(box.textContent || "").length;
+            if (boxLen > 0 && boxLen <= 4e3) {
+              var v = aiCmAistudioTokensInBox(box);
+              if (v > 0) return v;
+            }
+            box = box.parentElement;
+          }
+        } catch (eNatProbe) {
+          swallowSoft(eNatProbe, "content:aistudio-native-probe");
+        }
+        return 0;
+      }
+      var AI_CM_AISTUDIO_CACHE_PREFIX = "ai_cm_aistudio_history_";
+      var AI_CM_AISTUDIO_CACHE_VERSION = 1;
+      var aiCmAistudioCacheKeyLast = "";
+      var aiCmAistudioPeakKey = "";
+      var aiCmAistudioPeakCount = 0;
+      function aiCmAistudioSessionStorage() {
+        try {
+          return typeof sessionStorage !== "undefined" ? sessionStorage : null;
+        } catch (eSs) {
+          swallowSoft(eSs, "content:aistudio-cache-storage");
+          return null;
+        }
+      }
+      function aiCmAistudioPathOf(href) {
+        var s = String(href || "");
+        if (!s) return "";
+        try {
+          return typeof URL === "function" ? new URL(s).pathname : s;
+        } catch (eUp) {
+          return s;
+        }
+      }
+      function aiCmAistudioCacheKey(href) {
+        var h = String(href || window.location && window.location.href || "");
+        var p = aiCmAistudioPathOf(h);
+        var m = /\/prompts\/([^\/?#]+)/.exec(p);
+        if (m && m[1]) return AI_CM_AISTUDIO_CACHE_PREFIX + m[1];
+        return h ? AI_CM_AISTUDIO_CACHE_PREFIX + "href" : "";
+      }
+      function aiCmAistudioPeakOf(key) {
+        if (key !== aiCmAistudioPeakKey) {
+          aiCmAistudioPeakKey = key;
+          aiCmAistudioPeakCount = 0;
+        }
+        return aiCmAistudioPeakCount;
+      }
+      function aiCmAistudioHistoryCacheSave() {
+        try {
+          if (!aiCmNetMsgsAistudio || !Array.isArray(aiCmNetMsgsAistudio.msgs) || aiCmNetMsgsAistudio.msgs.length === 0) return false;
+          var ss = aiCmAistudioSessionStorage();
+          if (!ss) return false;
+          var key = aiCmAistudioCacheKey(aiCmNetMsgsAistudio.href);
+          if (!key) return false;
+          if (aiCmNetMsgsAistudio.msgs.length < aiCmAistudioPeakOf(key)) return false;
+          ss.setItem(key, JSON.stringify({
+            v: AI_CM_AISTUDIO_CACHE_VERSION,
+            href: aiCmNetMsgsAistudio.href,
+            msgs: aiCmNetMsgsAistudio.msgs,
+            count: aiCmNetMsgsAistudio.count,
+            serverTokens: typeof aiCmNetCountAistudio === "number" ? aiCmNetCountAistudio : 0,
+            // v2.0.32: модель чата — иначе после F5 бейдж показывал дефолт ('Gemini 3.1 Pro')
+            // при живом 'gemini-3.8-flash' (слаг приходит только с тела GenerateContent).
+            model: aiCmNetModelSlugAistudio || "",
+            ts: aiCmNetMsgsAistudio.ts
+          }));
+          aiCmAistudioCacheKeyLast = key;
+          aiCmAistudioPeakCount = aiCmNetMsgsAistudio.msgs.length;
+          return true;
+        } catch (eSave) {
+          swallowSoft(eSave, "content:aistudio-cache-save");
+          return false;
+        }
+      }
+      function aiCmAistudioHistoryCacheRestore() {
+        try {
+          if (!aiCmIsAistudioHost()) return false;
+          var ss = aiCmAistudioSessionStorage();
+          if (!ss) return false;
+          var key = aiCmAistudioCacheKey();
+          if (!key) return false;
+          aiCmAistudioCacheKeyLast = key;
+          var raw = ss.getItem(key);
+          if (!raw) return false;
+          var cached = null;
+          try {
+            cached = JSON.parse(raw);
+          } catch (ePc) {
+            cached = null;
+          }
+          if (!cached || cached.v !== AI_CM_AISTUDIO_CACHE_VERSION) return false;
+          if (!Array.isArray(cached.msgs) || cached.msgs.length === 0) return false;
+          var here = aiCmAistudioPathOf(window.location && window.location.href);
+          var there = aiCmAistudioPathOf(cached.href);
+          if (here && there && here !== there) return false;
+          aiCmAistudioPeakOf(key);
+          aiCmAistudioPeakCount = cached.msgs.length;
+          if (typeof cached.model === "string" && cached.model) {
+            aiCmNetModelSlugAistudio = cached.model;
+            window.__aiCmNetModelSlug = cached.model;
+            detectedModelSlug = cached.model;
+          }
+          return aiCmIngestAistudioNet({
+            kind: "history",
+            msgs: cached.msgs,
+            count: cached.count,
+            serverTokens: cached.serverTokens,
+            ts: cached.ts,
+            href: cached.href,
+            cached: true
+          });
+        } catch (eRestore) {
+          swallowSoft(eRestore, "content:aistudio-cache-restore");
+          return false;
+        }
+      }
+      function aiCmAistudioHistoryCacheClear() {
+        try {
+          if (!aiCmIsAistudioHost()) return false;
+          var prev = aiCmAistudioCacheKeyLast;
+          if (!prev) return false;
+          var now = aiCmAistudioCacheKey();
+          if (prev === now) return false;
+          var ss = aiCmAistudioSessionStorage();
+          if (ss) ss.removeItem(prev);
+          aiCmAistudioCacheKeyLast = "";
+          aiCmAistudioPeakKey = "";
+          aiCmAistudioPeakCount = 0;
+          aiCmNetModelSlugAistudio = "";
+          window.__aiCmNetModelSlug = "";
+          return true;
+        } catch (eClear) {
+          swallowSoft(eClear, "content:aistudio-cache-clear");
+          return false;
+        }
+      }
+      function aiCmAistudioDomCacheSave(list) {
+        try {
+          if (!aiCmIsAistudioHost()) return false;
+          if (!Array.isArray(list) || list.length === 0) return false;
+          var ss = aiCmAistudioSessionStorage();
+          if (!ss) return false;
+          var href = String(window.location && window.location.href || "");
+          var key = aiCmAistudioCacheKey(href);
+          if (!key) return false;
+          if (list.length <= aiCmAistudioPeakOf(key)) return false;
+          var msgs = [];
+          for (var i = 0; i < list.length; i++) {
+            var m = list[i];
+            if (!m) continue;
+            var text = typeof m.text === "string" ? m.text : typeof m.content === "string" ? m.content : "";
+            if (text.length === 0) continue;
+            msgs.push({ role: m.role === "assistant" || m.role === "model" ? "assistant" : "user", text });
+          }
+          if (msgs.length === 0) return false;
+          ss.setItem(key, JSON.stringify({
+            v: AI_CM_AISTUDIO_CACHE_VERSION,
+            href,
+            msgs,
+            count: msgs.length,
+            serverTokens: typeof aiCmNetCountAistudio === "number" ? aiCmNetCountAistudio : 0,
+            model: aiCmNetModelSlugAistudio || "",
+            ts: Date.now()
+          }));
+          aiCmAistudioCacheKeyLast = key;
+          aiCmAistudioPeakCount = msgs.length;
+          debugLog("log", "[AI CM][aistudio-cache] dom-peak key=" + key + " msgs=" + msgs.length);
+          return true;
+        } catch (eDomSave) {
+          swallowSoft(eDomSave, "content:aistudio-dom-cache-save");
+          return false;
+        }
+      }
+      function aiCmIngestAistudioNet(detail) {
+        if (!detail) return false;
+        var changed = false;
+        if (detail.kind === "count") {
+          var serverTokens = typeof detail.serverTokens === "number" ? detail.serverTokens : parseInt(detail.serverTokens, 10);
+          if (isFinite(serverTokens) && serverTokens > 0 && serverTokens !== aiCmNetCountAistudio) {
+            aiCmNetCountAistudio = serverTokens;
+            netServerTokens = serverTokens;
+            changed = true;
+          }
+        } else if (detail.kind === "history" && Array.isArray(detail.msgs) && detail.msgs.length > 0) {
+          var msgs = [];
+          for (var i = 0; i < detail.msgs.length; i++) {
+            var m = detail.msgs[i];
+            if (!m || typeof m.text !== "string" || m.text.length === 0) continue;
+            msgs.push({ role: m.role === "assistant" || m.role === "model" ? "assistant" : "user", text: m.text });
+          }
+          if (msgs.length > 0) {
+            var prev = aiCmNetMsgsAistudio;
+            aiCmNetMsgsAistudio = {
+              msgs,
+              count: msgs.length,
+              ts: typeof detail.ts === "number" ? detail.ts : Date.now(),
+              href: String(detail.href || window.location.href || "")
+            };
+            window.__aiCmNetMsgs = aiCmNetMsgsAistudio;
+            changed = !prev || prev.count !== msgs.length || prev.ts !== aiCmNetMsgsAistudio.ts;
+            var cachedTokens = typeof detail.serverTokens === "number" ? detail.serverTokens : parseInt(detail.serverTokens, 10);
+            if (isFinite(cachedTokens) && cachedTokens > 0 && cachedTokens !== aiCmNetCountAistudio) {
+              aiCmNetCountAistudio = cachedTokens;
+              netServerTokens = cachedTokens;
+            }
+          }
+        }
+        if (!changed) return false;
+        debugLog("log", "[AI CM][aistudio-net] kind=" + detail.kind + " msgs=" + (aiCmNetMsgsAistudio ? aiCmNetMsgsAistudio.count : 0) + " serverTokens=" + aiCmNetCountAistudio + (detail.cached ? " source=session-cache" : ""));
+        if (typeof isInitialized !== "undefined" && isInitialized && typeof processAndSend === "function") {
+          processAndSend();
+        }
+        return true;
+      }
+      window.addEventListener("ai-cm-aistudio-net", function(ev) {
+        try {
+          if (!aiCmIsAistudioHost()) return;
+          var detail = aiCmBridgeDetail(ev);
+          if (!detail) return;
+          var changed = aiCmIngestAistudioNet(detail);
+          if (changed && detail.kind === "history") aiCmAistudioHistoryCacheSave();
+        } catch (eNet) {
+          swallowSoft(eNet, "content:aistudio-net");
+        }
+      });
+      aiCmAistudioHistoryCacheRestore();
     }
   });
   require_content();
