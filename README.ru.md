@@ -10,7 +10,8 @@
 - **Репозиторий расширения:** [shtakan/ai-context-monitor](https://github.com/shtakan/ai-context-monitor)
 - **Стек:** Pake 3.x (Rust, Tauri, WebView2), Node.js — только для сборки инжектируемого бандла
 - **Платформа:** Windows (MSI-установщик, WebView2 Runtime)
-- **Текущая версия:** 1.0.0 — см. [CHANGELOG.md](CHANGELOG.md)
+- **Текущая версия:** 1.1.0 — см. [CHANGELOG.md](CHANGELOG.md)
+- **Bundled extension:** 2.0.32 — AI Context Monitor, см. [manifest.json](ai-context-monitor/manifest.json)
 
 ## Установка
 

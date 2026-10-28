@@ -3,6 +3,21 @@
 Все заметные изменения проекта. Формат — [Keep a Changelog](https://keepachangelog.com/ru/1.1.0/),
 версионирование — [Semantic Versioning](https://semver.org/lang/ru/).
 
+## [1.1.0] - 2026-10-28
+
+Обновление поставки встроенного расширения **AI Context Monitor** (2.0.28 → 2.0.32).
+Логика приложения не менялась: правки — метаданные и документация.
+
+### Изменено
+
+- Встроенное расширение **AI Context Monitor**: 2.0.28 → 2.0.32.
+- Перехват Google AI Studio: новый MAIN-world модуль `core/aistudio-intercept.js` и адаптер
+  `adapters/aistudio-adapter.js` — бейдж и статистика контекста работают и на AI Studio.
+- Определение модели в старых чатах: `core/content.js` и `core/deepseek-intercept.js`
+  определяют модель и в чатах без `conversation_mode`.
+- Экспорт диалога: доработки `options/options.js` и `print/print.js` — выгрузка в
+  md/json/txt/pdf с учётом reasoning и вложений.
+
 ## [1.0.0] - 2026-10-26
 
 Первый публичный релиз **DeepSeek-Monitor** — десктопное приложение на Pake (Rust + Tauri +
