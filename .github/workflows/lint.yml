@@ -14,3 +14,5 @@ jobs:
         run: npm ci
       - name: Run ESLint
         run: npx eslint . --ext .js
+      - name: Version sync check
+        run: node scripts/check-version-sync.mjs
