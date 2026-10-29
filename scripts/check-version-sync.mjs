@@ -4,7 +4,7 @@
  * in sync across every place they are declared.
  *
  * Sources of truth for this check:
- *   app version 1.1.0  - package.json / package-lock.json / README*.md
+ *   app version 1.1.1  - package.json / package-lock.json / README*.md
  *   ext version 2.0.33 - ai-context-monitor/manifest.json / polyfill.js /
  *                        docs/index.html / README*.md
  *
@@ -18,7 +18,7 @@ import { fileURLToPath } from 'node:url';
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 
 const EXPECTED = {
-  app: '1.1.0',
+  app: '1.1.1',
   ext: '2.0.33',
 };
 
