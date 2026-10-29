@@ -12,7 +12,7 @@ icon in Chrome.
 - **Stack:** Pake 3.x (Rust, Tauri, WebView2); Node.js is used only to build the injected bundle
 - **Platform:** Windows (MSI installer, WebView2 Runtime)
 - **Current version:** 1.1.0 — see [CHANGELOG.md](CHANGELOG.md)
-- **Bundled extension:** 2.0.32 — AI Context Monitor, see [manifest.json](ai-context-monitor/manifest.json)
+- **Bundled extension:** 2.0.33 — AI Context Monitor, see [manifest.json](ai-context-monitor/manifest.json)
 
 ## Installation
 

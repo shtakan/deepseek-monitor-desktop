@@ -202,6 +202,13 @@
   var currentChatId = chrOf();
   var lastReqChatId = '';
 
+  // R2: модуль вложений (core/qwen-files.js грузится ПЕРЕД перехватчиком). null — срезанная
+  // сборка без модуля/старый манифест: каждое касание ниже проверяет наличие и молчит.
+  var aiCmQwenFiles = (typeof window !== 'undefined' && window.AiCmQwenFiles) ? window.AiCmQwenFiles : null;
+  // R2: метаданные ПОСЛЕДНЕГО снимка. Ре-эмит после прихода текста вложения повторяет прежние
+  // serverTokens/complete: токены не пересчитываются, а незавершённая пагинация не «закрывается».
+  var lastEmitMeta = { tokens: 0, complete: true, chatId: '', responseId: '' };
+
   // ===== Состояние разбора одного потока =====
   var sse = null;                 // активный стрим или null
   var turns = [];                 // assistant-ходы: [{key, order, model, answer, reasoning, text, userKey}]
@@ -410,6 +417,8 @@
     return REASONING_TAG + '\n' + reasoning + '\n\n' + ANSWER_TAG + '\n' + answer;
   }
 
+  // O-53: возвращает { turn, created } — пагинации нужно знать, какие ходы добавлены
+  // ИМЕННО этой страницей (их order перенумеровывается под более старую страницу).
   function recordTurn(s) {
     var chatId = s.chatId || lastReqChatId || currentChatId || '';
     var userKey = s.userKey || (s.parentId ? ('p:' + s.parentId) : '');
@@ -432,17 +441,26 @@
       existing.reasoning = s.reasoning;
       existing.text = composeTurnText(s.answer, s.reasoning);
       existing.userKey = existing.userKey || userKey;
-      return;
+      return { turn: existing, created: false };
     }
-    turns.push({
+    // O-54: order — строго больше максимального уже выданного. `turns.length` ломается после
+    // перенумерации пагинацией: старые страницы получают отрицательные order, и живой ход,
+    // добавленный следом, обязан встать в конец (max + 1), а не по счётчику элементов.
+    var maxOrder = -1;
+    for (var oi = 0; oi < turns.length; oi++) {
+      if (typeof turns[oi].order === 'number' && turns[oi].order > maxOrder) maxOrder = turns[oi].order;
+    }
+    var added = {
       key: key,
-      order: turns.length,
+      order: maxOrder + 1,
       model: model,
       userKey: userKey,
       answer: s.answer,
       reasoning: s.reasoning,
       text: composeTurnText(s.answer, s.reasoning)
-    });
+    };
+    turns.push(added);
+    return { turn: added, created: true };
   }
 
   // =====================================================================================
@@ -593,6 +611,32 @@
     return '';
   }
   /**
+   * R2: вложения сообщения истории. Живой протокол Qwen кладёт их в node.files[]
+   * (объект: id/name/url/file_type/size/status/type/file_class); встречается и форма, где
+   * ссылка лежит прямо в content_list элементе с url. Разбор защитный: берём всё, что похоже
+   * на файл, а нормализацию/отсев мусора делает core/qwen-files.js (qfRefFromEntry).
+   * Пустой массив — вложений нет (поле остаётся, чтобы форма сообщения была стабильной).
+   */
+  function historyFilesOf(node) {
+    var out = [];
+    try {
+      if (!node || typeof node !== 'object') return out;
+      var list = Array.isArray(node.files) ? node.files : [];
+      for (var i = 0; i < list.length; i++) {
+        if (list[i] && typeof list[i] === 'object') out.push(list[i]);
+      }
+      if (!out.length) {
+        var cl = contentListOf(node) || [];
+        for (var j = 0; j < cl.length; j++) {
+          var c = cl[j];
+          if (c && typeof c === 'object' && typeof c.url === 'string' && c.url) out.push(c);
+        }
+      }
+    } catch (eFiles) { swallow(eFiles, 'qwen:history-files'); }
+    return out;
+  }
+
+  /**
    * payload истории → { chatId, messages[], nodes, duplicates, thinkingDuplicates, reasoningMessages }.
    * messages[] — ходы role user/assistant в порядке появления; повтор узла с тем же id
    * отбрасывается (первое вхождение побеждает — спека O-39 п.5).
@@ -630,7 +674,9 @@
         usage: historyUsageOf(node),
         model: (typeof node.model === 'string') ? node.model : '',
         parentId: (typeof node.parent_id === 'string') ? node.parent_id
-          : ((typeof node.parentId === 'string') ? node.parentId : '')
+          : ((typeof node.parentId === 'string') ? node.parentId : ''),
+        // R2: вложения хода. Уходят в core/qwen-files.js уже на recordTurn (ниже).
+        files: historyFilesOf(node)
       });
     }
     if (!chatId) chatId = findHistoryChatId(payload, 0, []) || '';
@@ -652,7 +698,7 @@
     var parsed = parseQwenHistory(payload);
     if (!parsed.messages.length) {
       diagTag('qwen-history', { ts: Date.now(), event: 'skip', reason: 'no-messages', url: m.url || '' });
-      return false;
+      return { added: 0, foreign: false };
     }
     var chatId = m.chatId || parsed.chatId || currentChatId || lastReqChatId || '';
     if (chatId) {
@@ -664,19 +710,24 @@
       // что у потоковой ветки (skip-request reason=other-chat).
       diagLine('skip-request', { reason: 'other-chat', req: String(m.chatId).slice(0, 8) });
       diagTag('qwen-history', { ts: Date.now(), event: 'skip', reason: 'other-chat', url: m.url || '' });
-      return false;
+      return { added: 0, foreign: true };
     }
     var pendingUserKey = '';
     var pendingUserText = '';
+    // R2: вложения ТЕКУЩЕГО вопроса. Очередь вложений ставится после recordTurn: только там
+    // появляется userKey хода, по которому экспорт ищет секции файлов (qfSectionsFor).
+    var pendingUserFiles = [];
     var lastUsage = null;
     var lastResponseId = '';
     var lastModel = '';
     var applied = 0;
+    var created = [];
     for (var i = 0; i < parsed.messages.length; i++) {
       var msg = parsed.messages[i];
       if (msg.role === 'user') {
         pendingUserKey = msg.key || ('h:u:' + i);
         pendingUserText = msg.text || '';
+        pendingUserFiles = Array.isArray(msg.files) ? msg.files : [];
         continue;
       }
       if (msg.role !== 'assistant') continue;
@@ -684,7 +735,7 @@
       if (msg.usage) lastUsage = msg.usage;
       if (msg.key) lastResponseId = msg.key;
       if (msg.model) lastModel = msg.model;
-      recordTurn({
+      var rec = recordTurn({
         chatId: chatId,
         url: m.url || '',
         // responseId — ключ хода (как у стрима: response.created.response_id).
@@ -704,11 +755,23 @@
         ended: true,
         finished: true
       });
+      // R2: вложения вопроса — в очередь core/qwen-files.js. Ключ — userKey ИМЕННО этого
+      // хода (rec.turn.userKey): emitSnapshot достаёт пользовательский блок через userTextOf.
+      // typeof-гард: срез-песочницы тестов (O-54) исполняют только эти функции, без
+      // объявления aiCmQwenFiles в скоупе — там очередь вложений просто выключена.
+      if (pendingUserFiles.length && rec && rec.turn && rec.turn.userKey &&
+          typeof aiCmQwenFiles !== 'undefined' && aiCmQwenFiles) {
+        try { aiCmQwenFiles.qfEnqueueUserFiles(chatId, rec.turn.userKey, pendingUserFiles); }
+        catch (eQf) { swallow(eQf, 'qwen:files-enqueue'); }
+        pendingUserFiles = [];
+      }
+      // O-53: ходы этой страницы — в created (их order перенумеровывает пагинация).
+      if (rec && rec.created) created.push(rec);
       applied++;
     }
     if (!applied) {
       diagTag('qwen-history', { ts: Date.now(), event: 'skip', reason: 'no-turns', url: m.url || '' });
-      return false;
+      return { added: 0, foreign: false };
     }
     // Дубль reasoning в payload — ИЗМЕРЕНИЕ, не поведение: парсер уже взял первое вхождение,
     // второй копии в тексте нет. Строка живёт только под гейтом aiCmDebug (канон diagTag).
@@ -719,6 +782,16 @@
         nodes: parsed.nodes, taken: 'first'
       });
     }
+    // O-53: страница, добавленная пагинацией, встаёт ПЕРЕД уже собранными (order меньше).
+    if (m.paginate && created.length) renumberHistoryPage(created);
+    // O-53: пагинация стартует ДО emit — первый снимок сразу честно неполный
+    // (historyComplete=false), а не «полный, но потом вдруг нет» (дефект базовой страницы).
+    var paginating = false;
+    if (!m.paginate) {
+      try { paginating = startQwenPagination(m, payload, created.length); }
+      catch (eStart) { swallow(eStart, 'qwen:paginate-start'); }
+    }
+    var partialFlag = (m.paginate || paginating);
     var emitted = emitSnapshot({
       chatId: chatId,
       url: m.url || '',
@@ -733,7 +806,10 @@
       reasoning: '',
       answer: '',
       ended: true,
-      finished: true
+      finished: true,
+      // O-53: неполнота ТОЛЬКО у промежуточной страницы; финал взводит pqFinish.
+      complete: !partialFlag,
+      partial: partialFlag ? { pages: (pq ? pq.pages : 0), reason: 'in-progress' } : null
     });
     diagTag('qwen-history', {
       ts: Date.now(), event: 'emit', url: m.url || '', chat: String(chatId || '').slice(0, 8),
@@ -744,7 +820,8 @@
       serverTokens: (lastUsage && typeof lastUsage.input === 'number') ? lastUsage.input : 0,
       emitted: emitted ? 1 : 0
     });
-    return emitted;
+    // O-53: added — сколько ходов добавила ИМЕННО эта страница (для pqStep), foreign=false.
+    return { added: created.length, foreign: false };
   }
 
   // ---- O-39: чтение истории — ТОЛЬКО через clone() (тело страницы не трогаем) ----
@@ -845,7 +922,11 @@
         return;
       }
       // ТОТ ЖЕ путь, что у fetch-ветки (consumeHistory → applyHistoryPayload): парсер не дублируется.
+      // O-53: заголовки этого XHR (setRequestHeader) — для реплея старых страниц. meta остаётся
+      // литералом (байтовый пин O-39), заголовки читает только старт цикла пагинации.
+      lastHistoryHeaders = (xhr && xhr.__aiCmQwenHistHeaders) ? xhr.__aiCmQwenHistHeaders : null;
       applyHistoryPayload(payload, { chatId: m.chatId, url: m.url });
+      lastHistoryHeaders = null;
     } catch (eXConsume) {
       diagTag('qwen-history', {
         ts: Date.now(), event: 'error', url: m.url || '', transport: 'xhr',
@@ -855,13 +936,24 @@
   }
 
   // ===== EMIT: контракт ai-cm-full-history (как у DeepSeek, только нужные Qwen поля) =====
-  function buildSignature(serverTokens) {
+  function buildSignature(serverTokens, complete) {
     try {
       var parts = [String(currentChatId || ''), String(turns.length), String(serverTokens || 0)];
+      // O-53: полнота — часть сигнатуры. Иначе промежуточный (complete=false) и финальный
+      // (complete=true) снимки одной базы дедупятся и финальный emit теряется.
+      parts.push('c:' + (complete === false ? 0 : 1));
       for (var i = 0; i < turns.length; i++) {
         var t = turns[i];
         parts.push(t.key + ':' + t.userKey + ':' + t.order + ':' +
           (t.text || '').length + ':' + (t.reasoning || '').length);
+        // R2: длина секций вложений — часть сигнатуры. Текст файла живёт ВНЕ turns (у
+        // пользовательского блока), поэтому без этого слагаемого приход текста не меняет
+        // подпись, и ре-эмит глушится дедупом same-signature (файл уходил бы без содержимого).
+        // typeof-гард — для срез-песочниц тестов (O-54): без модуля слагаемого просто нет.
+        if (typeof aiCmQwenFiles !== 'undefined' && aiCmQwenFiles && t.userKey) {
+          try { parts.push('f:' + aiCmQwenFiles.qfSectionLength(currentChatId, t.userKey)); }
+          catch (eSigSec) { parts.push('f:0'); }
+        }
       }
       return parts.join('|');
     } catch (eSig) { return null; }
@@ -878,7 +970,10 @@
   function emitSnapshot(s) {
     var usage = s.usage || {};
     var serverTokens = (typeof usage.input === 'number' && usage.input > 0) ? usage.input : 0;
-    var sig = buildSignature(serverTokens);
+    // O-53: полнота приходит из источника снимка. Дефолт — true: живой SSE авторитетен
+    // (контракт O-35/O-39 не меняется), неполноту объявляет только пагинация истории.
+    var complete = (s.complete !== false);
+    var sig = buildSignature(serverTokens, s.complete);
     if (sig !== null && dispatchSig !== null && sig === dispatchSig) {
       diagLine('emit-skip', { reason: 'same-signature' });
       return lastDispatchResult;
@@ -889,13 +984,27 @@
     var ids = [];
     var reasoningTurns = 0;
     var lastModel = '';
-    for (var i = 0; i < turns.length; i++) {
-      var t = turns[i];
+    // O-54: пагинация перенумеровывает старые страницы в отрицательные order (assignPageOrders),
+    // поэтому порядок добавления в turns уже НЕ равен хронологии: снимок собираем по order
+    // (старые → новые). Без сортировки файл начинался с 10 последних турнов, а старые
+    // страницы дописывались в конец — ходы в файле шли не по времени.
+    var sortedTurns = turns.slice().sort(function (a, b) { return a.order - b.order; });
+    for (var i = 0; i < sortedTurns.length; i++) {
+      var t = sortedTurns[i];
       var userText = userTextOf(t.userKey);
-      if (userText) {
-        pieces.push(userText);
+      // R2: секции вложений вопроса — ТОЛЬКО в пользовательский блок (не в текст ответа):
+      // в экспорте файл стоит рядом с сообщением, к которому он приложен. Ход из одних
+      // вложений (без текста вопроса) тоже попадает в базу — ради этого файла он и нужен.
+      var fileSec = '';
+      if (typeof aiCmQwenFiles !== 'undefined' && aiCmQwenFiles && t.userKey) {
+        try { fileSec = aiCmQwenFiles.qfSectionsFor(currentChatId, t.userKey) || ''; }
+        catch (eFileSec) { swallow(eFileSec, 'qwen:files-sections'); }
+      }
+      if (userText || fileSec) {
+        var userBlock = userText ? (userText + fileSec) : fileSec.replace(/^\n\n/, '');
+        pieces.push(userBlock);
         ids.push('u:' + t.userKey);
-        messages.push({ role: 'user', text: userText, reasoning: '' });
+        messages.push({ role: 'user', text: userBlock, reasoning: '' });
         reasonings.push('');
       }
       pieces.push(t.text);
@@ -924,10 +1033,14 @@
       reasoningTurns: reasoningTurns,
       attachTokens: 0,
       attachBreak: { imgTokens: 0, docTokens: 0, imgCount: 0, docCount: 0 },
-      // Живой SSE — авторитетный серверный источник: база полная по построению
-      // (страница прислала ровно тот ход, который показан в UI).
-      historyComplete: true,
-      reachedRoot: true,
+      // O-53: полнота снимка. Живой SSE — полная база по построению (контракт O-35/O-39);
+      // история может быть НЕПОЛНОЙ: базовая страница Qwen — это 10 последних турнов, старше
+      // которых сервер отдаёт только по курсору (O-53 добирает их и объявляет конец сам).
+      historyComplete: complete,
+      reachedRoot: complete,
+      // partial — диагностика неполной базы для UI/экспорта: сколько страниц добрано и почему
+      // остановились (in-progress/error/no-gain/page-cap/time-cap/cursor-loop).
+      partial: complete ? null : (s.partial || { pages: 0, reason: 'in-progress' }),
       baseEmpty: false,
       // ===== O-47 (badge-метрика Qwen): serverTokens В detail НЕ УЕЗЖАЕТ =====
       // Корень дефекта: usage.input из SSE — КУМУЛИРУЕМОЕ сервисом потребление API (input
@@ -956,6 +1069,16 @@
       window.dispatchEvent(new CustomEvent('ai-cm-full-history', { detail: detail }));
       dispatchSig = sig;
       lastDispatchResult = true;
+      // R2: запоминаем аргументы снимка — ре-эмит вложений повторит ровно их.
+      // typeof-гард: срез-песочницы тестов (O-54) не объявляют lastEmitMeta.
+      if (typeof lastEmitMeta !== 'undefined') {
+        lastEmitMeta = {
+          tokens: serverTokens,
+          complete: complete,
+          chatId: s.chatId || '',
+          responseId: s.responseId || ''
+        };
+      }
       diagLine('emit', {
         conv: String(detail.convId || '').slice(0, 8),
         count: detail.count,
@@ -980,6 +1103,230 @@
       diagLine('emit-error', { err: String(eEmit && eEmit.message || eEmit).slice(0, 80) });
     }
     return lastDispatchResult;
+  }
+
+  // =====================================================================================
+  // O-53: КУРСОРНАЯ ПАГИНАЦИЯ ИСТОРИИ (вариант B). Базовая страница Qwen — 10 последних
+  // турнов; всё, что старше, сервер отдаёт ТОЛЬКО по курсору pagination.oldest_id.
+  // Цикл дозапрашивает страницы, пока сервер не скажет has_more_older=false (или не
+  // сработает страховочный потолок). Запросы идут своим originalFetch (мимо обёртки),
+  // с заголовками исходного запроса страницы (auth/anti-bot) и credentials:'include'.
+  // =====================================================================================
+  var PQ_PAGE_CAP = 10;            // страховочный потолок страниц на прогон
+  var PQ_TIME_CAP_MS = 30000;      // страховочный потолок времени на прогон
+  var PQ_ERR_RETRY_CAP = 3;        // подряд ошибок сети/HTTP до остановки
+  var PQ_ERR_BACKOFF_MS = 2000;    // пауза перед повтором после ошибки
+  var PQ_PACE_MS = 200;            // пауза между страницами (не долбим сервер)
+  var pq = null;                   // состояние прогона (null — пагинация не запущена)
+  var lastHistoryHeaders = null;   // заголовки XHR-страницы для реплея (мост из consumeHistoryXhr)
+
+  function qwenPaginationApi() {
+    try {
+      var api = (typeof window !== 'undefined') ? window.AiCmQwenPagination : null;
+      return (api && typeof api.historyPageUrl === 'function') ? api : null;
+    } catch (eApi) { return null; }
+  }
+
+  // Копия заголовков запроса страницы (fetch: Headers | [[k,v]] | {k:v}; плюс Request.headers).
+  function collectRequestHeaders(input, init) {
+    var out = {};
+    try {
+      var src = (init && init.headers) || (input && typeof input === 'object' ? input.headers : null);
+      if (!src) return out;
+      if (typeof src.forEach === 'function' && !Array.isArray(src)) {
+        src.forEach(function (v, k) { if (k) out[String(k)] = String(v); });
+      } else if (Array.isArray(src)) {
+        for (var i = 0; i < src.length; i++) {
+          if (src[i] && src[i].length >= 2) out[String(src[i][0])] = String(src[i][1]);
+        }
+      } else if (typeof src === 'object') {
+        var keys = Object.keys(src);
+        for (var j = 0; j < keys.length; j++) out[keys[j]] = String(src[keys[j]]);
+      }
+    } catch (eHdr) { swallow(eHdr, 'qwen:headers-collect'); }
+    return out;
+  }
+
+  // order страницы истории, добавленной пагинацией: base = floor - N (старее = меньше).
+  function renumberHistoryPage(created) {
+    var api = qwenPaginationApi();
+    if (!api || !pq || !created || !created.length) return;
+    try { pq.orderFloor = api.assignPageOrders(created, pq.orderFloor); }
+    catch (eOrd) { swallow(eOrd, 'qwen:page-orders'); }
+  }
+
+  // Старт пагинации по базовой странице. true — пагинация активна (снимок неполный).
+  function startQwenPagination(meta, payload, createdCount) {
+    var api = qwenPaginationApi();
+    if (!api) return false;                       // модуль не подключён — поведение O-39 как было
+    var m = meta || {};
+    var chatId = String(m.chatId || currentChatId || '');
+    if (!chatId) return false;
+    if (pq && pq.running) {
+      // Страница сайта во время прогона: свой цикл не плодим, курсор не откатываем назад.
+      if (pq.chatId === chatId) {
+        var alive = api.nextCursorOf(payload);
+        if (alive && !pq.usedCursors[alive]) pq.cursor = alive;
+      }
+      return true;
+    }
+    var info = api.paginationInfo(payload);
+    var cursor = api.nextCursorOf(payload);
+    var cursorSrc = 'field';
+    if (!cursor) {
+      if (info && info.found && info.hasMoreOlder === false) return false;  // сервер: старше нет
+      if (info && info.found && info.hasMoreOlder !== true) return false;   // флаг невнятный
+      // Поля нет/не UUID, но сервер говорит «старше есть» — осторожная догадка по id.
+      if (createdCount >= api.PAGE_LIMIT) {
+        var guess = api.oldestMessageId(payload);
+        if (guess) { cursor = guess; cursorSrc = 'id-guess'; }
+      }
+      if (!cursor) return false;
+    }
+    pq = {
+      chatId: chatId,
+      url: String(m.url || ''),
+      headers: (m.headers && typeof m.headers === 'object') ? m.headers : lastHistoryHeaders,
+      cursor: cursor,
+      cursorSrc: cursorSrc,
+      pages: 0,
+      startTs: Date.now(),
+      orderFloor: 0,
+      usedCursors: {},
+      lastAdded: 0,
+      errStreak: 0,
+      running: true,
+      aborted: false,
+      partialReason: ''
+    };
+    pq.usedCursors[cursor] = 1;
+    diagTag('qwen-history', {
+      ts: Date.now(), event: 'paginate-start', chat: String(chatId).slice(0, 8),
+      url: pq.url, cursor: String(cursor).slice(0, 8), src: cursorSrc
+    });
+    setTimeout(pqStep, PQ_PACE_MS);
+    return true;
+  }
+
+  // Один шаг: решение (потолки) → запрос страницы originalFetch → pqApplyPage.
+  function pqStep() {
+    if (!pq || !pq.running || pq.aborted) return;
+    var api = qwenPaginationApi();
+    if (!api) { pqAbort('module-missing'); return; }
+    var decision = api.pageStepDecision({
+      hasCursor: !!pq.cursor,
+      pages: pq.pages,
+      elapsedMs: Date.now() - pq.startTs,
+      added: pq.lastAdded
+    }, { pageCap: PQ_PAGE_CAP, timeCapMs: PQ_TIME_CAP_MS });
+    if (decision.action === 'cap') { pqFinish(decision.reason); return; }
+    if (!pq.cursor) { pqFinish('end'); return; }
+    var url;
+    try { url = api.historyPageUrl(pq.url, pq.cursor); } catch (eUrl) { pqFinish('error'); return; }
+    if (!url) { pqFinish('end'); return; }
+    diagTag('qwen-history', {
+      ts: Date.now(), event: 'paginate-request', chat: String(pq.chatId).slice(0, 8),
+      page: pq.pages + 1, cursor: String(pq.cursor).slice(0, 8), src: pq.cursorSrc
+    });
+    var opts = { method: 'GET', credentials: 'include' };
+    if (pq.headers) opts.headers = pq.headers;
+    var promise;
+    try { promise = originalFetch.call(window, url, opts); }
+    catch (eFetch) { pqFail(eFetch); return; }
+    Promise.resolve(promise).then(function (resp) {
+      if (!pq || !pq.running || pq.aborted) return null;
+      if (!resp || !resp.ok) {
+        var eHttp = new Error('http ' + (resp ? resp.status : 'none'));
+        eHttp.status = resp ? resp.status : 0;
+        throw eHttp;
+      }
+      return resp.json().then(function (json) { pqApplyPage(json); });
+    }).catch(function (eStep) {
+      if (!pq || !pq.running || pq.aborted) return;
+      pqFail(eStep);
+    });
+  }
+
+  // Страница добрана: применить её и решить, идти ли глубже.
+  function pqApplyPage(json) {
+    if (!pq || !pq.running || pq.aborted) return;
+    if (currentChatId && pq.chatId && currentChatId !== pq.chatId) { pqAbort('chat-changed'); return; }
+    var api = qwenPaginationApi();
+    var res = null;
+    try {
+      res = applyHistoryPayload(json, { chatId: pq.chatId, url: pq.url, paginate: true });
+    } catch (eApply) {
+      diagTag('qwen-history', {
+        ts: Date.now(), event: 'paginate-error', reason: 'apply',
+        err: String(eApply && eApply.message || eApply).slice(0, 80)
+      });
+      pqFail(eApply);
+      return;
+    }
+    if (!res || res.foreign) { pqAbort('foreign-chat'); return; }
+    pq.pages++;
+    pq.errStreak = 0;
+    var added = res.added || 0;
+    pq.lastAdded = added;
+    var next = api ? api.nextCursorOf(json) : '';
+    // Порядок важен: корень (has_more_older=false) может не добавить НИ ОДНОГО хода,
+    // но это честный конец, а не no-gain.
+    if (!next) { pqFinish('end'); return; }
+    if (!added) { pqFinish('no-gain'); return; }
+    if (pq.usedCursors[next]) { pqFinish('cursor-loop'); return; }
+    pq.cursor = next;
+    pq.cursorSrc = 'field';
+    pq.usedCursors[next] = 1;
+    setTimeout(pqStep, PQ_PACE_MS);
+  }
+
+  // Ошибка шага: id-догадка → fail-open (end), иначе ретраи с бэкоффом, потом error.
+  function pqFail(err) {
+    if (!pq || !pq.running || pq.aborted) return;
+    pq.errStreak++;
+    var status = (err && typeof err.status === 'number') ? err.status : 0;
+    diagTag('qwen-history', {
+      ts: Date.now(), event: 'paginate-error', chat: String(pq.chatId).slice(0, 8),
+      page: pq.pages + 1, status: status, err: String(err && err.message || err).slice(0, 80)
+    });
+    if (pq.cursorSrc === 'id-guess' && status >= 400 && status < 500) { pqFinish('end'); return; }
+    if (pq.errStreak >= PQ_ERR_RETRY_CAP) { pqFinish('error'); return; }
+    setTimeout(pqStep, PQ_ERR_BACKOFF_MS);
+  }
+
+  // Финал прогона: honest end — только исчерпание серверного курсора (reason='end').
+  function pqFinish(reason) {
+    if (!pq) return;
+    var st = pq;
+    st.running = false;
+    st.partialReason = (reason === 'end') ? '' : reason;
+    diagTag('qwen-history', {
+      ts: Date.now(), event: 'paginate', chat: String(st.chatId || '').slice(0, 8),
+      pages: st.pages, reason: reason, added: turns.length,
+      elapsed: Date.now() - st.startTs, cursorSrc: st.cursorSrc
+    });
+    var honest = (reason === 'end');
+    try {
+      emitSnapshot({
+        chatId: st.chatId,
+        url: st.url,
+        complete: honest,
+        partial: honest ? null : { pages: st.pages, reason: reason }
+      });
+    } catch (eFin) { swallow(eFin, 'qwen:paginate-finish'); }
+  }
+
+  // Прерывание без emit (сменился чат / ответ чужого чата): база не объявляется ни полной,
+  // ни неполной — при смене чата снимок и так сбрасывается.
+  function pqAbort(reason) {
+    if (!pq) return;
+    diagTag('qwen-history', {
+      ts: Date.now(), event: 'paginate-abort', chat: String(pq.chatId || '').slice(0, 8),
+      pages: pq.pages, reason: reason
+    });
+    pq.running = false;
+    pq.aborted = true;
+    pq = null;
   }
 
   // ===== Перехват fetch (обёртка по образцу core/deepseek-intercept.js:1861-1945) =====
@@ -1060,6 +1407,9 @@
           histHit = false;
         } else {
           histMeta = { chatId: histChatId || currentChatId || '', url: url };
+          // O-53: заголовки исходного запроса страницы — для реплея старых страниц
+          // (source/version/anti-bot; cookies добавит credentials:'include').
+          histMeta.headers = collectRequestHeaders(input, init);
         }
       }
 
@@ -1110,15 +1460,28 @@
   //     (onreadystatechange страницы не перезаписывается и readystatechange не используется);
   //   - XHR без флага не трогается вовсе — ни слушателей, ни чтения тела.
   // Исключение внутри обёртки не выходит наружу: страница получает свой ответ, статус и
-  // события как есть, своих запросов перехватчик не делает.
+  // события как есть. O-53: собственные запросы делает ТОЛЬКО цикл пагинации истории —
+  // он идёт мимо этих обёрток (originalFetch), а страничные XHR не трогаются.
   try {
     if (typeof XMLHttpRequest === 'function' && XMLHttpRequest.prototype) {
       var origXHROpen = XMLHttpRequest.prototype.open;
       var origXHRSend = XMLHttpRequest.prototype.send;
+      var origXHRSetHeader = XMLHttpRequest.prototype.setRequestHeader;
+      XMLHttpRequest.prototype.setRequestHeader = function (name, value) {
+        try {
+          // O-53: копилка заголовков запроса страницы (auth/anti-bot) — для реплея страниц.
+          if (this.__aiCmQwenHist) {
+            if (!this.__aiCmQwenHistHeaders) this.__aiCmQwenHistHeaders = {};
+            this.__aiCmQwenHistHeaders[String(name)] = String(value);
+          }
+        } catch (eXHdr) { }
+        return origXHRSetHeader.apply(this, arguments);
+      };
       XMLHttpRequest.prototype.open = function (method, url) {
         try {
           // Сброс флага на экземпляре: повторный open() того же XHR не наследует старую историю.
           this.__aiCmQwenHist = null;
+          this.__aiCmQwenHistHeaders = null;
           var xMethod = String(method == null ? 'GET' : method).toUpperCase();
           var xUrl = String(url == null ? '' : url);
           var xHit = false;
@@ -1173,6 +1536,14 @@
       userTurns = [];
       turnSeq = 0;
       dispatchSig = null;
+      // R2: файловое состояние принадлежит ОДНОМУ чату — очередь и тексты вложений не
+      // переезжают в следующий разговор (SPA-переход не тащит секции покинутого чата).
+      // typeof-гард — тот же приём, что у остальных точек контура: без модуля сброса нет.
+      if (typeof aiCmQwenFiles !== 'undefined' && aiCmQwenFiles) {
+        try { aiCmQwenFiles.qfReset(next); } catch (eQfReset) { swallow(eQfReset, 'qwen:files-reset'); }
+      }
+      // O-53: незавершённый прогон пагинации покинутого чата не продолжается.
+      if (pq) pqAbort('chat-changed');
       diagLine('chat-change', { chat: String(next || '').slice(0, 8) });
       // O-35 C (ФИКС): трансляция смены разговора в ISOLATED-сторону. До фикса событие
       // здесь НЕ диспатчилось (dispatched=0): content.js не делал resetConversationState,
@@ -1216,6 +1587,23 @@
     window.addEventListener('popstate', function () { try { checkChatChange(); } catch (ePop) { } });
   } catch (eHist) { }
 
+  // ===== R2: связка с модулем вложений (core/qwen-files.js) =====
+  // Ядро отдаёт модулю два форвардера (emitSnapshot/diagLine) и три геттера
+  // (currentChatId/originalFetch/lastEmitMeta). Обратных записей в состояние
+  // перехватчика модуль не делает: секции вложений он отдаёт функциями qfSectionsFor /
+  // qfSectionLength, а очередь наполняется вызовом qfEnqueueUserFiles из applyHistoryPayload.
+  if (aiCmQwenFiles) {
+    try {
+      aiCmQwenFiles.__bind({
+        emitSnapshot: emitSnapshot,
+        diagLine: diagLine,
+        get currentChatId() { return currentChatId; },
+        get originalFetch() { return originalFetch; },
+        get lastEmitMeta() { return lastEmitMeta; }
+      });
+    } catch (eBind) { swallow(eBind, 'qwen:files-bind'); }
+  }
+
   // ===== Мосты для тестов/диагностики (только чтение, побочных эффектов нет) =====
   // Тесты гоняют РЕАЛЬНЫЙ файл и проверяют счётчики/состояние через эти ссылки;
   // боевой путь их не использует.
@@ -1229,7 +1617,19 @@
     // файл; боевой путь вызывает то же самое из consumeHistory).
     parseQwenHistory: parseQwenHistory,
     applyHistory: function (payload, meta) { return applyHistoryPayload(payload, meta || {}); },
+    // O-53: состояние прогона пагинации (null — не запущена) и ручной старт для тестов.
+    paginateState: function () {
+      if (!pq) return null;
+      return {
+        running: !!pq.running, chatId: pq.chatId, cursor: pq.cursor, cursorSrc: pq.cursorSrc,
+        pages: pq.pages, orderFloor: pq.orderFloor, partialReason: pq.partialReason,
+        usedCursors: Object.keys(pq.usedCursors)
+      };
+    },
+    startPagination: function (payload, meta) { return startQwenPagination(meta || {}, payload, 0); },
     turns: function () { return turns; },
+    // R2: снимок файлового состояния (очередь/тексты вложений) — только чтение.
+    files: function () { return aiCmQwenFiles ? aiCmQwenFiles.qfStats() : null; },
     usage: function () { return sse ? sse.usage : null; },
     diagLines: function () { return diagLineCount; },
     diagOn: diagOn,
@@ -1245,5 +1645,6 @@
     'SSE через utils/stream-frames.js, usage кумулятивный → последний кадр, ' +
     'фазы thinking_summary(REPLACE)/answer(APPEND), фолбэк — DOM-адаптер, ' +
     'O-39: JSON-история GET /api/v*N*/chats/{id} через resp.clone().json() (fetch) ' +
-    'и XMLHttpRequest loadend (XHR/jQuery)');
+    'и XMLHttpRequest loadend (XHR/jQuery); ' +
+    'O-53: курсорная пагинация истории (pagination.oldest_id, limit=10, до has_more_older=false)');
 })();

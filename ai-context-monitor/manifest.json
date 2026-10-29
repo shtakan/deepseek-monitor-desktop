@@ -1,20 +1,10 @@
 {
   "manifest_version": 3,
   "name": "__MSG_ext_name__",
-  "version": "2.0.32",
+  "version": "2.0.33",
   "description": "__MSG_ext_description__",
   "default_locale": "ru",
   "homepage_url": "https://github.com/shtakan/ai-context-monitor",
-  "browser_specific_settings": {
-    "gecko": {
-      "id": "ai-context-monitor@shtakan",
-      "data_collection_permissions": {
-        "required": [
-          "none"
-        ]
-      }
-    }
-  },
   "permissions": [
     "scripting",
     "storage",
@@ -29,11 +19,13 @@
     "https://claude.ai/*",
     "https://www.perplexity.ai/*",
     "https://perplexity.ai/*",
-    "https://chat.qwen.ai/*",
-    "https://generativelanguage.googleapis.com/*"
+    "https://chat.qwen.ai/*"
   ],
   "background": {
-    "service_worker": "background.js"
+    "service_worker": "background.js",
+    "scripts": [
+      "background.js"
+    ]
   },
   "content_scripts": [
     {
@@ -66,5 +58,16 @@
     "16": "icons/icon16.png",
     "48": "icons/icon48.png",
     "128": "icons/icon128.png"
+  },
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "ai-context-monitor@shtakan",
+      "data_collection_permissions": {
+        "required": [
+          "none"
+        ]
+      },
+      "strict_min_version": "140.0"
+    }
   }
 }

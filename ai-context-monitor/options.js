@@ -1532,6 +1532,7 @@
       var toggleApiKeyBtn = document.getElementById("toggle-api-key");
       var exactCountCheckbox = document.getElementById("exact-count");
       var exactCountWarningEl = document.getElementById("exact-count-warning");
+      var aiCmByokUiDisabled = typeof browser !== "undefined";
       var versionEl = document.querySelector(".version");
       var exportMdBtn = document.getElementById("export-md");
       var exportJsonBtn = document.getElementById("export-json");
@@ -1710,11 +1711,22 @@
         }
       }
       chrome.storage.local.get(["ai_cm_exact_token_count"], function(data) {
+        if (aiCmByokUiDisabled) {
+          [apiKeyInput, exactCountCheckbox].forEach(function(el) {
+            var section = el && el.closest ? el.closest(".section") : null;
+            if (section) {
+              section.hidden = true;
+              section.style.display = "none";
+            }
+          });
+          if (data.ai_cm_exact_token_count) chrome.storage.local.set({ ai_cm_exact_token_count: false });
+          return;
+        }
         if (data.ai_cm_exact_token_count === void 0) return;
         exactCountCheckbox.checked = !!data.ai_cm_exact_token_count;
         if (aiCmByokHasKeyState === false) aiCmSyncExactCountWithByok(false);
       });
-      aiCmLoadByokKey();
+      if (!aiCmByokUiDisabled) aiCmLoadByokKey();
       modelSelect && modelSelect.addEventListener("change", function() {
         chrome.storage.sync.set({ selectedModel: modelSelect.value });
       });

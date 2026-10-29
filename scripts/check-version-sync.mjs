@@ -5,7 +5,7 @@
  *
  * Sources of truth for this check:
  *   app version 1.1.0  - package.json / package-lock.json / README*.md
- *   ext version 2.0.32 - ai-context-monitor/manifest.json / polyfill.js /
+ *   ext version 2.0.33 - ai-context-monitor/manifest.json / polyfill.js /
  *                        docs/index.html / README*.md
  *
  * No external dependencies: only node:fs and node:path.
@@ -19,7 +19,7 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 
 const EXPECTED = {
   app: '1.1.0',
-  ext: '2.0.32',
+  ext: '2.0.33',
 };
 
 const SEMVER = String.raw`(\d+\.\d+\.\d+)`;

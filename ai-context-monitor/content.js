@@ -5084,6 +5084,7 @@
           var baseReady = completeOk || domBaseTrusted;
           var basePending = s.isGemini !== true && s.baseSeen !== true && !domBaseTrusted && !networkCompleteLatch;
           if (!baseReady && !basePending) return { skip: true, reason: "not-complete", resetFired: false };
+          if (s.historyIncomplete === true) return { skip: true, reason: "not-complete", resetFired: false };
           if (s.isGemini === true && typeof s.archiveCount === "number" && s.archiveCount > 0 && typeof s.baseCount === "number" && s.baseCount <= s.archiveCount) {
             return { skip: true, reason: "archive-pending-live", resetFired: false };
           }
@@ -8346,6 +8347,15 @@
           return false;
         }
       }
+      function aiCmFilesDrainSite() {
+        try {
+          if (typeof currentAdapter === "undefined" || !currentAdapter) return false;
+          var site = currentAdapter.siteName;
+          return site === "deepseek" || site === "qwen";
+        } catch (eSiteF) {
+          return false;
+        }
+      }
       function aiCmExportNetSyncThen(convId, cb, timeoutMs) {
         var cap = typeof timeoutMs === "number" && timeoutMs > 0 ? timeoutMs : 3e3;
         var done = false;
@@ -8586,6 +8596,7 @@
         Api.aiCmDiagHash6 = aiCmDiagHash6;
         Api.aiCmGeminiTurnsSnapshotSync = aiCmGeminiTurnsSnapshotSync;
         Api.aiCmExportNetSyncSite = aiCmExportNetSyncSite;
+        Api.aiCmFilesDrainSite = aiCmFilesDrainSite;
         Api.aiCmExportNetSyncThen = aiCmExportNetSyncThen;
         Api.aiCmLogNetSyncResult = aiCmLogNetSyncResult;
         Api.aiCmFilesQueuePending = aiCmFilesQueuePending;
@@ -9658,6 +9669,9 @@
           return false;
         }
       }
+      function aiCmHistoryPaginationIncomplete(site, baseSeen2, baseComplete2) {
+        return site === "qwen" && baseSeen2 === true && baseComplete2 !== true;
+      }
       function maybeAutoExport(percentage) {
         try {
           var s = autoExportSettings;
@@ -9712,6 +9726,9 @@
               // песочницах без него вердикт прежний, а сам гейт получает только БУЛЕВО (имя признака
               // в автоэкспорт-контур не проникает — пин v54/G). false → поведение всех платформ 1:1.
               domBaseTrusted: typeof aiCmAutoExportTrustedBase === "function" ? aiCmAutoExportTrustedBase() === true : false,
+              // O-54: Qwen (O-53) — сеть базу отдала, полноты ещё нет → экспорт ждёт конца пагинации.
+              // typeof-гард: срез-песочницы тестов грузят только функцию гейта — вердикт прежний.
+              historyIncomplete: typeof aiCmHistoryPaginationIncomplete === "function" ? aiCmHistoryPaginationIncomplete(siteName, baseSeen === true, baseComplete === true) : false,
               // O-27 (b/c): сайт + факты страницы (см. shouldSkipGsaPageGuard)
               site: siteName,
               chatPageMarker: gsaChatMarker,
@@ -9981,7 +9998,10 @@
           };
           var aiCmWriteAutoExportFile = aiCmWriteAutoExportFile2;
           if (typeof aiCmDeferAutoExportOnLiveStream === "function" && aiCmDeferAutoExportOnLiveStream(cid, percentage)) return;
-          if (netSynced !== true && (typeof aiCmExportFilesThenNetSync === "function" || typeof aiCmExportNetSyncThen === "function") && aiCmExportNetSyncSite()) {
+          var filesApiD = typeof window !== "undefined" && window.AiCmBaseHandler ? window.AiCmBaseHandler : null;
+          var filesDrainSiteD = filesApiD && typeof filesApiD.aiCmFilesDrainSite === "function" ? filesApiD.aiCmFilesDrainSite() === true : false;
+          var netSyncSiteD = typeof aiCmExportNetSyncSite === "function" ? aiCmExportNetSyncSite() : false;
+          if (netSynced !== true && (filesDrainSiteD || netSyncSiteD) && (typeof aiCmExportFilesThenNetSync === "function" || typeof aiCmExportNetSyncThen === "function" || filesApiD && typeof filesApiD.aiCmExportFilesDrainThen === "function")) {
             if (!aiCmNetSyncInFlight[cid]) {
               aiCmNetSyncInFlight[cid] = 1;
               var selfSync = function() {
@@ -9989,8 +10009,15 @@
                 doAutoExportDownload(cid, percentage, reason, true);
               };
               try {
-                if (typeof aiCmExportFilesThenNetSync === "function") aiCmExportFilesThenNetSync(cid, selfSync);
-                else aiCmExportNetSyncThen(cid, selfSync);
+                if (netSyncSiteD && typeof aiCmExportFilesThenNetSync === "function") {
+                  aiCmExportFilesThenNetSync(cid, selfSync);
+                } else if (netSyncSiteD && typeof aiCmExportNetSyncThen === "function") {
+                  aiCmExportNetSyncThen(cid, selfSync);
+                } else if (filesApiD && typeof filesApiD.aiCmExportFilesDrainThen === "function") {
+                  filesApiD.aiCmExportFilesDrainThen(cid, selfSync, 6e3);
+                } else {
+                  selfSync();
+                }
               } catch (eSync) {
                 delete aiCmNetSyncInFlight[cid];
                 selfSync();
@@ -11437,7 +11464,7 @@
       }
       function requestExactTokens(fullText, modelId) {
         if (!isExtensionValid()) return;
-        if (!exactCountEnabled || !geminiApiKey) {
+        if (typeof browser !== "undefined" || !exactCountEnabled || !geminiApiKey) {
           netServerTokens = 0;
           return;
         }
@@ -12485,9 +12512,15 @@
               }
               sendResponse({ data: manualSnapshot });
             };
-            if ((typeof aiCmExportFilesThenNetSync === "function" || typeof aiCmExportNetSyncThen === "function") && aiCmExportNetSyncSite()) {
-              if (typeof aiCmExportFilesThenNetSync === "function") aiCmExportFilesThenNetSync(curCidExp, replyManualExport);
-              else aiCmExportNetSyncThen(curCidExp, replyManualExport);
+            const filesApiM = typeof window !== "undefined" && window.AiCmBaseHandler ? window.AiCmBaseHandler : null;
+            const drainSiteM = filesApiM && typeof filesApiM.aiCmFilesDrainSite === "function" ? filesApiM.aiCmFilesDrainSite() === true : false;
+            const netSiteM = typeof aiCmExportNetSyncSite === "function" ? aiCmExportNetSyncSite() : false;
+            if (netSiteM && typeof aiCmExportFilesThenNetSync === "function") {
+              aiCmExportFilesThenNetSync(curCidExp, replyManualExport);
+            } else if (netSiteM && typeof aiCmExportNetSyncThen === "function") {
+              aiCmExportNetSyncThen(curCidExp, replyManualExport);
+            } else if (drainSiteM && filesApiM && typeof filesApiM.aiCmExportFilesDrainThen === "function") {
+              filesApiM.aiCmExportFilesDrainThen(curCidExp, replyManualExport, 6e3);
             } else {
               replyManualExport();
             }
