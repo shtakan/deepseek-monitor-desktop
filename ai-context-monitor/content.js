@@ -17,6 +17,24 @@
   // content.js
   var require_content = __commonJS({
     "content.js"(exports, module) {
+      function aiCmIsFirefox() {
+        try {
+          var api = typeof browser !== "undefined" && browser && browser.runtime ? browser : typeof chrome !== "undefined" && chrome && chrome.runtime ? chrome : null;
+          if (!api) return false;
+          if (api.runtime && typeof api.runtime.getURL === "function") {
+            return String(api.runtime.getURL("")).indexOf("moz-extension://") === 0;
+          }
+          if (typeof api.getURL === "function") {
+            return String(api.getURL("")).indexOf("moz-extension://") === 0;
+          }
+          return false;
+        } catch (e) {
+          return false;
+        }
+      }
+      if (typeof module !== "undefined" && module.exports) {
+        module.exports = { aiCmIsFirefox };
+      }
       var DEBUG = false;
       function __aiCmSetDebugLogs(v) {
         DEBUG = !!v;
@@ -1670,6 +1688,11 @@
               }
             });
             debugLog("log", `[AistudioAdapter] \u0412\u0441\u0435\u0433\u043E \u0438\u0437\u0432\u043B\u0435\u0447\u0435\u043D\u043E \u0441\u043E\u043E\u0431\u0449\u0435\u043D\u0438\u0439: ${messages.length}`);
+            const peak = this._domPeakMessages();
+            if (peak.length > messages.length) {
+              debugLog("log", `[AistudioAdapter] DOM \u043A\u043E\u0440\u043E\u0447\u0435 \u043F\u0438\u043A\u0430: ${messages.length} < ${peak.length} \u2014 \u0431\u0435\u0440\u0451\u043C sessionStorage`);
+              return peak;
+            }
             return messages;
           } catch (error) {
             debugLog("error", "[AistudioAdapter] \u041E\u0448\u0438\u0431\u043A\u0430 \u0432 extractMessages:", error);
@@ -1732,14 +1755,65 @@
             }
             const messages = [];
             Array.prototype.forEach.call(raw.msgs, (m) => {
-              if (!m || typeof m.text !== "string") return;
-              const content = this._cleanText(m.text);
+              const rec = (
+                /** @type {any} */
+                m
+              );
+              if (!rec || typeof rec.text !== "string") return;
+              const sections = typeof rec.sections === "string" ? rec.sections : "";
+              const content = this._cleanText(rec.text) + sections;
               if (content.length === 0) return;
-              messages.push({ role: m.role === "assistant" || m.role === "model" ? "assistant" : "user", content });
+              messages.push({ role: rec.role === "assistant" || rec.role === "model" ? "assistant" : "user", content });
             });
             return messages;
           } catch (error) {
             debugLog("error", "[AistudioAdapter] \u041E\u0448\u0438\u0431\u043A\u0430 \u0447\u0442\u0435\u043D\u0438\u044F \u0441\u0435\u0442\u0435\u0432\u043E\u0439 \u0438\u0441\u0442\u043E\u0440\u0438\u0438:", error);
+            return [];
+          }
+        }
+        /**
+         * Пик истории из sessionStorage (v2.0.34): после схлопывания виртуализированной
+         * ленты DOM короче уже виденного снимка. core/content.js пишет пик в
+         * ai_cm_aistudio_history_<convId> ({ v, href, msgs, count, ... }) — читаем его
+         * только для ТЕКУЩЕГО пути (SPA-гард, как у _netMessages) и только как фолбэк.
+         * @returns {AistudioExtractedMessage[]}
+         */
+        _domPeakMessages() {
+          try {
+            const storage = typeof sessionStorage !== "undefined" && sessionStorage ? sessionStorage : typeof window !== "undefined" && window && window.sessionStorage ? window.sessionStorage : null;
+            if (!storage) return [];
+            const here = String(window.location && window.location.pathname || "");
+            const m = /\/prompts\/([^\/?#]+)/.exec(here);
+            if (!m || !m[1]) return [];
+            const raw = storage.getItem("ai_cm_aistudio_history_" + m[1]);
+            if (!raw) return [];
+            const cached = JSON.parse(raw);
+            if (!cached || cached.v !== 1 || !Array.isArray(cached.msgs) || cached.msgs.length === 0) return [];
+            const there = String(cached.href || "");
+            if (there && typeof URL === "function") {
+              let therePath = there;
+              try {
+                therePath = new URL(there).pathname;
+              } catch (eUrl) {
+                therePath = there;
+              }
+              if (therePath && here && therePath !== here) return [];
+            }
+            const messages = [];
+            Array.prototype.forEach.call(cached.msgs, (msg) => {
+              const rec = (
+                /** @type {any} */
+                msg
+              );
+              if (!rec || typeof rec.text !== "string") return;
+              const sections = typeof rec.sections === "string" ? rec.sections : "";
+              const content = this._cleanText(rec.text) + sections;
+              if (content.length === 0) return;
+              messages.push({ role: rec.role === "assistant" || rec.role === "model" ? "assistant" : "user", content });
+            });
+            return messages;
+          } catch (error) {
+            debugLog("error", "[AistudioAdapter] \u041E\u0448\u0438\u0431\u043A\u0430 \u0447\u0442\u0435\u043D\u0438\u044F \u043F\u0438\u043A\u0430 \u0438\u0441\u0442\u043E\u0440\u0438\u0438:", error);
             return [];
           }
         }
@@ -2429,9 +2503,10 @@
           super();
           this.siteName = "claude";
           this.defaultModel = "claude-sonnet-4-6";
-          debugLog("log", "[ClaudeAdapter] \u0418\u043D\u0438\u0446\u0438\u0430\u043B\u0438\u0437\u0438\u0440\u043E\u0432\u0430\u043D");
+          debugLog("debug", "[ClaudeAdapter] \u0418\u043D\u0438\u0446\u0438\u0430\u043B\u0438\u0437\u0438\u0440\u043E\u0432\u0430\u043D");
           this._lastNetworkModel = "";
           this._modelLogSent = false;
+          this._stubLogConvId = "";
           if (typeof window !== "undefined") {
             var self = this;
             try {
@@ -2458,7 +2533,7 @@
             var host = window.location.hostname;
             var path = window.location.pathname;
             var result = host === "claude.ai" && path.indexOf("/chat/") === 0;
-            debugLog("log", "[ClaudeAdapter] isOnDialogPage: " + result);
+            debugLog("debug", "[ClaudeAdapter] isOnDialogPage: " + result);
             return result;
           } catch (error) {
             debugLog("error", "[ClaudeAdapter] \u041E\u0448\u0438\u0431\u043A\u0430 \u0432 isOnDialogPage:", error);
@@ -2470,7 +2545,16 @@
          * @returns {ClaudeExtractedMessage[]}
          */
         extractMessages() {
-          debugLog("log", "[ClaudeAdapter] extractMessages: \u0432\u043E\u0437\u0432\u0440\u0430\u0449\u0430\u044E \u043F\u0443\u0441\u0442\u043E\u0439 \u043C\u0430\u0441\u0441\u0438\u0432 (\u043E\u0441\u043D\u043E\u0432\u043D\u043E\u0439 \u0438\u0441\u0442\u043E\u0447\u043D\u0438\u043A \u2014 \u0441\u0435\u0442\u044C)");
+          var stubConvId = "";
+          try {
+            stubConvId = (typeof getCurrentConvId === "function" ? getCurrentConvId() : "") || window.location && window.location.pathname || "";
+          } catch (eStub) {
+            stubConvId = "";
+          }
+          if (stubConvId !== this._stubLogConvId) {
+            this._stubLogConvId = stubConvId;
+            debugLog("debug", "[ClaudeAdapter] extractMessages: \u0432\u043E\u0437\u0432\u0440\u0430\u0449\u0430\u044E \u043F\u0443\u0441\u0442\u043E\u0439 \u043C\u0430\u0441\u0441\u0438\u0432 (\u043E\u0441\u043D\u043E\u0432\u043D\u043E\u0439 \u0438\u0441\u0442\u043E\u0447\u043D\u0438\u043A \u2014 \u0441\u0435\u0442\u044C)");
+          }
           return [];
         }
         /**
@@ -2482,7 +2566,7 @@
             if (this._lastNetworkModel) {
               if (!this._modelLogSent) {
                 this._modelLogSent = true;
-                debugLog("log", "[ClaudeAdapter] \u043C\u043E\u0434\u0435\u043B\u044C \u0438\u0437 \u0441\u0435\u0442\u0438: " + this._lastNetworkModel);
+                debugLog("debug", "[ClaudeAdapter] \u043C\u043E\u0434\u0435\u043B\u044C \u0438\u0437 \u0441\u0435\u0442\u0438: " + this._lastNetworkModel);
               }
               return this._lastNetworkModel;
             }
@@ -2505,9 +2589,10 @@
           super();
           this.siteName = "perplexity";
           this.defaultModel = "turbo";
-          debugLog("log", "[PerplexityAdapter] \u0418\u043D\u0438\u0446\u0438\u0430\u043B\u0438\u0437\u0438\u0440\u043E\u0432\u0430\u043D");
+          debugLog("debug", "[PerplexityAdapter] \u0418\u043D\u0438\u0446\u0438\u0430\u043B\u0438\u0437\u0438\u0440\u043E\u0432\u0430\u043D");
           this._lastNetworkModel = "";
           this._modelLogSent = false;
+          this._stubLogConvId = "";
           if (typeof window !== "undefined") {
             var self = this;
             try {
@@ -2534,7 +2619,7 @@
             var host = window.location.hostname;
             var path = window.location.pathname;
             var result = (host === "www.perplexity.ai" || host === "perplexity.ai") && (path.indexOf("/search/") === 0 || path.indexOf("/thread/") === 0);
-            debugLog("log", "[PerplexityAdapter] isOnDialogPage: " + result);
+            debugLog("debug", "[PerplexityAdapter] isOnDialogPage: " + result);
             return result;
           } catch (error) {
             debugLog("error", "[PerplexityAdapter] \u041E\u0448\u0438\u0431\u043A\u0430 \u0432 isOnDialogPage:", error);
@@ -2546,7 +2631,16 @@
          * @returns {PerplexityExtractedMessage[]}
          */
         extractMessages() {
-          debugLog("log", "[PerplexityAdapter] extractMessages: \u0432\u043E\u0437\u0432\u0440\u0430\u0449\u0430\u044E \u043F\u0443\u0441\u0442\u043E\u0439 \u043C\u0430\u0441\u0441\u0438\u0432 (\u043E\u0441\u043D\u043E\u0432\u043D\u043E\u0439 \u0438\u0441\u0442\u043E\u0447\u043D\u0438\u043A \u2014 \u0441\u0435\u0442\u044C)");
+          var stubConvId = "";
+          try {
+            stubConvId = (typeof getCurrentConvId === "function" ? getCurrentConvId() : "") || window.location && window.location.pathname || "";
+          } catch (eStub) {
+            stubConvId = "";
+          }
+          if (stubConvId !== this._stubLogConvId) {
+            this._stubLogConvId = stubConvId;
+            debugLog("debug", "[PerplexityAdapter] extractMessages: \u0432\u043E\u0437\u0432\u0440\u0430\u0449\u0430\u044E \u043F\u0443\u0441\u0442\u043E\u0439 \u043C\u0430\u0441\u0441\u0438\u0432 (\u043E\u0441\u043D\u043E\u0432\u043D\u043E\u0439 \u0438\u0441\u0442\u043E\u0447\u043D\u0438\u043A \u2014 \u0441\u0435\u0442\u044C)");
+          }
           return [];
         }
         /**
@@ -2558,7 +2652,7 @@
             if (this._lastNetworkModel) {
               if (!this._modelLogSent) {
                 this._modelLogSent = true;
-                debugLog("log", "[PerplexityAdapter] \u043C\u043E\u0434\u0435\u043B\u044C \u0438\u0437 \u0441\u0435\u0442\u0438: " + this._lastNetworkModel);
+                debugLog("debug", "[PerplexityAdapter] \u043C\u043E\u0434\u0435\u043B\u044C \u0438\u0437 \u0441\u0435\u0442\u0438: " + this._lastNetworkModel);
               }
               return this._lastNetworkModel;
             }
@@ -3425,6 +3519,52 @@
           }
           return 0;
         }
+        function fileRefFromNode(n) {
+          try {
+            if (!Array.isArray(n)) return null;
+            var name = typeof n[2] === "string" ? n[2].trim() : "";
+            if (!name) return null;
+            var mime = typeof n[11] === "string" ? n[11] : "";
+            var type = typeof n[1] === "number" ? n[1] : 0;
+            var token = typeof n[5] === "string" ? n[5] : "";
+            var img = typeof n[3] === "string" ? n[3] : "";
+            var dl = "";
+            var urls = [];
+            (function walk(v) {
+              if (typeof v === "string") {
+                if (v) urls.push(v);
+                if (!dl && v.indexOf("contribution.usercontent.google.com/download") !== -1) dl = v;
+              } else if (Array.isArray(v)) {
+                for (var i = 0; i < v.length; i++) walk(v[i]);
+              }
+            })(n[7]);
+            return {
+              name,
+              mime,
+              type,
+              token,
+              img,
+              dl,
+              urls,
+              isImage: type === 1 || /^image\//i.test(mime)
+            };
+          } catch (e) {
+            return null;
+          }
+        }
+        function collectTurnFiles(turn) {
+          var out = [];
+          try {
+            var arr = turn[2][0][4][0][4];
+            if (!Array.isArray(arr)) return out;
+            for (var i = 0; i < arr.length; i++) {
+              var ref = fileRefFromNode(arr[i]);
+              if (ref) out.push(ref);
+            }
+          } catch (e) {
+          }
+          return out;
+        }
         var THINKING_ASSISTANT_RE = /^([A-Z][a-z]+ing\b|I'm\b|I've\b|My (?:focus|goal)\b|sr |Ev )/;
         var LEADING_THINKING_RE = /^\s*\*?\*?([A-Z][a-z]+ing\b|I'm|I've|My (focus|goal)|sr |Ev )/;
         function isThinkingAssistant(s) {
@@ -3718,6 +3858,8 @@
           extractDrTexts,
           injectDrLinks,
           __setDrTexts,
+          fileRefFromNode,
+          collectTurnFiles,
           parseGeminiHistory
         };
         if (typeof window !== "undefined") {
@@ -4927,6 +5069,8 @@
         function extractConvIdFromUrl(pathname) {
           try {
             var p = String(pathname || "");
+            var mPr = p.match(/\/prompts\/(?!new(?:_chat)?(?:\/|$)|apikey(?:\/|$))([A-Za-z0-9_-]+)/);
+            if (mPr) return mPr[1];
             var mApp = p.match(/\/app\/(?!prompts(?:\/|$)|new(?:\/|$)|apikey(?:\/|$))([A-Za-z0-9_-]+)/);
             if (mApp) return mApp[1];
             var mDs = p.match(/\/a\/chat\/s\/([A-Za-z0-9_-]+)/);
@@ -6421,6 +6565,7 @@
       var aiCmCursorLiveByConv = {};
       var aiCmBaseConfirmedByConv = {};
       var aiCmLowConfidenceByConv = {};
+      var aiCmPartialSoftByConv = {};
       var aiCmLateCheckByConv = {};
       var trimProbe = {};
       var preTrimExportFired = {};
@@ -7224,6 +7369,15 @@
             aiCmLowConfidenceByConv = value;
           }
         });
+        Object.defineProperty(Api, "aiCmPartialSoftByConv", {
+          enumerable: true,
+          get: function() {
+            return aiCmPartialSoftByConv;
+          },
+          set: function(value) {
+            aiCmPartialSoftByConv = value;
+          }
+        });
         Object.defineProperty(Api, "aiCmLateCheckByConv", {
           enumerable: true,
           get: function() {
@@ -7530,6 +7684,10 @@
         } catch (eResetLc63) {
         }
         try {
+          aiCmPartialSoftByConv = {};
+        } catch (eResetPs63) {
+        }
+        try {
           trimProbe = {};
           preTrimExportFired = {};
           trimRetryByConv = {};
@@ -7632,6 +7790,9 @@
         }
         badgeSuppressed = true;
         adapterBaseSeen = false;
+        if (typeof aiCmNetReadyAistudioReset === "function") {
+          aiCmNetReadyAistudioReset();
+        }
         lastWidgetData = null;
         try {
           if (aiCmRequestEmitTimer) clearTimeout(aiCmRequestEmitTimer);
@@ -8351,7 +8512,7 @@
         try {
           if (typeof currentAdapter === "undefined" || !currentAdapter) return false;
           var site = currentAdapter.siteName;
-          return site === "deepseek" || site === "qwen";
+          return site === "deepseek" || site === "qwen" || site === "aistudio" || site === "gemini";
         } catch (eSiteF) {
           return false;
         }
@@ -9669,8 +9830,8 @@
           return false;
         }
       }
-      function aiCmHistoryPaginationIncomplete(site, baseSeen2, baseComplete2) {
-        return site === "qwen" && baseSeen2 === true && baseComplete2 !== true;
+      function aiCmHistoryPaginationIncomplete(site, baseSeen2, baseComplete2, partialSoft) {
+        return site === "qwen" && baseSeen2 === true && baseComplete2 !== true && partialSoft !== true;
       }
       function maybeAutoExport(percentage) {
         try {
@@ -9727,8 +9888,14 @@
               // в автоэкспорт-контур не проникает — пин v54/G). false → поведение всех платформ 1:1.
               domBaseTrusted: typeof aiCmAutoExportTrustedBase === "function" ? aiCmAutoExportTrustedBase() === true : false,
               // O-54: Qwen (O-53) — сеть базу отдала, полноты ещё нет → экспорт ждёт конца пагинации.
-              // typeof-гард: срез-песочницы тестов грузят только функцию гейта — вердикт прежний.
-              historyIncomplete: typeof aiCmHistoryPaginationIncomplete === "function" ? aiCmHistoryPaginationIncomplete(siteName, baseSeen === true, baseComplete === true) : false,
+              // R1: soft-final (time-cap/page-cap/no-gain) снимает ожидание; typeof-гард под срез-
+              // песочницы: реестра нет → partialSoft=false → поведение O-54 прежнее.
+              historyIncomplete: typeof aiCmHistoryPaginationIncomplete === "function" ? aiCmHistoryPaginationIncomplete(
+                siteName,
+                baseSeen === true,
+                baseComplete === true,
+                typeof aiCmPartialSoftByConv === "object" && aiCmPartialSoftByConv ? aiCmPartialSoftByConv[cid] === true : false
+              ) : false,
               // O-27 (b/c): сайт + факты страницы (см. shouldSkipGsaPageGuard)
               site: siteName,
               chatPageMarker: gsaChatMarker,
@@ -10032,7 +10199,7 @@
           var fmt = autoExportSettings.fmt === "md" ? "md" : autoExportSettings.fmt === "json" ? "json" : "txt";
           var P = typeof window !== "undefined" && window.AiCmExportEmitPipeline ? window.AiCmExportEmitPipeline : null;
           var siteNameD = currentAdapter && currentAdapter.siteName || "";
-          var lowConfD = siteNameD === "gemini" ? aiCmLowConfidenceByConv[cid] === true : siteNameD === "google_search" ? baseComplete !== true : false;
+          var lowConfD = siteNameD === "gemini" ? aiCmLowConfidenceByConv[cid] === true : siteNameD === "google_search" ? baseComplete !== true : siteNameD === "qwen" ? baseComplete !== true && typeof aiCmPartialSoftByConv === "object" && aiCmPartialSoftByConv && aiCmPartialSoftByConv[cid] === true : false;
           var gsaModelD = siteNameD === "google_search" && typeof lastSnapshotModelName === "string" ? lastSnapshotModelName : "";
           var file;
           var namesUsedD = typeof aiCmAutoExportNamesUsed === "object" && aiCmAutoExportNamesUsed ? aiCmAutoExportNamesUsed : null;
@@ -10713,6 +10880,13 @@
           try {
             aiCmLowConfidenceByConv[emitConvId] = detail.isLowConfidenceBase === true;
           } catch (eLc63) {
+          }
+        }
+        var softKey63 = detail.chatId || emitConvId || (typeof getCurrentConvId === "function" ? getCurrentConvId() || "" : "");
+        if (softKey63) {
+          try {
+            aiCmPartialSoftByConv[softKey63] = detail.partialSoft === true;
+          } catch (ePs63) {
           }
         }
         baseText = detail.text;
@@ -11464,7 +11638,7 @@
       }
       function requestExactTokens(fullText, modelId) {
         if (!isExtensionValid()) return;
-        if (typeof browser !== "undefined" || !exactCountEnabled || !geminiApiKey) {
+        if (aiCmIsFirefox() || !exactCountEnabled || !geminiApiKey) {
           netServerTokens = 0;
           return;
         }
@@ -11877,7 +12051,8 @@
             var netMsgsS1 = lastBaseTexts.length;
             aiCmDomListS1 = typeof currentAdapter.extractMessages === "function" ? currentAdapter.extractMessages() : [];
             var domMsgsS1 = aiCmDomListS1.length;
-            debugLog("log", "[AI CM][svc-emit-trace] site=" + siteNameS1 + " convId=" + (getCurrentConvId() || "") + " msgs=" + domMsgsS1 + " domMsgs=" + domMsgsS1 + " netMsgs=" + netMsgsS1 + " histWritePath=" + histWritePathS1);
+            var adapterFlagS1 = siteNameS1 === "claude" || siteNameS1 === "perplexity" ? "stub" : "dom";
+            debugLog("log", "[AI CM][svc-emit-trace] site=" + siteNameS1 + " convId=" + (getCurrentConvId() || "") + " msgs=" + domMsgsS1 + " domMsgs=" + domMsgsS1 + " netMsgs=" + netMsgsS1 + " histWritePath=" + histWritePathS1 + " adapter=" + adapterFlagS1);
           }
         } catch (eS1) {
         }
@@ -12067,8 +12242,8 @@
           if (baseComplete === true && metricServerTokens === 0 && netEffectiveLen > 0 && fullText && fullText.length > 0 && netEffectiveLen > fullText.length) {
             tokenEstimate = Math.round(tokenEstimate * (netEffectiveLen / fullText.length));
           }
-          tokenEstimate += netAttachTokens;
-          if (svc === "aistudio" && typeof aiCmAistudioNativePromptTokens === "function" && aiCmAistudioNativePromptTokens() > 0) {
+          if (netAttachTokens > 0 && String(fullText || "").indexOf("[FILE:") === -1) tokenEstimate += netAttachTokens;
+          if (svc === "aistudio" && typeof aiCmAistudioNativePromptTokens === "function" && aiCmAistudioNativePromptTokens() > 0 && String(fullText || "").indexOf("[FILE:") === -1) {
             tokenEstimate -= netAttachTokens;
           }
           const contextLimit = ModelConfig.getContextLimit(modelId);
@@ -12186,6 +12361,9 @@
                 percent: percentage,
                 updatedAt: Date.now(),
                 stale,
+                // v2.0.34: размер сетевого снимка. Попап включает ручной экспорт и при пустом DOM,
+                // если сеть отдала реплики (Claude/Perplexity: extractMessages() === [] по дизайну).
+                netBaseMsgs: lastBaseTexts.length,
                 // T1 (v1.16): источник первого/второго яруса для индикатора в попапе
                 sourceKind: (function() {
                   try {
@@ -12427,7 +12605,12 @@
       }
       function aiCmAutoExportTrustedBase() {
         try {
-          return !!(currentAdapter && currentAdapter.siteName === "qwen" && adapterBaseSeen === true);
+          if (currentAdapter && currentAdapter.siteName === "qwen" && adapterBaseSeen === true) return true;
+          if (currentAdapter && currentAdapter.siteName === "aistudio" && adapterBaseSeen === true) {
+            var cidReady = typeof aiCmNetReadyKey === "function" ? aiCmNetReadyKey() || "" : "";
+            return !!cidReady && aiCmNetReadyAistudio[cidReady] === true;
+          }
+          return false;
         } catch (eAtb) {
           return false;
         }
@@ -12436,16 +12619,28 @@
         try {
           if (typeof aiCmDiagLine !== "function") return false;
           if (!aiCmAutoExportTrustedBase()) return false;
+          var diagSite = currentAdapter && currentAdapter.siteName || "";
+          var diagNetReady = 0;
+          try {
+            var diagKey = diagSite === "aistudio" && typeof aiCmNetReadyKey === "function" ? aiCmNetReadyKey() || "" : "";
+            diagNetReady = diagKey && aiCmNetReadyAistudio[diagKey] === true ? 1 : 0;
+          } catch (eAtbNet) {
+            diagNetReady = 0;
+          }
           aiCmDiagLine("auto-export", {
             point: "maybeAutoExport",
             verdict: "fire",
             trigger,
-            site: "qwen",
+            site: diagSite || "qwen",
             convId: cid,
             pct: percentage,
             baseSeen: typeof baseSeen !== "undefined" && baseSeen === true ? 1 : 0,
             baseComplete: typeof baseComplete !== "undefined" && baseComplete === true ? 1 : 0,
-            adapterBaseSeen: typeof adapterBaseSeen !== "undefined" && adapterBaseSeen === true ? 1 : 0
+            adapterBaseSeen: typeof adapterBaseSeen !== "undefined" && adapterBaseSeen === true ? 1 : 0,
+            // v2.0.34: наблюдаемость aistudio-фикса — доверие пришло от флага полноты сети,
+            // а не от baseSeen/baseComplete (у AI Studio они по дизайну остаются 0).
+            domBaseTrusted: 1,
+            netReady: diagNetReady
           });
           return true;
         } catch (eAtbd) {
@@ -12538,8 +12733,8 @@
               if (baseComplete === true && metricServerTokens === 0 && netEffectiveLen > 0 && fullText && fullText.length > 0 && netEffectiveLen > fullText.length) {
                 tokenEstimate = Math.round(tokenEstimate * (netEffectiveLen / fullText.length));
               }
-              tokenEstimate += netAttachTokens;
-              if (currentAdapter.siteName === "aistudio" && typeof aiCmAistudioNativePromptTokens === "function" && aiCmAistudioNativePromptTokens() > 0) {
+              if (netAttachTokens > 0 && String(fullText || "").indexOf("[FILE:") === -1) tokenEstimate += netAttachTokens;
+              if (currentAdapter.siteName === "aistudio" && typeof aiCmAistudioNativePromptTokens === "function" && aiCmAistudioNativePromptTokens() > 0 && String(fullText || "").indexOf("[FILE:") === -1) {
                 tokenEstimate -= netAttachTokens;
               }
               const displayTokens = metricServerTokens > 0 ? tokenEstimate : Math.max(tokenEstimate, maxTokenCount);
@@ -12808,6 +13003,31 @@
       var aiCmNetMsgsAistudio = null;
       var aiCmNetCountAistudio = 0;
       var aiCmNetModelSlugAistudio = "";
+      var aiCmNetReadyAistudio = {};
+      function aiCmNetReadyKey() {
+        try {
+          var cid = typeof getCurrentConvId === "function" ? getCurrentConvId() || "" : "";
+          if (cid) return cid;
+          var p = typeof aiCmAistudioPathOf === "function" ? aiCmAistudioPathOf(window.location && window.location.href) : "";
+          return p ? "path:" + p : "";
+        } catch (eNrk) {
+          return "";
+        }
+      }
+      function aiCmNetReadyAistudioReset() {
+        try {
+          if (!aiCmNetReadyAistudio || typeof aiCmNetReadyAistudio !== "object") return false;
+          for (var k in aiCmNetReadyAistudio) {
+            if (Object.prototype.hasOwnProperty.call(aiCmNetReadyAistudio, k)) {
+              delete aiCmNetReadyAistudio[k];
+            }
+          }
+          return true;
+        } catch (eNrReset) {
+          swallowSoft(eNrReset, "content:aistudio-net-ready-reset");
+          return false;
+        }
+      }
       function aiCmIsAistudioHost() {
         try {
           return String(window.location && window.location.hostname || "").indexOf("aistudio.google.com") !== -1;
@@ -13072,18 +13292,38 @@
           var msgs = [];
           for (var i = 0; i < detail.msgs.length; i++) {
             var m = detail.msgs[i];
-            if (!m || typeof m.text !== "string" || m.text.length === 0) continue;
-            msgs.push({ role: m.role === "assistant" || m.role === "model" ? "assistant" : "user", text: m.text });
+            if (!m || typeof m.text !== "string") continue;
+            var sections = typeof m.sections === "string" ? m.sections : "";
+            if (m.text.length === 0 && sections.length === 0) continue;
+            var rec = { role: m.role === "assistant" || m.role === "model" ? "assistant" : "user", text: m.text };
+            if (sections) rec.sections = sections;
+            if (Array.isArray(m.files) && m.files.length > 0) rec.files = m.files;
+            msgs.push(rec);
           }
           if (msgs.length > 0) {
             var prev = aiCmNetMsgsAistudio;
+            var href = String(detail.href || window.location.href || "");
+            var shrunk = false;
+            if (prev && Array.isArray(prev.msgs) && prev.msgs.length > msgs.length && aiCmAistudioPathOf(prev.href) === aiCmAistudioPathOf(href)) {
+              msgs = prev.msgs;
+              shrunk = true;
+            }
             aiCmNetMsgsAistudio = {
               msgs,
               count: msgs.length,
-              ts: typeof detail.ts === "number" ? detail.ts : Date.now(),
-              href: String(detail.href || window.location.href || "")
+              ts: shrunk ? prev.ts : typeof detail.ts === "number" ? detail.ts : Date.now(),
+              href,
+              historyComplete: !shrunk
             };
             window.__aiCmNetMsgs = aiCmNetMsgsAistudio;
+            if (!shrunk) {
+              var readyKey = typeof aiCmNetReadyKey === "function" ? aiCmNetReadyKey() || "" : "";
+              var herePath = aiCmAistudioPathOf(window.location && window.location.href);
+              var netPath = aiCmAistudioPathOf(href);
+              if (readyKey && (!herePath || !netPath || herePath === netPath)) {
+                aiCmNetReadyAistudio[readyKey] = true;
+              }
+            }
             changed = !prev || prev.count !== msgs.length || prev.ts !== aiCmNetMsgsAistudio.ts;
             var cachedTokens = typeof detail.serverTokens === "number" ? detail.serverTokens : parseInt(detail.serverTokens, 10);
             if (isFinite(cachedTokens) && cachedTokens > 0 && cachedTokens !== aiCmNetCountAistudio) {

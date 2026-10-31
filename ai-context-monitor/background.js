@@ -11,6 +11,24 @@
   // background.js
   var require_background = __commonJS({
     "background.js"(exports, module) {
+      function aiCmIsFirefox() {
+        try {
+          var api = typeof browser !== "undefined" && browser && browser.runtime ? browser : typeof chrome !== "undefined" && chrome && chrome.runtime ? chrome : null;
+          if (!api) return false;
+          if (api.runtime && typeof api.runtime.getURL === "function") {
+            return String(api.runtime.getURL("")).indexOf("moz-extension://") === 0;
+          }
+          if (typeof api.getURL === "function") {
+            return String(api.getURL("")).indexOf("moz-extension://") === 0;
+          }
+          return false;
+        } catch (e) {
+          return false;
+        }
+      }
+      if (typeof module !== "undefined" && module.exports) {
+        module.exports = { aiCmIsFirefox };
+      }
       (function() {
         var FLOOR_KEY_PREFIX = "ai-cm-gemini-floor";
         function floorStorageKey(convId, parserVersion) {
@@ -792,6 +810,7 @@
           };
           var out = [];
           var prev = null;
+          var seenUserIds = {};
           for (var i = 0; i < messages.length; i++) {
             var m = messages[i];
             if (!m) continue;
@@ -808,6 +827,20 @@
                 prev = null;
                 continue;
               }
+            }
+            if (role === "user") {
+              if (id !== null && seenUserIds[id]) continue;
+              if (prev && prev.role === "user") {
+                if (id !== null && prev.id !== null && id === prev.id) {
+                  seenUserIds[id] = 1;
+                  continue;
+                }
+                if (text === prev.text) {
+                  if (id !== null) seenUserIds[id] = 1;
+                  continue;
+                }
+              }
+              if (id !== null) seenUserIds[id] = 1;
             }
             if (prev && prev.role === "assistant" && role === "assistant") {
               if (id !== null && prev.id !== null && id === prev.id) continue;
@@ -1543,20 +1576,20 @@
             });
             console.log("AI Context Monitor: \u043F\u0435\u0440\u0435\u0445\u0432\u0430\u0442\u0447\u0438\u043A ChatGPT \u0437\u0430\u0440\u0435\u0433\u0438\u0441\u0442\u0440\u0438\u0440\u043E\u0432\u0430\u043D (\u043C\u0438\u0440 \u0441\u0430\u0439\u0442\u0430, document_start)");
           }
-          if (ids.indexOf("ai-cm-gemini-intercept-v11") === -1) {
+          if (ids.indexOf("ai-cm-gemini-intercept-v12") === -1) {
             try {
-              await chrome.scripting.unregisterContentScripts({ ids: ["ai-cm-gemini-intercept", "ai-cm-gemini-intercept-v2", "ai-cm-gemini-intercept-v3", "ai-cm-gemini-intercept-v4", "ai-cm-gemini-intercept-v5", "ai-cm-gemini-intercept-v6", "ai-cm-gemini-intercept-v7", "ai-cm-gemini-intercept-v8", "ai-cm-gemini-intercept-v9", "ai-cm-gemini-intercept-v10"] });
+              await chrome.scripting.unregisterContentScripts({ ids: ["ai-cm-gemini-intercept", "ai-cm-gemini-intercept-v2", "ai-cm-gemini-intercept-v3", "ai-cm-gemini-intercept-v4", "ai-cm-gemini-intercept-v5", "ai-cm-gemini-intercept-v6", "ai-cm-gemini-intercept-v7", "ai-cm-gemini-intercept-v8", "ai-cm-gemini-intercept-v9", "ai-cm-gemini-intercept-v10", "ai-cm-gemini-intercept-v11"] });
             } catch (eUnregGemini) {
             }
-            await registerSafe("ai-cm-gemini-intercept-v11", {
-              id: "ai-cm-gemini-intercept-v11",
+            await registerSafe("ai-cm-gemini-intercept-v12", {
+              id: "ai-cm-gemini-intercept-v12",
               matches: ["https://gemini.google.com/*", "https://aistudio.google.com/*"],
-              js: ["utils/debug.js", "utils/gemini-batchexecute-parser.js", "utils/gemini-intercept-logic.js", "core/gemini-hidden-scroll.js", "core/gemini-diag.js", "core/gemini-rpc.js", "core/gemini-parse.js", "core/gemini-sse.js", "core/pagination/pagination.js", "core/gemini-loader-scroll.js", "core/gemini-ingest.js", "core/gemini-overlay.js", "core/gemini-archive.js", "core/gemini-oracle.js", "core/gemini-intercept.js"],
+              js: ["utils/debug.js", "utils/gemini-batchexecute-parser.js", "utils/gemini-intercept-logic.js", "core/gemini-hidden-scroll.js", "core/gemini-diag.js", "core/gemini-rpc.js", "core/gemini-parse.js", "core/gemini-sse.js", "core/pagination/pagination.js", "core/gemini-loader-scroll.js", "core/gemini-files.js", "core/gemini-ingest.js", "core/gemini-overlay.js", "core/gemini-archive.js", "core/gemini-oracle.js", "core/gemini-intercept.js"],
               runAt: "document_start",
               world: "MAIN",
               allFrames: false
             });
-            console.log("AI Context Monitor: \u043F\u0435\u0440\u0435\u0445\u0432\u0430\u0442\u0447\u0438\u043A Gemini (v11) \u0437\u0430\u0440\u0435\u0433\u0438\u0441\u0442\u0440\u0438\u0440\u043E\u0432\u0430\u043D (\u043C\u0438\u0440 \u0441\u0430\u0439\u0442\u0430, document_start)");
+            console.log("AI Context Monitor: \u043F\u0435\u0440\u0435\u0445\u0432\u0430\u0442\u0447\u0438\u043A Gemini (v12) \u0437\u0430\u0440\u0435\u0433\u0438\u0441\u0442\u0440\u0438\u0440\u043E\u0432\u0430\u043D (\u043C\u0438\u0440 \u0441\u0430\u0439\u0442\u0430, document_start)");
           }
           if (ids.indexOf("ai-cm-deepseek-intercept-v12") === -1) {
             try {
@@ -1621,16 +1654,20 @@
             });
             console.log("AI Context Monitor: \u043F\u0435\u0440\u0435\u0445\u0432\u0430\u0442\u0447\u0438\u043A Qwen (v3, \u043F\u0430\u0433\u0438\u043D\u0430\u0446\u0438\u044F \u0438\u0441\u0442\u043E\u0440\u0438\u0438 + \u0432\u043B\u043E\u0436\u0435\u043D\u0438\u044F) \u0437\u0430\u0440\u0435\u0433\u0438\u0441\u0442\u0440\u0438\u0440\u043E\u0432\u0430\u043D (\u043C\u0438\u0440 \u0441\u0430\u0439\u0442\u0430, document_start)");
           }
-          if (ids.indexOf("ai-cm-aistudio-intercept") === -1) {
-            await registerSafe("ai-cm-aistudio-intercept", {
-              id: "ai-cm-aistudio-intercept",
+          if (ids.indexOf("ai-cm-aistudio-intercept-v2") === -1) {
+            try {
+              await chrome.scripting.unregisterContentScripts({ ids: ["ai-cm-aistudio-intercept"] });
+            } catch (eUnregAistudio) {
+            }
+            await registerSafe("ai-cm-aistudio-intercept-v2", {
+              id: "ai-cm-aistudio-intercept-v2",
               matches: ["https://aistudio.google.com/*"],
-              js: ["utils/debug.js", "core/aistudio-intercept.js"],
+              js: ["utils/debug.js", "core/aistudio-intercept.js", "core/aistudio-files.js"],
               runAt: "document_start",
               world: "MAIN",
               allFrames: false
             });
-            console.log("AI Context Monitor: \u043F\u0435\u0440\u0435\u0445\u0432\u0430\u0442\u0447\u0438\u043A AI Studio \u0437\u0430\u0440\u0435\u0433\u0438\u0441\u0442\u0440\u0438\u0440\u043E\u0432\u0430\u043D (\u043C\u0438\u0440 \u0441\u0430\u0439\u0442\u0430, document_start)");
+            console.log("AI Context Monitor: \u043F\u0435\u0440\u0435\u0445\u0432\u0430\u0442\u0447\u0438\u043A AI Studio (v2, \u0438\u0441\u0442\u043E\u0440\u0438\u044F + \u0432\u043B\u043E\u0436\u0435\u043D\u0438\u044F) \u0437\u0430\u0440\u0435\u0433\u0438\u0441\u0442\u0440\u0438\u0440\u043E\u0432\u0430\u043D (\u043C\u0438\u0440 \u0441\u0430\u0439\u0442\u0430, document_start)");
           }
         } catch (err) {
           console.warn("AI Context Monitor: \u043D\u0435 \u0443\u0434\u0430\u043B\u043E\u0441\u044C \u0437\u0430\u0440\u0435\u0433\u0438\u0441\u0442\u0440\u0438\u0440\u043E\u0432\u0430\u0442\u044C \u043F\u0435\u0440\u0435\u0445\u0432\u0430\u0442\u0447\u0438\u043A:", err);
@@ -2100,7 +2137,7 @@
         return entry.promise;
       }
       function handleCountTokens(message, sender) {
-        if (typeof browser !== "undefined") {
+        if (aiCmIsFirefox()) {
           return Promise.resolve({ ok: false, reason: "byok-disabled-firefox" });
         }
         var text = message && message.text || "";

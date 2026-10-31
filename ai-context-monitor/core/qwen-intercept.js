@@ -74,6 +74,10 @@
   // ---- константы протокола ----
   var REASONING_TAG = '[REASONING]';
   var ANSWER_TAG = '[ANSWER]';
+  // R4: текст-заместитель для хода, у которого есть вложение, но нет текста вопроса.
+  // Это ДАННЫЕ (как [FILE: ...]/[REASONING]), не UI-перевод: по строке экспорт отличает
+  // пользовательский ход от пустого assistant и строит user-блок без «висячего» ASSISTANT.
+  var FILE_ONLY_PLACEHOLDER = '[Вложение]';
   // Прежний дефолт модели удалён: 'qwen3.8-max' из тела /chats/new нельзя подставлять как id модели.
   var PHASE_THINKING = 'thinking_summary';
   var PHASE_ANSWER = 'answer';
@@ -441,7 +445,44 @@
       existing.reasoning = s.reasoning;
       existing.text = composeTurnText(s.answer, s.reasoning);
       existing.userKey = existing.userKey || userKey;
+      // R4: повторное применение той же страницы не должно оставлять на ходе флаг
+      // «только вложение», если настоящий ответ уже пришёл.
+      existing.filesOnly = (s.filesOnly === true && !s.answer && !s.reasoning);
       return { turn: existing, created: false };
+    }
+    // R4: заглушка «только вложение» (file-only:...), созданная на прошлой странице,
+    // дожидается настоящего ответа. Пришёл assistant с тем же userKey — заполняем заглушку
+    // и забираем реальный ключ: второго user-блока с тем же вопросом не появляется.
+    var fileOnly = null;
+    if (userKey) {
+      for (var fi = 0; fi < turns.length; fi++) {
+        var fc = turns[fi];
+        if (fc && fc.filesOnly === true && typeof fc.key === 'string' &&
+          fc.key.indexOf('file-only:') === 0 && fc.userKey === userKey) {
+          fileOnly = fc;
+          break;
+        }
+      }
+    }
+    if (fileOnly) {
+      fileOnly.key = key;
+      fileOnly.model = model || fileOnly.model;
+      fileOnly.answer = s.answer || '';
+      fileOnly.reasoning = s.reasoning || '';
+      fileOnly.text = composeTurnText(fileOnly.answer, fileOnly.reasoning);
+      fileOnly.filesOnly = (s.filesOnly === true && !s.answer && !s.reasoning);
+      return { turn: fileOnly, created: false };
+    }
+    // R4: ту же страницу «только вложение» могли применить ПОВТОРНО уже после того,
+    // как заглушка забрала реальный ключ. Второй file-only ход для того же userKey
+    // не нужен: иначе в экспорте появится второй user-блок с тем же вопросом.
+    if (s.filesOnly === true && userKey && key.indexOf('file-only:') === 0) {
+      for (var fj = 0; fj < turns.length; fj++) {
+        var fd = turns[fj];
+        if (fd && fd.filesOnly === true && fd.userKey === userKey) {
+          return { turn: fd, created: false };
+        }
+      }
     }
     // O-54: order — строго больше максимального уже выданного. `turns.length` ломается после
     // перенумерации пагинацией: старые страницы получают отрицательные order, и живой ход,
@@ -457,7 +498,8 @@
       userKey: userKey,
       answer: s.answer,
       reasoning: s.reasoning,
-      text: composeTurnText(s.answer, s.reasoning)
+      text: composeTurnText(s.answer, s.reasoning),
+      filesOnly: s.filesOnly === true
     };
     turns.push(added);
     return { turn: added, created: true };
@@ -486,6 +528,9 @@
     if (role !== 'user' && role !== 'assistant' && role !== 'system') return false;
     var list = contentListOf(node);
     if (list && list.length) return true;
+    // R4: сообщение, состоящее ТОЛЬКО из вложений (content_list пуст), тоже ход:
+    // иначе его files[] не доходят до разбора и файл теряется вместе с сообщением.
+    if (Array.isArray(node.files) && node.files.length) return true;
     return typeof node.content === 'string' || typeof node.text === 'string';
   }
   // Обход payload: сообщения собираются в порядке ПОЯВЛЕНИЯ (порядок ключей JSON сохраняется).
@@ -722,16 +767,45 @@
     var lastModel = '';
     var applied = 0;
     var created = [];
+    var filesOnlyTurns = 0;
+    // R4: вложения могут прийти и в user-узле, и в assistant-узле (наблюдённые формы).
+    // В очередь ставим ОБЪЕДИНЕНИЕ, а источник пишем в диагностику (без имён/URL).
+    function enqueueHistoryFiles(pendingUserFiles, rec, source) {
+      if (!pendingUserFiles || !pendingUserFiles.length) return;
+      if (!rec || !rec.turn || !rec.turn.userKey) return;
+      // typeof-гард: срез-песочницы тестов (O-54) исполняют только эти функции, без
+      // объявления aiCmQwenFiles в скоупе — там очередь вложений просто выключена.
+      if (typeof aiCmQwenFiles !== 'undefined' && aiCmQwenFiles) {
+        try { aiCmQwenFiles.qfEnqueueUserFiles(chatId, rec.turn.userKey, pendingUserFiles); }
+        catch (eQf) { swallow(eQf, 'qwen:files-enqueue'); }
+      }
+      diagTag('qwen-history-files', {
+        ts: Date.now(), event: 'enqueue', chat: String(chatId || '').slice(0, 8),
+        source: source, files: pendingUserFiles.length
+      });
+    }
     for (var i = 0; i < parsed.messages.length; i++) {
       var msg = parsed.messages[i];
       if (msg.role === 'user') {
         pendingUserKey = msg.key || ('h:u:' + i);
         pendingUserText = msg.text || '';
         pendingUserFiles = Array.isArray(msg.files) ? msg.files : [];
+        // R4: ход без текста, но с вложениями. Placeholder — данные, не перевод: без него
+        // userTurns не получит запись, а buildSignature не отличит такой ход от пустого.
+        if (!pendingUserText.trim() && pendingUserFiles.length) {
+          pendingUserText = FILE_ONLY_PLACEHOLDER;
+        }
         continue;
       }
       if (msg.role !== 'assistant') continue;
-      if (!msg.text && !msg.reasoning) continue;    // пустой ход в базу не пишется (как empty-stream)
+      var msgFiles = Array.isArray(msg.files) ? msg.files : [];
+      var turnFiles = pendingUserFiles.concat(msgFiles);
+      var filesOnly = !msg.text && !msg.reasoning;
+      // R4: пустой ход по-прежнему не пишется, НО вложения — достаточная причина для хода
+      // (раньше безусловный continue терял и файл, и user-блок).
+      if (filesOnly && !turnFiles.length) continue;
+      var fileSource = (pendingUserFiles.length && msgFiles.length) ? 'both'
+        : (msgFiles.length ? 'assistant' : 'user');
       if (msg.usage) lastUsage = msg.usage;
       if (msg.key) lastResponseId = msg.key;
       if (msg.model) lastModel = msg.model;
@@ -740,7 +814,7 @@
         url: m.url || '',
         // responseId — ключ хода (как у стрима: response.created.response_id).
         responseId: msg.key || '',
-        userPrompt: pendingUserText,
+        userPrompt: pendingUserText || (turnFiles.length ? FILE_ONLY_PLACEHOLDER : ''),
         userKey: pendingUserKey || (msg.key ? ('h:' + msg.key) : ('h:a:' + i)),
         parentId: msg.parentId || '',
         model: msg.model || '',
@@ -753,21 +827,58 @@
         reasoningFrames: msg.reasoning ? 1 : 0,
         answerFrames: msg.text ? 1 : 0,
         ended: true,
-        finished: true
+        finished: true,
+        filesOnly: filesOnly
       });
-      // R2: вложения вопроса — в очередь core/qwen-files.js. Ключ — userKey ИМЕННО этого
-      // хода (rec.turn.userKey): emitSnapshot достаёт пользовательский блок через userTextOf.
-      // typeof-гард: срез-песочницы тестов (O-54) исполняют только эти функции, без
-      // объявления aiCmQwenFiles в скоупе — там очередь вложений просто выключена.
-      if (pendingUserFiles.length && rec && rec.turn && rec.turn.userKey &&
-          typeof aiCmQwenFiles !== 'undefined' && aiCmQwenFiles) {
-        try { aiCmQwenFiles.qfEnqueueUserFiles(chatId, rec.turn.userKey, pendingUserFiles); }
-        catch (eQf) { swallow(eQf, 'qwen:files-enqueue'); }
-        pendingUserFiles = [];
+      // R2/R4: вложения хода — в очередь core/qwen-files.js. Ключ — userKey ИМЕННО
+      // этого хода (rec.turn.userKey): emitSnapshot достаёт пользовательский блок
+      // через userTextOf, а filesOnly-ход ассистента подавляется при сборке снимка.
+      if (rec && rec.turn && rec.turn.userKey) {
+        enqueueHistoryFiles(turnFiles, rec, fileSource);
       }
+      if (filesOnly) filesOnlyTurns++;
+      // Ход обработан — pending относится ровно к нему. Без сброса хвост вложений
+      // уезжал бы в следующий assistant.
+      pendingUserKey = '';
+      pendingUserText = '';
+      pendingUserFiles = [];
       // O-53: ходы этой страницы — в created (их order перенумеровывает пагинация).
       if (rec && rec.created) created.push(rec);
       applied++;
+    }
+    // R4: сообщение только с вложениями БЕЗ ответа assistant. Отдельного хода-ответа нет,
+    // поэтому заводим пользовательский ход-заглушку: файл получает userKey и попадает
+    // в базу (а при приходе настоящего ответа заглушку заберёт adoption в recordTurn).
+    if (pendingUserKey && pendingUserFiles.length) {
+      var recU = recordTurn({
+        chatId: chatId,
+        url: m.url || '',
+        responseId: 'file-only:' + pendingUserKey,
+        userPrompt: pendingUserText || FILE_ONLY_PLACEHOLDER,
+        userKey: pendingUserKey,
+        parentId: '',
+        model: '',
+        reasoning: '',
+        answer: '',
+        usage: null,
+        rawUsage: null,
+        usageFrames: 0,
+        frames: 0,
+        reasoningFrames: 0,
+        answerFrames: 0,
+        ended: true,
+        finished: true,
+        filesOnly: true
+      });
+      if (recU && recU.turn && recU.turn.userKey) {
+        enqueueHistoryFiles(pendingUserFiles, recU, 'user');
+      }
+      if (recU && recU.created) created.push(recU);
+      filesOnlyTurns++;
+      applied++;
+      pendingUserKey = '';
+      pendingUserText = '';
+      pendingUserFiles = [];
     }
     if (!applied) {
       diagTag('qwen-history', { ts: Date.now(), event: 'skip', reason: 'no-turns', url: m.url || '' });
@@ -815,7 +926,7 @@
       ts: Date.now(), event: 'emit', url: m.url || '', chat: String(chatId || '').slice(0, 8),
       nodes: parsed.nodes, messages: parsed.messages.length, turns: applied,
       reasonings: parsed.reasoningMessages, duplicates: parsed.duplicates,
-      thinking: parsed.thinkingDuplicates,
+      thinking: parsed.thinkingDuplicates, filesOnly: filesOnlyTurns,
       hasUsage: (lastUsage && typeof lastUsage.input === 'number') ? 1 : 0,
       serverTokens: (lastUsage && typeof lastUsage.input === 'number') ? lastUsage.input : 0,
       emitted: emitted ? 1 : 0
@@ -936,12 +1047,16 @@
   }
 
   // ===== EMIT: контракт ai-cm-full-history (как у DeepSeek, только нужные Qwen поля) =====
-  function buildSignature(serverTokens, complete) {
+  function buildSignature(serverTokens, complete, soft) {
     try {
       var parts = [String(currentChatId || ''), String(turns.length), String(serverTokens || 0)];
       // O-53: полнота — часть сигнатуры. Иначе промежуточный (complete=false) и финальный
       // (complete=true) снимки одной базы дедупятся и финальный emit теряется.
       parts.push('c:' + (complete === false ? 0 : 1));
+      // R1: мягкий финал (time-cap/page-cap/no-gain) идёт с тем же complete=false и тем же
+      // набором ходов, что и последний промежуточный эмит, поэтому без этого слагаемого он
+      // дедупился бы как same-signature (R-1 плана) и фикс был бы недетерминирован.
+      parts.push('s:' + (soft === true ? 1 : 0));
       for (var i = 0; i < turns.length; i++) {
         var t = turns[i];
         parts.push(t.key + ':' + t.userKey + ':' + t.order + ':' +
@@ -973,7 +1088,7 @@
     // O-53: полнота приходит из источника снимка. Дефолт — true: живой SSE авторитетен
     // (контракт O-35/O-39 не меняется), неполноту объявляет только пагинация истории.
     var complete = (s.complete !== false);
-    var sig = buildSignature(serverTokens, s.complete);
+    var sig = buildSignature(serverTokens, s.complete, (s.partialSoft === true && complete === false));
     if (sig !== null && dispatchSig !== null && sig === dispatchSig) {
       diagLine('emit-skip', { reason: 'same-signature' });
       return lastDispatchResult;
@@ -1007,16 +1122,21 @@
         messages.push({ role: 'user', text: userBlock, reasoning: '' });
         reasonings.push('');
       }
-      pieces.push(t.text);
-      ids.push(t.key);
-      var msg = { role: 'assistant', text: t.text, reasoning: t.reasoning || '' };
-      // hiddenReasoning — та же пометка, что у DeepSeek: сырой режим экспорта
-      // (utils/export-emit-pipeline.js:includeHiddenExportBlocks) читает её,
-      // обычный режим урезает секции до [ANSWER] (stripReasoningSections).
-      if (t.reasoning) { msg.hiddenReasoning = t.reasoning; reasoningTurns++; }
-      messages.push(msg);
-      reasonings.push(t.reasoning || '');
+      // R4: у filesOnly-хода ответа нет — пустой assistant-блок не пишем (иначе в MD
+      // висел бы «### ASSISTANT» без текста, а в TXT — пустая роль). Модель хода при
+      // этом не теряем: она нужна шапке экспорта, хотя текста ответа нет.
       if (t.model) lastModel = t.model;
+      if (!t.filesOnly || t.text) {
+        pieces.push(t.text);
+        ids.push(t.key);
+        var msg = { role: 'assistant', text: t.text, reasoning: t.reasoning || '' };
+        // hiddenReasoning — та же пометка, что у DeepSeek: сырой режим экспорта
+        // (utils/export-emit-pipeline.js:includeHiddenExportBlocks) читает её,
+        // обычный режим урезает секции до [ANSWER] (stripReasoningSections).
+        if (t.reasoning) { msg.hiddenReasoning = t.reasoning; reasoningTurns++; }
+        messages.push(msg);
+        reasonings.push(t.reasoning || '');
+      }
     }
     var text = pieces.join('\n');
     if (!text) { diagLine('emit-skip', { reason: 'empty-text' }); return false; }
@@ -1041,6 +1161,10 @@
       // partial — диагностика неполной базы для UI/экспорта: сколько страниц добрано и почему
       // остановились (in-progress/error/no-gain/page-cap/time-cap/cursor-loop).
       partial: complete ? null : (s.partial || { pages: 0, reason: 'in-progress' }),
+      // R1: мягкий финал (time-cap/page-cap/no-gain) — база неполная, но продолжать нечем:
+      // автоэкспорт разрешён с префиксом [LOW CONFIDENCE]_. Аддитивное булево: у прочих
+      // сайтов и у честного/промежуточного снимка — false (O-54 не ослабляется).
+      partialSoft: complete ? false : (s.partialSoft === true),
       baseEmpty: false,
       // ===== O-47 (badge-метрика Qwen): serverTokens В detail НЕ УЕЗЖАЕТ =====
       // Корень дефекта: usage.input из SSE — КУМУЛИРУЕМОЕ сервисом потребление API (input
@@ -1300,9 +1424,15 @@
     var st = pq;
     st.running = false;
     st.partialReason = (reason === 'end') ? '' : reason;
+    // R1: классификация «мягкого финала» живёт только в чистом модуле пагинации
+    // (isSoftPartialReason); сюда уходит булев. В срез-песочницах тестов модуля нет —
+    // тогда soft=false (поведение O-54 сохраняется).
+    var pqApi = qwenPaginationApi();
+    var soft = (pqApi && typeof pqApi.isSoftPartialReason === 'function')
+      ? pqApi.isSoftPartialReason(reason) === true : false;
     diagTag('qwen-history', {
       ts: Date.now(), event: 'paginate', chat: String(st.chatId || '').slice(0, 8),
-      pages: st.pages, reason: reason, added: turns.length,
+      pages: st.pages, reason: reason, soft: soft ? 1 : 0, added: turns.length,
       elapsed: Date.now() - st.startTs, cursorSrc: st.cursorSrc
     });
     var honest = (reason === 'end');
@@ -1311,7 +1441,8 @@
         chatId: st.chatId,
         url: st.url,
         complete: honest,
-        partial: honest ? null : { pages: st.pages, reason: reason }
+        partial: honest ? null : { pages: st.pages, reason: reason },
+        partialSoft: (!honest && soft)
       });
     } catch (eFin) { swallow(eFin, 'qwen:paginate-finish'); }
   }

@@ -1,4 +1,4 @@
-﻿// Р—Р°РіР»СѓС€РєРё РґР»СЏ Р»РѕРіРіРµСЂР° Рё РѕС‚Р»Р°РґРѕС‡РЅС‹С… С„СѓРЅРєС†РёР№ СЂР°СЃС€РёСЂРµРЅРёСЏ
+// Р—Р°РіР»СѓС€РєРё РґР»СЏ Р»РѕРіРіРµСЂР° Рё РѕС‚Р»Р°РґРѕС‡РЅС‹С… С„СѓРЅРєС†РёР№ СЂР°СЃС€РёСЂРµРЅРёСЏ
 if (typeof window.debugLog === 'undefined') {
   window.debugLog = function(...args) {
     console.log('[AI CM DEBUG]', ...args);
@@ -52,7 +52,7 @@ if (typeof window.__aiCmSetDebugLogs === 'undefined') {
   window.chrome.runtime.id = 'pake-ai-context-monitor';
   window.chrome.runtime.getURL = window.chrome.runtime.getURL || function(path) { return path; };
   window.chrome.runtime.getManifest = window.chrome.runtime.getManifest || function() {
-    return { version: '2.0.33', manifest_version: 3, name: 'AI Context Monitor' };
+    return { version: '2.0.36', manifest_version: 3, name: 'AI Context Monitor' };
   };
   window.chrome.runtime.onMessage = onMessageStub;
   window.chrome.runtime.onInstalled = createEventStub();

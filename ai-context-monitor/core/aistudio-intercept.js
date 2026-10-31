@@ -90,6 +90,19 @@
   var verbose = false;     // 'ai-cm-aistudio-net-settings' { verbose: true }
   var lastTokens = 0;      // последний promptTokenCount (дедуп лога/события)
   var lastHistorySig = ''; // подпись последнего снимка истории (дедуп)
+  // v2.0.34: причина последнего пустого разбора — для строки 'aistudio-history-skip'
+  // (shape-miss | no-array | empty | not-json) и факта ResolveDriveResource.
+  var lastHistoryReason = '';
+  var lastSnapshotWarnSig = ''; // дедуп console.warn о промахе формы
+
+  // Вложения (plan-aistudio-files.md): сырой снимок нужен для повторного
+  // emitHistory после догрузки текста; nativeFetch — чтобы модуль вложений
+  // не ходил через собственный патченный fetch.
+  var lastHistoryMsgs = null;
+  var lastHistoryUrl = '';
+  var nativeFetch = null;
+  var filesBound = false;
+  var pendingFileToken = '';
 
   /* ================================================================== *
    * 0. Мост detail (Xray/Firefox): тело одинаковое во всех мирах
@@ -203,6 +216,14 @@
     }
   }
 
+  /** Гейт диагностики: sessionStorage 'aiCmDebug' === '1' (тот же, что у diagLine). */
+  function debugGateOn() {
+    try {
+      return (typeof sessionStorage !== 'undefined' && !!sessionStorage
+        && sessionStorage.getItem('aiCmDebug') === '1');
+    } catch (eG) { return false; }
+  }
+
   /**
    * Форма протобуферного значения одной строкой: длина массива + непустые индексы
    * (до 12). `len33[0,1,8,18,19,32]` сразу говорит, сообщение это или служебный кортеж.
@@ -261,29 +282,158 @@
     return ROLE_AI;
   }
 
+  /** Строка похожа на сообщение снимка: текст `m[0]`, роль `m[8]`. */
+  function looksLikeMessageRow(m) {
+    return Array.isArray(m) && typeof m[0] === 'string' && isRoleName(m[8]);
+  }
+
+  /** Массив выглядит как снимок: непустой, все элементы-массивы, есть message-строки. */
+  function isRowsArray(v) {
+    if (!Array.isArray(v) || v.length === 0) return false;
+    var hits = 0;
+    for (var i = 0; i < v.length; i++) {
+      if (v[i] === null || v[i] === undefined) continue;
+      if (!Array.isArray(v[i])) return false;
+      if (looksLikeMessageRow(v[i])) hits++;
+    }
+    return hits > 0;
+  }
+
   /**
-   * Снимок из ОТВЕТА UpdatePrompt/CreatePrompt → сообщения.
-   *
-   * Точный путь: `root[13][0]` — массив сообщений, текст `msg[0]`, роль `msg[8]`,
-   * `msg[19] === 1` — «мысль» модели (reasoning). Сообщения без строкового текста и
-   * без известной роли отбрасываются: в `root[13]` рядом с историей встречаются
-   * служебные кортежи (в запросе GenerateContent `root[13]` — таймзона, а не ходы),
-   * и по индексам без проверки формы они стали бы «репликами».
+   * Drive file id из поля [3] строки-вложения. В живом чате это массив
+   * строк (`['17NuA9Ex…']`); вложенный массив — защита от формы [0][0].
    */
-  function msgsFromSnapshot(root) {
+  function fileIdsOfRow(m) {
     var out = [];
-    if (!Array.isArray(root) || !Array.isArray(root[13]) || !Array.isArray(root[13][0])) return out;
-    var msgs = root[13][0];
-    for (var i = 0; i < msgs.length; i++) {
-      var m = msgs[i];
-      if (!Array.isArray(m)) continue;
-      if (m[19] === 1) continue;                       // reasoning, не реплика
-      if (typeof m[0] !== 'string' || !isRoleName(m[8])) continue;
-      var text = m[0].replace(/\r\n?/g, '\n').trim();
-      if (!text) continue;
-      out.push({ role: normRole(m[8]), text: text });
+    var field = (Array.isArray(m) && Array.isArray(m[3])) ? m[3] : null;
+    if (!field) return out;
+    for (var i = 0; i < field.length; i++) {
+      var v = field[i];
+      if (typeof v === 'string' && v) { out.push(v); continue; }
+      if (Array.isArray(v) && typeof v[0] === 'string' && v[0]) out.push(v[0]);
     }
     return out;
+  }
+
+  /**
+   * Перенос fileId на СЛЕДУЮЩУЮ user-строку: в UI вложение и текст запроса —
+   * один ход, но в сети это две строки (m[0]=null с m[3], затем текст).
+   * Строка-вложение без текста после слияния удаляется; если следующей
+   * user-строки нет — остаётся самостоятельный user-ход (адаптер покажет
+   * его, когда появится непустая sections).
+   */
+  function mergeFileRows(msgs) {
+    var out = [];
+    var carry = null;
+    for (var i = 0; i < msgs.length; i++) {
+      var m = msgs[i];
+      var files = (m && Array.isArray(m.files) && m.files.length) ? m.files : null;
+      if (files) {
+        carry = carry ? carry.concat(files) : files.slice();
+        if (!m.text) continue;
+      }
+      if (carry) {
+        if (m.role === ROLE_USER) {
+          out.push({ role: ROLE_USER, text: m.text || '', files: carry });
+          carry = null;
+          continue;
+        }
+        out.push({ role: ROLE_USER, text: '', files: carry });
+        carry = null;
+      }
+      out.push(m);
+    }
+    if (carry) out.push({ role: ROLE_USER, text: '', files: carry });
+    return out;
+  }
+
+  /** Строки снимка → сообщения (reasoning `m[19] === 1` не реплика). */
+  function msgsFromRows(rows) {
+    var out = [];
+    if (!Array.isArray(rows)) return out;
+    for (var i = 0; i < rows.length; i++) {
+      var m = rows[i];
+      if (!Array.isArray(m)) continue;
+      if (m[19] === 1) continue;                       // reasoning, не реплика
+      if (!isRoleName(m[8])) continue;
+      var text = (typeof m[0] === 'string') ? m[0].replace(/\r\n?/g, '\n').trim() : '';
+      var ids = fileIdsOfRow(m);
+      // Служебные чанки (m[0]=null без m[3]) по-прежнему не реплики.
+      if (ids.length === 0 && !text) continue;
+      var rec = { role: normRole(m[8]), text: text };
+      if (ids.length > 0) rec.files = ids;
+      out.push(rec);
+    }
+    return mergeFileRows(out);
+  }
+
+  /**
+   * Рекурсивный (BFS) поиск массива-снимка. Лимиты глубины/узлов — форма приватная,
+   * тело большое; в найденный массив сообщений не спускаемся. При равенстве счётчика
+   * побеждает первый (самый неглубокий) кандидат — стабильно и предсказуемо.
+   */
+  function findRowsArray(root) {
+    var best = [];
+    var bestPath = '';
+    var bestCount = 0;
+    var candidates = 0;
+    var queue = [{ v: root, path: '', depth: 0 }];
+    var head = 0;
+    var visited = 0;
+    while (head < queue.length && visited < 4000) {
+      var cur = queue[head++];
+      visited++;
+      var v = cur.v;
+      if (cur.path !== '' && isRowsArray(v)) {
+        candidates++;
+        var msgs = msgsFromRows(v);
+        if (msgs.length > bestCount) {
+          best = msgs;
+          bestPath = cur.path;
+          bestCount = msgs.length;
+        }
+        continue;
+      }
+      if (cur.depth >= 10) continue;
+      for (var i = 0; i < v.length; i++) {
+        if (!Array.isArray(v[i])) continue;
+        queue.push({
+          v: v[i],
+          path: cur.path === '' ? String(i) : cur.path + '[' + i + ']',
+          depth: cur.depth + 1
+        });
+      }
+    }
+    return { msgs: best, path: bestPath, candidates: candidates };
+  }
+
+  /**
+   * Снимок из ОТВЕТА UpdatePrompt/CreatePrompt/ResolveDriveResource → сообщения.
+   *
+   * Известный путь: `root[13][0]` — массив сообщений, текст `msg[0]`, роль `msg[8]`,
+   * `msg[19] === 1` — «мысль» модели (reasoning). Если форма не совпала (живой
+   * ResolveDriveResource на холодном старте кладёт историю иначе), ищется ЛЮБОЙ
+   * вложенный массив той же сигнатуры: элементы-массивы, среди них есть строки с
+   * текстом и известной ролью. Сообщения без строкового текста/роли отбрасываются:
+   * в `root[13]` рядом с историей встречаются служебные кортежи (в запросе
+   * GenerateContent `root[13]` — таймзона, а не ходы).
+   */
+  function findSnapshotMessages(root) {
+    if (!Array.isArray(root)) return { msgs: [], path: '', candidates: 0 };
+    if (Array.isArray(root[13]) && Array.isArray(root[13][0])) {
+      var known = msgsFromRows(root[13][0]);
+      if (known.length > 0) return { msgs: known, path: '13[0]', candidates: 1 };
+    }
+    if (isRowsArray(root)) {
+      var self = msgsFromRows(root);
+      if (self.length > 0) return { msgs: self, path: 'root', candidates: 1 };
+    }
+    var found = findRowsArray(root);
+    return { msgs: found.msgs, path: found.path, candidates: found.candidates };
+  }
+
+  function msgsFromSnapshot(root) {
+    return findSnapshotMessages(root).msgs;
   }
 
   /**
@@ -327,16 +477,56 @@
   }
 
   /**
-   * Массив сообщений истории из разобранного JSON. Приоритет — снимок ответа
-   * (`data[13][0]`), затем тело запроса (`data[1]`). Возвращает ещё и путь —
-   * он виден в диагностике/тестах, поэтому расхождение формы сразу заметно.
+   * Массив сообщений истории из разобранного JSON. Приоритет — известный снимок
+   * (`data[13][0]`), затем рекурсивный поиск по сигнатуре, затем тело запроса
+   * (`data[1]`). Возвращает путь (виден в тестах) и причину промаха для диагностики.
    */
-  function findMessageArray(root) {
-    var snap = msgsFromSnapshot(root);
-    if (snap.length > 0) return { msgs: snap, path: '13[0]' };
+  function findMessageArray(root, url) {
+    var snap = findSnapshotMessages(root);
+    if (snap.msgs.length > 0) return { msgs: snap.msgs, path: snap.path, reason: '' };
     var req = msgsFromRequest(root);
-    if (req.length > 0) return { msgs: req, path: '1' };
-    return { msgs: [], path: '' };
+    if (req.length > 0) return { msgs: req, path: '1', reason: '' };
+    var reason = snapshotMissReason(root, snap);
+    if (typeof url === 'string' && isHistoryRpc(url)) warnSnapshotMiss(root, reason);
+    return { msgs: [], path: '', reason: reason };
+  }
+
+  /** Сколько вложенных массивов в root (с лимитом — тело большое, форма приватная). */
+  function countArrays(root, cap) {
+    if (!Array.isArray(root)) return 0;
+    var n = 1;
+    var stack = [root];
+    while (stack.length > 0 && n < cap) {
+      var v = stack.pop();
+      for (var i = 0; i < v.length && n < cap; i++) {
+        if (Array.isArray(v[i])) { n++; stack.push(v[i]); }
+      }
+    }
+    return n;
+  }
+
+  /** Причина промаха: shape-miss (массивы есть, сигнатуры нет) или no-array. */
+  function snapshotMissReason(root, snap) {
+    if (!Array.isArray(root)) return 'no-array';
+    if (snap.candidates > 0) return 'shape-miss';
+    return countArrays(root, 64) > 1 ? 'shape-miss' : 'no-array';
+  }
+
+  /** Один компактный console.warn на форму (без текста тела), дедуп по отпечатку. */
+  function warnSnapshotMiss(root, reason) {
+    try {
+      var r13 = Array.isArray(root) ? root[13] : undefined;
+      var rootLen = Array.isArray(root) ? root.length : 'N/A';
+      var r13Desc = Array.isArray(r13) ? ('len' + r13.length) : ((r13 === null || r13 === undefined) ? 'null' : typeof r13);
+      var arrays = countArrays(root, 2000);
+      var sig = rootLen + '|' + r13Desc + '|' + arrays;
+      if (sig === lastSnapshotWarnSig) return;
+      lastSnapshotWarnSig = sig;
+      console.warn(LOG_TAG + ' snapshot miss reason=' + reason + ' rootLen=' + rootLen +
+        ' root13=' + r13Desc + ' arrays=' + arrays + ' rootShape=' + shapeOfArray(root));
+    } catch (eW) {
+      soft(eW, 'aistudio-intercept:warn-miss');
+    }
   }
 
   /**
@@ -348,11 +538,17 @@
     var root = parseJsonText(text);
     var isHistoryUrl = (typeof url === 'string') && isHistoryRpc(url);
     if (root === null) {
+      lastHistoryReason = (typeof text === 'string' && text.length > 0) ? 'not-json' : 'empty';
       if (isHistoryUrl) diagEmptyHistory(url, text, null);
       return [];
     }
-    var found = findMessageArray(root);
-    if (found.msgs.length === 0 && isHistoryUrl) diagEmptyHistory(url, text, root);
+    var found = findMessageArray(root, url);
+    if (found.msgs.length > 0) {
+      lastHistoryReason = '';
+      return found.msgs;
+    }
+    lastHistoryReason = found.reason || 'shape-miss';
+    if (isHistoryUrl) diagEmptyHistory(url, text, root);
     return found.msgs;
   }
 
@@ -582,14 +778,109 @@
   function historySig(msgs) {
     var parts = [];
     for (var i = 0; i < msgs.length; i++) {
-      parts.push((msgs[i].role === ROLE_AI ? 'a' : 'u') + msgs[i].text.length + ':' + hashText(msgs[i].text));
+      var text = (typeof msgs[i].text === 'string') ? msgs[i].text : '';
+      var sections = (typeof msgs[i].sections === 'string') ? msgs[i].sections : '';
+      var part = (msgs[i].role === ROLE_AI ? 'a' : 'u') + text.length + ':' + hashText(text);
+      // Текст файла догружается асинхронно: без sections в подписи повторный
+      // emitHistory после догрузки был бы проглочен дедупом.
+      if (sections) part += '|s' + sections.length + ':' + hashText(sections);
+      parts.push(part);
     }
     return parts.join('|');
   }
 
+  function currentChatId() {
+    try {
+      var loc = (typeof window !== 'undefined' && window.location) ? window.location : null;
+      var hit = /\/prompts\/([A-Za-z0-9_-]+)/.exec(String((loc && loc.pathname) || ''));
+      return hit ? hit[1] : '';
+    } catch (eCc) {
+      return '';
+    }
+  }
+
+  /**
+   * Модуль вложений грузится ПОСЛЕ перехватчика (core/background.js: files
+   * после intercept), поэтому __bind — ленивый: первый вызов в рантайме
+   * гарантированно видит window.AiCmAistudioFiles уже определённым.
+   */
+  function filesApi() {
+    var api = (typeof window !== 'undefined') ? window.AiCmAistudioFiles : null;
+    if (!api) return null;
+    if (!filesBound) {
+      try {
+        if (typeof api.__bind === 'function') {
+          api.__bind({
+            emitSnapshot: reemitHistory,
+            diagLine: diagLine,
+            currentChatId: currentChatId,
+            originalFetch: nativeFetch
+          });
+          filesBound = true;
+        }
+      } catch (eFb) {
+        soft(eFb, 'aistudio-intercept:files-bind');
+      }
+    }
+    if (filesBound && pendingFileToken) {
+      var tok = pendingFileToken;
+      pendingFileToken = '';
+      try {
+        if (typeof api.afSetToken === 'function') api.afSetToken(tok);
+      } catch (eFt) {
+        soft(eFt, 'aistudio-intercept:files-token');
+      }
+    }
+    return api;
+  }
+
+  /**
+   * Секции файлов собираются в отдельное поле, а не в text: адаптер вызывает
+   * _cleanText ПОСЛЕ и схлопнул бы переводы строк в телах markdown (§4 плана).
+   */
+  function annotateFileSections(msgs) {
+    var api = filesApi();
+    if (!api || typeof api.afSectionsFor !== 'function') return;
+    var cid = currentChatId();
+    for (var i = 0; i < msgs.length; i++) {
+      var m = msgs[i];
+      if (!m || !Array.isArray(m.files) || m.files.length === 0) continue;
+      var sec = '';
+      try {
+        sec = api.afSectionsFor(m.files, cid) || '';
+      } catch (eSec) {
+        soft(eSec, 'aistudio-intercept:files-sections');
+      }
+      if (sec) m.sections = sec;
+      else if (m.sections) delete m.sections;
+    }
+  }
+
+  function reemitHistory() {
+    if (!lastHistoryMsgs || lastHistoryMsgs.length === 0) return;
+    try {
+      emitHistory(lastHistoryMsgs, lastHistoryUrl);
+    } catch (eRe) {
+      soft(eRe, 'aistudio-intercept:files-reemit');
+    }
+  }
+
   /** Отправка снимка истории в мост с дедупом по содержимому. */
   function emitHistory(msgs, url) {
-    if (!msgs || msgs.length === 0) return;
+    if (!msgs || msgs.length === 0) {
+      // v2.0.34: раньше выход был молчаливым — «2 узла» в бейдже не оставляли следов.
+      diagLine('aistudio-history-skip', {
+        reason: lastHistoryReason || 'empty',
+        rpc: String(url || '').replace(/^.*\//, ''),
+        msgs: 0
+      });
+      return;
+    }
+    // Спрашиваем секции ДО дедупа: даже повторный снимок должен поставить
+    // недогруженные файлы в очередь (иначе ре-эмит после догрузки не начнётся).
+    annotateFileSections(msgs);
+    lastHistoryMsgs = msgs;
+    lastHistoryUrl = String(url || '');
     var sig = String(url || '') + '|' + historySig(msgs);
     if (sig === lastHistorySig) return;
     lastHistorySig = sig;
@@ -611,9 +902,46 @@
     }
   }
 
+  /** GenerateAccessToken: тело `["ya29.…"]` — OAuth-токен для Drive API вложений. */
+  function isTokenRpc(url) {
+    return /generatetoken|GenerateAccessToken/i.test(String(url || ''));
+  }
+
+  function tokenFromBody(text) {
+    var root = parseJsonText(text);
+    var pick = function (v) {
+      return (typeof v === 'string' && /^ya29\./.test(v)) ? v : '';
+    };
+    if (typeof root === 'string') return pick(root);
+    if (Array.isArray(root)) {
+      for (var i = 0; i < root.length; i++) {
+        var got = pick(root[i]);
+        if (got) return got;
+      }
+    }
+    if (root && typeof root === 'object' && pick(root.token)) return root.token;
+    return '';
+  }
+
   /** Тело ОТВЕТА: GenerateContent — usage токенов, UpdatePrompt/CreatePrompt — история. */
   function handleResponse(url, text) {
     try {
+      if (isTokenRpc(url)) {
+        var tok = tokenFromBody(text);
+        if (tok) {
+          var api = filesApi();
+          if (api && typeof api.afSetToken === 'function') {
+            try { api.afSetToken(tok); } catch (eTk) { soft(eTk, 'aistudio-intercept:files-token'); }
+          } else {
+            // Модуль вложений ещё не загрузился (files после intercept) —
+            // отдадим токен при первой ленивой привязке.
+            pendingFileToken = tok;
+          }
+          // Приватность: в лог идёт только длина токена, никогда сам токен.
+          diagLine('aistudio-auth-token', { len: tok.length });
+        }
+        return;
+      }
       // ResolveDriveResource на открытии чата: ресурс промпта с выбранной моделью (v2.0.32).
       if (isGenerateRpc(url) || isHistoryRpc(url)) announceModel(text);
       if (isGenerateRpc(url)) {
@@ -625,7 +953,15 @@
         return;
       }
       if (!isHistoryRpc(url)) return;
-      emitHistory(parseHistory(text, url), url);
+      var historyMsgs = parseHistory(text, url);
+      // v2.0.34: факт холодного ResolveDriveResource виден вместе с итогом разбора.
+      if (/resolvedriveresource/i.test(url)) {
+        diagLine('aistudio-drive-resource', {
+          msgs: historyMsgs.length,
+          reason: historyMsgs.length > 0 ? 'parsed' : (lastHistoryReason || 'shape-miss')
+        });
+      }
+      emitHistory(historyMsgs, url);
     } catch (eHR) {
       soft(eHR, 'aistudio-intercept:response-parse');
     }
@@ -648,11 +984,14 @@
   function installFetchHook() {
     if (typeof window.fetch !== 'function') return;
     var prevFetch = window.fetch;
+    // Нативный fetch нужен модулю вложений: он не должен проходить через
+    // собственный патч (Drive API не $rpc, но так надёжнее и без лишних копий).
+    if (nativeFetch === null) nativeFetch = prevFetch;
     if (!prevFetch || prevFetch.__aiCmAistudioWrapped) return;
 
     var wrapped = function fetch(input, init) {
       var url = urlOfFetchInput(input);
-      var interesting = !!url && (isGenerateRpc(url) || isHistoryRpc(url));
+      var interesting = !!url && (isGenerateRpc(url) || isHistoryRpc(url) || isTokenRpc(url));
       var p = prevFetch.apply(this, arguments);
       if (!interesting) return p;
 
@@ -724,7 +1063,7 @@
         self.addEventListener('load', function () {
           try {
             var url = self.__aiCmAistudioUrl || '';
-            if (!url || (!isGenerateRpc(url) && !isHistoryRpc(url))) return;
+            if (!url || (!isGenerateRpc(url) && !isHistoryRpc(url) && !isTokenRpc(url))) return;
             var ct = '';
             try { ct = String(self.getResponseHeader('content-type') || ''); } catch (eH) { ct = ''; }
             // Не-generate SSE — повтор истории/служебный стрим: тело не читаем.
@@ -761,6 +1100,13 @@
   installFetchHook();
   installXhrHook();
 
+  // v2.0.34: без строки установки «нет history loaded» не отличить от «хук не встал».
+  // Гейт тот же, что у канала B: по умолчанию консоль страницы остаётся чистой.
+  if (debugGateOn()) {
+    console.log(LOG_TAG + ' hooks installed fetch=' + (typeof window.fetch === 'function' ? 'wrapped' : 'absent') +
+      ' xhr=' + (typeof window.XMLHttpRequest === 'function' ? 'wrapped' : 'absent'));
+  }
+
   window.AiCmAistudioIntercept = {
     version: 5,
     __handlers: {
@@ -778,6 +1124,11 @@
       modelFromBody: modelFromBody,
       isGenerateRpc: isGenerateRpc,
       isHistoryRpc: isHistoryRpc,
+      isTokenRpc: isTokenRpc,
+      tokenFromBody: tokenFromBody,
+      fileIdsOfRow: fileIdsOfRow,
+      mergeFileRows: mergeFileRows,
+      currentChatId: currentChatId,
       handleRequest: handleRequest,
       handleResponse: handleResponse
     },
@@ -785,6 +1136,14 @@
       lastTokens = 0;
       lastHistorySig = '';
       lastModelSlug = '';
+      lastHistoryMsgs = null;
+      lastHistoryUrl = '';
+      try {
+        var api = (typeof window !== 'undefined') ? window.AiCmAistudioFiles : null;
+        if (api && typeof api.afReset === 'function') api.afReset('');
+      } catch (eRf) {
+        soft(eRf, 'aistudio-intercept:reset-files');
+      }
     },
     stats: function () {
       return { lastTokens: lastTokens, lastHistorySig: lastHistorySig, verbose: verbose };

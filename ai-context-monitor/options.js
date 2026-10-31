@@ -431,11 +431,37 @@
             model
           };
         }
+        function stripPerplexityHistoryTruncation(urlStr) {
+          var src = String(urlStr || "");
+          if (!src) return src;
+          var hash = "";
+          var h = src.indexOf("#");
+          if (h !== -1) {
+            hash = src.slice(h);
+            src = src.slice(0, h);
+          }
+          var q = src.indexOf("?");
+          if (q === -1) return src + hash;
+          var base = src.slice(0, q);
+          var parts = src.slice(q + 1).split("&");
+          var kept = [];
+          for (var i = 0; i < parts.length; i++) {
+            if (!parts[i]) continue;
+            var name = parts[i].split("=")[0];
+            if (name === "limit" || name === "offset" || name === "from_first") continue;
+            kept.push(parts[i]);
+          }
+          return base + (kept.length ? "?" + kept.join("&") : "") + hash;
+        }
         if (typeof window !== "undefined") {
           window.parsePerplexityThread = parsePerplexityThread;
+          window.stripPerplexityHistoryTruncation = stripPerplexityHistoryTruncation;
         }
         if (typeof module !== "undefined" && module.exports) {
-          module.exports = { parsePerplexityThread };
+          module.exports = {
+            parsePerplexityThread,
+            stripPerplexityHistoryTruncation
+          };
         }
       })();
       (function() {
@@ -1519,6 +1545,24 @@
         if (typeof module !== "undefined" && module.exports) module.exports = Api;
         if (typeof window !== "undefined") window.AiCmExportBuilders = Api;
       })();
+      function aiCmIsFirefox() {
+        try {
+          var api = typeof browser !== "undefined" && browser && browser.runtime ? browser : typeof chrome !== "undefined" && chrome && chrome.runtime ? chrome : null;
+          if (!api) return false;
+          if (api.runtime && typeof api.runtime.getURL === "function") {
+            return String(api.runtime.getURL("")).indexOf("moz-extension://") === 0;
+          }
+          if (typeof api.getURL === "function") {
+            return String(api.getURL("")).indexOf("moz-extension://") === 0;
+          }
+          return false;
+        } catch (e) {
+          return false;
+        }
+      }
+      if (typeof module !== "undefined" && module.exports) {
+        module.exports = { aiCmIsFirefox };
+      }
       console.log("AI Context Monitor: \u041D\u0430\u0441\u0442\u0440\u043E\u0439\u043A\u0438 \u0437\u0430\u0433\u0440\u0443\u0436\u0435\u043D\u044B");
       var siteEl = document.getElementById("stat-site");
       var modelEl = document.getElementById("stat-model");
@@ -1532,7 +1576,7 @@
       var toggleApiKeyBtn = document.getElementById("toggle-api-key");
       var exactCountCheckbox = document.getElementById("exact-count");
       var exactCountWarningEl = document.getElementById("exact-count-warning");
-      var aiCmByokUiDisabled = typeof browser !== "undefined";
+      var aiCmByokUiDisabled = aiCmIsFirefox();
       var versionEl = document.querySelector(".version");
       var exportMdBtn = document.getElementById("export-md");
       var exportJsonBtn = document.getElementById("export-json");
@@ -2121,6 +2165,7 @@
               if (state) {
                 cachedState = state;
                 updateStatsFromState(state, tabHost, tabPath);
+                updateExportButtons();
               } else if (cachedState && cachedState.host === tabHost) {
                 updateStatsFromState(cachedState, tabHost, tabPath, true);
                 var cachedAt = formatTime(cachedState.updatedAt);
@@ -2159,6 +2204,7 @@
               cachedState = null;
               showNoData(aiCmI18nMessage("options_open_supported_site", "\u041E\u0442\u043A\u0440\u043E\u0439\u0442\u0435 \u043F\u043E\u0434\u0434\u0435\u0440\u0436\u0438\u0432\u0430\u0435\u043C\u044B\u0439 \u0441\u0430\u0439\u0442"));
               updateStaleWarning(null, tabHost, "");
+              updateExportButtons();
             });
             return;
           }
@@ -2183,6 +2229,7 @@
             if (best) {
               cachedState = best;
               updateStatsFromState(best, tabHost, tabPath);
+              updateExportButtons();
             }
           });
         });
@@ -2213,13 +2260,16 @@
       function updateExportButtons() {
         if (!exportMdBtn || !exportJsonBtn || !exportPdfBtn) return;
         var enabled = !!(cachedHistory && cachedHistory.host === currentTabHost);
+        var netMsgs = cachedState && cachedState.host === currentTabHost && typeof cachedState.netBaseMsgs === "number" ? cachedState.netBaseMsgs : 0;
+        if (!enabled && netMsgs > 0) enabled = true;
         exportMdBtn.disabled = !enabled;
         exportJsonBtn.disabled = !enabled;
         exportPdfBtn.disabled = !enabled;
         if (exportTxtBtn) exportTxtBtn.disabled = !enabled;
         if (exportHintEl) {
           if (enabled) {
-            var exportAt = formatTime(cachedHistory.updatedAt);
+            var hintAt = cachedHistory && cachedHistory.host === currentTabHost ? cachedHistory.updatedAt : cachedState ? cachedState.updatedAt : 0;
+            var exportAt = formatTime(hintAt);
             exportHintEl.textContent = aiCmI18nMessage("options_ready_to_export", "\u0413\u043E\u0442\u043E\u0432\u043E \u043A \u044D\u043A\u0441\u043F\u043E\u0440\u0442\u0443 \xB7 \u0434\u0430\u043D\u043D\u044B\u0435 \u043E\u0442 " + exportAt, [exportAt]);
           } else {
             exportHintEl.textContent = aiCmI18nMessage("options_open_supported_site", "\u041E\u0442\u043A\u0440\u043E\u0439\u0442\u0435 \u043F\u043E\u0434\u0434\u0435\u0440\u0436\u0438\u0432\u0430\u0435\u043C\u044B\u0439 \u0441\u0430\u0439\u0442");
@@ -2306,7 +2356,7 @@
         }
       }
       function pickExportHistory(snap) {
-        if (snap && snap.convId) return snap;
+        if (snap && (snap.convId || Array.isArray(snap.messages) && snap.messages.length > 0)) return snap;
         return cachedHistory;
       }
       exportMdBtn && exportMdBtn.addEventListener("click", function() {

@@ -307,9 +307,18 @@
         collectAttachments(t, localSeen, items);
         ingestAttachments(items);
         var modelName = extractModelName(t);
-        var turnId = extractTurnId(t) || ('idx' + out.total++);
+        var turnId = extractTurnId(t) || stableTurnFallbackId(t, out);
         var turnTs = extractTurnTs(t);
         var r1 = extractTurnR1(t);
+        // v2.0 (Gemini files): ref-ы вложений хода. Парсер не бросает; пустой
+        // массив — обычный ход без файлов.
+        var turnFiles = [];
+        try {
+          if (typeof window !== 'undefined' && window.GeminiBatchexecuteParser &&
+              typeof window.GeminiBatchexecuteParser.collectTurnFiles === 'function') {
+            turnFiles = window.GeminiBatchexecuteParser.collectTurnFiles(t) || [];
+          }
+        } catch (eFiles) { turnFiles = []; }
         // v30/v31: текст хода и роли собираем через чистый сетевой парсер
         // (utils/gemini-batchexecute-parser.js): вычищаем $AXzLiR-токены и сегменты «мышления»,
         // разделяем вопрос пользователя и ответ модели, сохраняем таблицы.
@@ -331,7 +340,21 @@
           anyNonEmpty = true;
           var role = (seg.role === 'user') ? 'user' : 'assistant';
           var mid = turnId + '_' + role;
-          out.turns.push({ id: mid, text: stxt, modelName: modelName, ts: turnTs, role: role, turnId: turnId, r1: r1 });
+          out.turns.push({
+            id: mid, text: stxt, modelName: modelName, ts: turnTs, role: role,
+            turnId: turnId, r1: r1,
+            files: (role === 'user' && turnFiles.length) ? turnFiles : null
+          });
+          // Вложения привязаны к ПОЛЬЗОВАТЕЛЬСКОМУ ходу: модуль скачивания
+          // раскладывает их по msgId и дописывает секции при эмиссии.
+          if (role === 'user' && turnFiles.length) {
+            try {
+              if (typeof window !== 'undefined' && window.AiCmGeminiFiles &&
+                  typeof window.AiCmGeminiFiles.gfEnqueueTurnFiles === 'function') {
+                window.AiCmGeminiFiles.gfEnqueueTurnFiles(getConvId(), mid, turnFiles);
+              }
+            } catch (eEnqFiles) { }
+          }
         }
         if (doIdmap) {
           try {
@@ -575,11 +598,29 @@
       pieces.push(t.text);
       if (t.modelName) lastModelName = t.modelName;
     }
+    // v2.0 (Gemini files): convId нужен и для секций вложений, и для гварда
+    // полноты ниже — вычисляем один раз.
+    var fid = getConvId();
     // v31: сообщения с ролями (user/assistant) для экспорта истории
     var messages = [];
     for (var mi = 0; mi < ids.length; mi++) {
       var tm = turnsMap[ids[mi]];
-      messages.push({ role: (tm.role === 'user') ? 'user' : 'assistant', text: tm.text, id: ids[mi] });
+      var mtext = tm.text;
+      // Секции вложений — только в ПОЛЬЗОВАТЕЛЬСКИЙ ход и только по keyed-карте
+      // сообщения; текст секции не мутирует turnsMap, поэтому повторная эмиссия
+      // идемпотентна (никаких дублей [FILE: name]).
+      if (tm.role === 'user') {
+        try {
+          if (typeof window !== 'undefined' && window.AiCmGeminiFiles &&
+              typeof window.AiCmGeminiFiles.gfSectionsFor === 'function') {
+            var fileSections = window.AiCmGeminiFiles.gfSectionsFor(fid, ids[mi]);
+            // v2.1: снимаем уже сохранённые секции — повторная эмиссия/restore
+            // не должны давать вторую копию.
+            if (fileSections) mtext = stripAttachmentSections(mtext) + fileSections;
+          }
+        } catch (eSec) { }
+      }
+      messages.push({ role: (tm.role === 'user') ? 'user' : 'assistant', text: mtext, id: ids[mi] });
     }
     // v4x: санация мышления и строгий дедуп ПЕРЕД эмиссией и сохранением.
     // messageTexts/messageIds пересобираем из санированного messages, чтобы
@@ -609,11 +650,20 @@
     var floorValue = 0;
 
     // v29: диагностика полноты базы ДО применения пола
-    var fid = getConvId();
     var savedFloor = fid ? loadFloor(fid) : null;
-    var baseComplete = historyFullByQuiet;
+    // v2.0 (Gemini files): пока очередь вложений не пуста, база не финализируется,
+    // иначе экспорт зафиксирует ход без [FILE:]/[IMAGE:]-секций.
+    var filesPending = 0;
+    try {
+      if (typeof window !== 'undefined' && window.AiCmGeminiFiles &&
+          typeof window.AiCmGeminiFiles.gfPendingCount === 'function') {
+        filesPending = window.AiCmGeminiFiles.gfPendingCount(fid) || 0;
+      }
+    } catch (ePend) { filesPending = 0; }
+    var baseComplete = historyFullByQuiet && filesPending === 0;
     debugLog('log', '[gemini-base-diag] count=' + ids.length + ' textLen=' + text.length +
-      ' baseComplete=' + baseComplete + ' floorCount=' + (savedFloor ? savedFloor.count : '-'));
+      ' baseComplete=' + baseComplete + ' filesPending=' + filesPending +
+      ' floorCount=' + (savedFloor ? savedFloor.count : '-'));
 
     // v27/vXX: пол применяем ТОЛЬКО как защиту от просадки при НЕполной загрузке
     // (baseComplete=false). При baseComplete=true effectiveLen = фактический textLen базы,
@@ -660,7 +710,8 @@
           messages: messages,
           attachTokens: attachTokens,
           attachBreak: { imgTokens: attachBreak.imgTokens, docTokens: attachBreak.docTokens, imgCount: attachBreak.imgCount, docCount: attachBreak.docCount },
-          historyComplete: historyFullByQuiet,
+          historyComplete: baseComplete,
+          filesPending: filesPending,
           reachedStart: reachedStart === true, // v1.13.1: подтверждение полноты для гейта экспорта
           isLowConfidenceBase: isLowConfidenceBase === true, // v63: sanity-фолбэк без proof — префикс [LOW CONFIDENCE]_
           floorApplied: floorApplied,
@@ -669,6 +720,48 @@
       }));
     } catch (e) { swallowSoft(e, 'gemini:emitBaseSnapshot-dispatch'); }
     return { count: ids.length, textLen: text.length, effectiveLen: effectiveLen, lastModelName: lastModelName, floorApplied: floorApplied, floorValue: floorValue };
+  }
+
+  // ---- v2.1 (dedupe): устойчивый fallback-id хода ----
+  // Раньше id хода без r_… был позиционным (idxN): тот же ход со второй страницы,
+  // после F5 или из ленты получал другой id — turnsMap и секции вложений дублировались.
+  // Теперь id — FNV-1a от (ts, r1, строкового содержимого); idxN остаётся только
+  // для хода вообще без строковых признаков.
+  function stableTurnFallbackId(turn, out) {
+    var ts = extractTurnTs(turn);
+    var r1 = extractTurnR1(turn);
+    var parts = [];
+    (function walk(v) {
+      if (parts.length >= 256) return;
+      if (typeof v === 'string') { if (v) parts.push(v); return; }
+      if (Array.isArray(v)) { for (var i = 0; i < v.length; i++) walk(v[i]); }
+    })(turn);
+    if (!parts.length && !ts && !r1) return 'idx' + out.total++;
+    var basis = String(ts || 0) + '|' + String(r1 || '') + '|' + parts.join('\u0001');
+    var h = 0x811c9dc5;
+    for (var k = 0; k < basis.length; k++) {
+      h ^= basis.charCodeAt(k);
+      h = (h + ((h << 1) + (h << 4) + (h << 7) + (h << 8) + (h << 24))) >>> 0;
+    }
+    return 'h' + ('00000000' + h.toString(16)).slice(-8);
+  }
+
+  // ---- v2.1 (dedupe): идемпотентные секции вложений ----
+  // Секции дописываются к тексту только в момент эмиссии, но сохранённый текст
+  // (лента, full-history) их уже содержит. Перед новой вклейкой снимаем прежние
+  // блоки [FILE: …]/[IMAGE: …], иначе F5/restore даёт вторую копию.
+  function stripAttachmentSections(text) {
+    var s = (text == null) ? '' : String(text);
+    var at = s.length;
+    while (at > 0) {
+      var f = s.lastIndexOf('\n\n[FILE: ', at - 1);
+      var im = s.lastIndexOf('\n\n[IMAGE: ', at - 1);
+      var cut = (f > im) ? f : im;
+      if (cut === -1) break;
+      s = s.slice(0, cut);
+      at = cut;
+    }
+    return s;
   }
 
       // ---- applyStreamAliases: алиасы потоковых полей на разобранный ход ----
@@ -1078,7 +1171,7 @@
     for (var i = 0; i < pageSeq.length; i++) {
       var p = pageSeq[i];
       if (!turnsMap[p.id]) {
-        turnsMap[p.id] = { text: p.text, modelName: p.modelName, order: pageOrders[i], pageMode: src, ts: p.ts || 0, role: (p.role === 'user') ? 'user' : 'assistant', turnId: p.turnId || null, r1: p.r1 || null };
+        turnsMap[p.id] = { text: p.text, modelName: p.modelName, order: pageOrders[i], pageMode: src, ts: p.ts || 0, role: (p.role === 'user') ? 'user' : 'assistant', turnId: p.turnId || null, r1: p.r1 || null, files: p.files || null };
         added++;
       } else if (turnsMap[p.id].pageMode === 'restored') {
         // v1.14.1 (SHRINK-GUARD): сетевой ход перезаписывает restored-ход того же id
@@ -1096,7 +1189,7 @@
             : { replace: false, r1: (!recRest.r1 && p.r1) ? p.r1 : null, turnId: (!recRest.turnId && p.turnId) ? p.turnId : null };
         }
         if (dRm.replace) {
-          turnsMap[p.id] = { text: p.text, modelName: p.modelName, order: pageOrders[i], pageMode: src, ts: p.ts || 0, role: (p.role === 'user') ? 'user' : 'assistant', turnId: p.turnId || null, r1: p.r1 || null };
+          turnsMap[p.id] = { text: p.text, modelName: p.modelName, order: pageOrders[i], pageMode: src, ts: p.ts || 0, role: (p.role === 'user') ? 'user' : 'assistant', turnId: p.turnId || null, r1: p.r1 || null, files: p.files || null };
         } else {
           if (dRm.r1) recRest.r1 = dRm.r1;
           if (dRm.turnId) recRest.turnId = dRm.turnId;
@@ -1176,7 +1269,7 @@
   function sanitizeRestoredTurn(rt) {
     var arr = [{
       role: (rt && rt.role === 'user') ? 'user' : 'assistant',
-      text: (rt && rt.text != null) ? String(rt.text) : '',
+      text: stripAttachmentSections((rt && rt.text != null) ? String(rt.text) : ''),
       id: (rt && rt.id != null) ? String(rt.id) : null
     }];
     var clean = sanitizeMessagesForEmit(arr);
@@ -1219,7 +1312,7 @@
         text: m.text, modelName: '', order: maxOrder + 1 + i,
         pageMode: 'restored', ts: 0,
         role: (m.role === 'user') ? 'user' : 'assistant',
-        turnId: m.turnId, r1: m.r1
+        turnId: m.turnId, r1: m.r1, files: null
       };
     }
     debugLog('log', '[gemini-restore] merged ' + missing.length + ' missing ids (version=' + parserVersion + ')');
