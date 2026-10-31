@@ -11,8 +11,8 @@ icon in Chrome.
 - **Extension repository:** [shtakan/ai-context-monitor](https://github.com/shtakan/ai-context-monitor)
 - **Stack:** Pake 3.x (Rust, Tauri, WebView2); Node.js is used only to build the injected bundle
 - **Platform:** Windows (MSI installer, WebView2 Runtime)
-- **Current version:** 1.1.1 — see [CHANGELOG.md](CHANGELOG.md)
-- **Bundled extension:** 2.0.33 — AI Context Monitor, see [manifest.json](ai-context-monitor/manifest.json)
+- **Current version:** 1.1.3 — see [CHANGELOG.md](CHANGELOG.md)
+- **Bundled extension:** 2.0.36 — AI Context Monitor, see [manifest.json](ai-context-monitor/manifest.json)
 
 ## Installation
 
