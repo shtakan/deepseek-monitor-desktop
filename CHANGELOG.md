@@ -3,6 +3,12 @@
 Все заметные изменения проекта. Формат — [Keep a Changelog](https://keepachangelog.com/ru/1.1.0/),
 версионирование — [Semantic Versioning](https://semver.org/lang/ru/).
 
+## [1.1.4] - 2026-11-03
+
+### Changed
+
+- Обновлено встроенное расширение AI Context Monitor до версии 2.0.38 (фиксы Qwen и DeepSeek).
+
 ## [1.1.3] - 2026-10-31
 
 Обновление поставки встроенного расширения **AI Context Monitor** (2.0.33 → 2.0.36).
