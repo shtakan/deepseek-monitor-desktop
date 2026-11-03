@@ -6123,17 +6123,25 @@
           }
           return changed ? out : s;
         }
+        var REASONING_SECTION_PAIR_RE = /^\s*\[REASONING\]\r?\n([\s\S]*?)\r?\n\r?\n\[ANSWER\]\r?\n([\s\S]*)$/;
+        function diagTag(tag, fields) {
+          try {
+            if (typeof aiCmDiagLine !== "function") return false;
+            return aiCmDiagLine(tag, fields) !== false;
+          } catch (eDiag) {
+            return false;
+          }
+        }
         function splitReasoningSections(text) {
           var s = typeof text === "string" ? text : String(text == null ? "" : text);
+          var m = REASONING_SECTION_PAIR_RE.exec(s);
+          if (m) return { reasoning: m[1].replace(/\s+$/, ""), answer: m[2] };
           var r = s.indexOf(SECTION_REASONING_TAG);
-          if (r === -1) return { reasoning: "", answer: s };
-          var a = s.indexOf(SECTION_ANSWER_TAG, r + SECTION_REASONING_TAG.length);
-          if (a === -1) return { reasoning: "", answer: s };
-          var reasoning = s.slice(r + SECTION_REASONING_TAG.length, a).replace(/^\r?\n/, "").replace(/\s+$/, "");
-          var i = a + SECTION_ANSWER_TAG.length;
-          if (s.charAt(i) === "\r" && s.charAt(i + 1) === "\n") i += 2;
-          else if (s.charAt(i) === "\n") i += 1;
-          return { reasoning, answer: s.slice(i) };
+          var a = s.indexOf(SECTION_ANSWER_TAG);
+          if (r !== -1 && a !== -1) {
+            diagTag("reasoning-marker-in-prose", { len: s.length, r, a });
+          }
+          return { reasoning: "", answer: s };
         }
         function applyReasoningExportFields(messages, enabled) {
           var changed = 0;
@@ -9879,7 +9887,7 @@
               baseCount,
               // v1.14.1 (O3): fired = in-memory ИЛИ session-латч (кросс-табовый)
               // O-38: + модульный латч — переживает resetConversationState (SPA-возврат)
-              fired: P.getAutoExportFired(autoExportFired, siteName, cid) || (typeof P.isFiredInSession === "function" ? P.isFiredInSession(sessionFiredCache, siteName, cid) : false) || typeof aiCmAutoExportFiredOnce === "object" && aiCmAutoExportFiredOnce && aiCmAutoExportFiredOnce[siteName + "|" + cid] === 1,
+              fired: P.getAutoExportFired(autoExportFired, siteName, cid) || (typeof P.isFiredInSession === "function" ? P.isFiredInSession(sessionFiredCache, siteName, cid) : false) || typeof aiCmAutoExportFiredOnce === "object" && aiCmAutoExportFiredOnce && aiCmAutoExportFiredOnce[siteName + "|" + cid] === 1 || typeof aiCmAutoExportFiredInStorage === "function" && aiCmAutoExportFiredInStorage(cid),
               isGemini: isGeminiSvc,
               // O-37 (A): база сервиса БЕЗ сети (qwen) — доверенная по дизайну O-35 (живой источник —
               // DOM-адаптер; признак «база адаптера принята» взведён записью source=adapter). Предикат живёт в
@@ -10013,7 +10021,7 @@
             return;
           }
           if (!cid) return;
-          if (autoExportFired[cid] || P && typeof P.isFiredInSession === "function" && P.isFiredInSession(sessionFiredCache, siteName, cid) || typeof aiCmAutoExportFiredOnce === "object" && aiCmAutoExportFiredOnce && aiCmAutoExportFiredOnce[siteName + "|" + cid] === 1) {
+          if (autoExportFired[cid] || P && typeof P.isFiredInSession === "function" && P.isFiredInSession(sessionFiredCache, siteName, cid) || typeof aiCmAutoExportFiredOnce === "object" && aiCmAutoExportFiredOnce && aiCmAutoExportFiredOnce[siteName + "|" + cid] === 1 || typeof aiCmAutoExportFiredInStorage === "function" && aiCmAutoExportFiredInStorage(cid)) {
             debugLog("log", "[AI CM][auto-export] skip reason=already-fired convId=" + cid);
             return;
           }
@@ -10063,7 +10071,7 @@
         try {
           let aiCmWriteAutoExportFile2 = function(fileMsgs, histSource, histConvId, histSite) {
             try {
-              if (histConvId && cid && String(histConvId) !== String(cid) || histSite && siteNameD && String(histSite) !== String(siteNameD)) {
+              if (histSource === "storage-host" && !histConvId && cid || histConvId && cid && String(histConvId) !== String(cid) || histSite && siteNameD && String(histSite) !== String(siteNameD)) {
                 debugLog("log", "[AI CM][auto-export] abort reason=history-source-mismatch histConvId=" + histConvId + " site=" + histSite);
                 return;
               }
@@ -10140,6 +10148,7 @@
               } catch (eDiagDl) {
               }
               file = aiCmAutoExportStartDownload(content, file, fmt);
+              if (typeof aiCmAutoExportMarkFiredInStorage === "function") aiCmAutoExportMarkFiredInStorage(cid, reason);
               debugLog("log", "[AI CM][auto-export] fired convId=" + cid + " pct=" + percentage + " file=" + file + " textLen=" + textLen + " pendingCursor=" + (aiCmCursorLiveByConv[cid] ? "1" : "0") + " baseComplete=" + (baseComplete === true ? "1" : "0") + " histSource=" + histSource + " histConvId=" + histConvId);
               try {
                 window.dispatchEvent(new CustomEvent("ai-cm-auto-export-fired", { detail: JSON.stringify({
@@ -10319,7 +10328,7 @@
             if (cid && cid === d.convId && autoExportSettings.enabled === true && baseComplete === true && !aiCmCursorLiveByConv[cid] && !(function() {
               var siteBc = currentAdapter && currentAdapter.siteName || "";
               var Pbc = typeof window !== "undefined" && window.AiCmExportEmitPipeline ? window.AiCmExportEmitPipeline : null;
-              return Pbc.getAutoExportFired(autoExportFired, siteBc, cid) || (typeof Pbc.isFiredInSession === "function" ? Pbc.isFiredInSession(sessionFiredCache, siteBc, cid) : false) || typeof aiCmAutoExportFiredOnce === "object" && aiCmAutoExportFiredOnce && aiCmAutoExportFiredOnce[siteBc + "|" + cid] === 1;
+              return Pbc.getAutoExportFired(autoExportFired, siteBc, cid) || (typeof Pbc.isFiredInSession === "function" ? Pbc.isFiredInSession(sessionFiredCache, siteBc, cid) : false) || typeof aiCmAutoExportFiredOnce === "object" && aiCmAutoExportFiredOnce && aiCmAutoExportFiredOnce[siteBc + "|" + cid] === 1 || typeof aiCmAutoExportFiredInStorage === "function" && aiCmAutoExportFiredInStorage(cid);
             })() && (baseCount || 0) > 0) {
               var pctBc64 = typeof autoExportLastPct === "number" && autoExportLastPct >= 0 ? autoExportLastPct : 0;
               var thrBc64 = aiCmEffectiveAutoExportThreshold(typeof currentAdapter !== "undefined" && currentAdapter && currentAdapter.siteName || "");
@@ -10339,6 +10348,30 @@
           debugLog("error", "[AI CM][auto-export] loader-state error:", e);
         }
       });
+      function aiCmAutoExportFiredInStorage(cid) {
+        try {
+          if (!cid) return false;
+          if (typeof currentAdapter === "undefined" || !currentAdapter || currentAdapter.siteName !== "qwen") return false;
+          if (typeof sessionStorage === "undefined" || !sessionStorage) return false;
+          return sessionStorage.getItem("aiCmAutoExportFired_" + String(cid)) === "1";
+        } catch (e) {
+          swallowSoft(e, "export:autoexport-fired-storage-read");
+          return false;
+        }
+      }
+      function aiCmAutoExportMarkFiredInStorage(cid, reason) {
+        try {
+          if (reason === "pre-trim") return false;
+          if (!cid) return false;
+          if (typeof currentAdapter === "undefined" || !currentAdapter || currentAdapter.siteName !== "qwen") return false;
+          if (typeof sessionStorage === "undefined" || !sessionStorage) return false;
+          sessionStorage.setItem("aiCmAutoExportFired_" + String(cid), "1");
+          return true;
+        } catch (e) {
+          swallowSoft(e, "export:autoexport-fired-storage-write");
+          return false;
+        }
+      }
       (function() {
         var Api = {};
         Api.sanitizeGeminiText = sanitizeGeminiText;
@@ -12480,7 +12513,7 @@
               var cidS24 = getCurrentConvId() || "";
               var msgsS24 = buildHistoryMessages();
               var histKeyS24 = "adapter|" + msgsS24.length;
-              if (msgsS24.length > 0 && histKeyS24 !== lastHistoryWroteKey) {
+              if (msgsS24.length > 0 && histKeyS24 !== lastHistoryWroteKey && cidS24 !== "") {
                 lastHistoryWroteKey = histKeyS24;
                 adapterBaseSeen = true;
                 debugLog("log", "[AI CM][trace] history-write source=adapter site=" + (currentAdapter.siteName || "") + " convId=" + cidS24 + " msgs=" + msgsS24.length);
@@ -13351,6 +13384,176 @@
         }
       });
       aiCmAistudioHistoryCacheRestore();
+      var aiCmPdfBridgeStarted = false;
+      var aiCmPdfJobs = {};
+      var AI_CM_PDF_SRC = "ai-cm-pdf";
+      var AI_CM_PDF_MAX_BYTES = 10 * 1024 * 1024;
+      var AI_CM_PDF_MAX_CHUNKS = 64;
+      var AI_CM_PDF_CHUNK_MAX = 1024 * 1024;
+      function aiCmPdfLog(tag, err) {
+        if (typeof debugLog === "function") debugLog("warn", "[AI CM][pdf] " + tag, err);
+      }
+      function aiCmPdfDetail(ev) {
+        var raw = ev && ev.detail !== void 0 ? ev.detail : null;
+        if (typeof raw !== "string") return raw && typeof raw === "object" ? raw : null;
+        try {
+          return JSON.parse(raw);
+        } catch (eParse) {
+          aiCmPdfLog("detail", eParse);
+          return null;
+        }
+      }
+      function aiCmPdfB64(u8) {
+        var bin = "";
+        var step = 32768;
+        for (var i = 0; i < u8.length; i += step) {
+          bin += String.fromCharCode.apply(null, u8.subarray(i, i + step));
+        }
+        try {
+          return btoa(bin);
+        } catch (eB64) {
+          aiCmPdfLog("btoa", eB64);
+          return "";
+        }
+      }
+      function aiCmPdfAnnounceReady() {
+        try {
+          window.dispatchEvent(new CustomEvent("ai-cm-pdf-ready", { detail: JSON.stringify({ enabled: true }) }));
+        } catch (eReady) {
+          aiCmPdfLog("ready", eReady);
+        }
+      }
+      function aiCmPdfDeliver(id, res) {
+        var job = aiCmPdfJobs[id];
+        delete aiCmPdfJobs[id];
+        var out = res && typeof res === "object" ? res : {};
+        var payload = {
+          id,
+          ok: out.ok === true,
+          text: typeof out.text === "string" ? out.text : "",
+          pages: typeof out.pages === "number" ? out.pages : 0,
+          truncated: out.truncated === true,
+          reason: typeof out.reason === "string" ? out.reason : out.ok === true ? "" : "pdf-host-error",
+          size: typeof out.size === "number" ? out.size : job ? job.size : 0,
+          ms: typeof out.ms === "number" ? out.ms : 0
+        };
+        if (job && job.port) {
+          try {
+            job.port.disconnect();
+          } catch (eDisc) {
+            aiCmPdfLog("disconnect", eDisc);
+          }
+        }
+        try {
+          window.dispatchEvent(new CustomEvent("ai-cm-pdf-result", { detail: JSON.stringify(payload) }));
+        } catch (eEvent) {
+          aiCmPdfLog("result-event", eEvent);
+        }
+      }
+      function aiCmPdfDispatch(id) {
+        var job = aiCmPdfJobs[id];
+        if (!job || job.sent) return;
+        job.sent = true;
+        if (typeof chrome === "undefined" || !chrome.runtime || typeof chrome.runtime.connect !== "function") {
+          aiCmPdfDeliver(id, { ok: false, reason: "pdf-unavailable" });
+          return;
+        }
+        var port = null;
+        try {
+          port = chrome.runtime.connect({ name: "ai-cm-pdf:" + id });
+        } catch (ePort) {
+          aiCmPdfLog("connect", ePort);
+          aiCmPdfDeliver(id, { ok: false, reason: "pdf-unavailable" });
+          return;
+        }
+        job.port = port;
+        port.onMessage.addListener(function(msg) {
+          if (!msg || typeof msg !== "object") return;
+          if (String(msg.t || "") !== "result") return;
+          aiCmPdfDeliver(id, msg);
+        });
+        port.onDisconnect.addListener(function() {
+          try {
+            void chrome.runtime.lastError;
+          } catch (eLast) {
+            aiCmPdfLog("lastError", eLast);
+          }
+          if (!aiCmPdfJobs[id]) return;
+          aiCmPdfDeliver(id, { ok: false, reason: "pdf-aborted" });
+        });
+        port.postMessage({ t: "begin", id, total: job.got, maxChars: job.maxChars || 2e5 });
+        for (var i = 0; i < job.parts.length; i++) {
+          if (!job.parts[i]) continue;
+          port.postMessage({ t: "chunk", id, seq: i, b64: aiCmPdfB64(job.parts[i]) });
+        }
+        port.postMessage({ t: "end", id });
+      }
+      function aiCmPdfOnMessage(ev) {
+        if (!ev || ev.source !== window) return;
+        var data = ev.data;
+        if (!data || data.source !== AI_CM_PDF_SRC) return;
+        var id = typeof data.id === "string" ? data.id : "";
+        if (!id) return;
+        var job = aiCmPdfJobs[id];
+        if (!job) {
+          job = aiCmPdfJobs[id] = { total: 0, parts: [], got: 0, size: 0, port: null, sent: false, maxChars: 0 };
+        }
+        if (typeof data.maxChars === "number" && data.maxChars > 0) job.maxChars = data.maxChars;
+        var total = typeof data.total === "number" ? data.total : 0;
+        if (total > 0 && total <= AI_CM_PDF_MAX_CHUNKS) job.total = total;
+        var seq = typeof data.seq === "number" ? data.seq : -1;
+        var bytes = data.bytes;
+        var len = bytes && typeof bytes.byteLength === "number" ? bytes.byteLength : 0;
+        if (seq < 0 || seq >= AI_CM_PDF_MAX_CHUNKS || len <= 0 || len > AI_CM_PDF_CHUNK_MAX) {
+          aiCmPdfDeliver(id, { ok: false, reason: "pdf-invalid" });
+          return;
+        }
+        if (job.parts[seq]) return;
+        if (job.size + len > AI_CM_PDF_MAX_BYTES) {
+          aiCmPdfDeliver(id, { ok: false, reason: "pdf-too-large" });
+          return;
+        }
+        job.parts[seq] = new Uint8Array(bytes);
+        job.got++;
+        job.size += len;
+        if (job.total > 0 && job.got >= job.total) aiCmPdfDispatch(id);
+      }
+      function aiCmPdfAbortAll() {
+        var ids = Object.keys(aiCmPdfJobs);
+        for (var i = 0; i < ids.length; i++) {
+          var job = aiCmPdfJobs[ids[i]];
+          delete aiCmPdfJobs[ids[i]];
+          if (job && job.port) {
+            try {
+              job.port.postMessage({ t: "cancel", id: ids[i] });
+            } catch (eCancel) {
+              aiCmPdfLog("cancel", eCancel);
+            }
+            try {
+              job.port.disconnect();
+            } catch (eDisc) {
+              aiCmPdfLog("cancel-disconnect", eDisc);
+            }
+          }
+        }
+      }
+      function aiCmPdfOnCancel(ev) {
+        var detail = aiCmPdfDetail(ev);
+        var id = detail && typeof detail.id === "string" ? detail.id : "";
+        if (!id) return;
+        aiCmPdfDeliver(id, { ok: false, reason: "pdf-aborted" });
+      }
+      function aiCmPdfBridgeStart() {
+        if (aiCmPdfBridgeStarted) return;
+        if (typeof chrome === "undefined" || !chrome.runtime || typeof chrome.runtime.connect !== "function") return;
+        aiCmPdfBridgeStarted = true;
+        window.addEventListener("message", aiCmPdfOnMessage);
+        window.addEventListener("ai-cm-pdf-hello", aiCmPdfAnnounceReady);
+        window.addEventListener("ai-cm-pdf-cancel", aiCmPdfOnCancel);
+        window.addEventListener("pagehide", aiCmPdfAbortAll);
+        aiCmPdfAnnounceReady();
+      }
+      aiCmPdfBridgeStart();
     }
   });
   require_content();

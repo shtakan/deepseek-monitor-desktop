@@ -65,6 +65,10 @@
   var QF_EMIT_DEBOUNCE_MS = 250;   // ре-эмит базы после прихода текста
   var QF_DRAIN_TIMEOUT_MS = 6000;  // ожидание опустошения очереди у экспорта
   var QF_BODY_MAX = 8 * 1024 * 1024; // body-max (content-length): больше — не читаем
+  // v2.0.37 (PDF): файл PDF (в пределах 10 МиБ) скачивает и разбирает pdf.js —
+  // байты идут через MAIN-хелпер core/pdf-bytes.js, текст возвращается как текст.
+  var QF_PDF_MAX = 10 * 1024 * 1024;
+  var QF_PDF_TIMEOUT_MS = 15000;
 
   // Карта сообщений: `<chatId>\u0000<userKey>` -> { chatId, userKey, refs:[], recs:{} }.
   // Ключ включает chatId: одинаковый userKey из другого чата не подмешивает чужие файлы.
@@ -176,6 +180,17 @@
     return QF_TEXT_EXT_RE.test(qfStr(ref && ref.name));
   }
 
+  // v2.0.37: PDF — отдельный источник текста (pdf.js), а не «неизвлекаемое».
+  function qfIsPdf(ref) {
+    if (/application\/pdf/i.test(qfStr(ref && ref.mime))) return true;
+    return /\.pdf$/i.test(qfStr(ref && ref.name));
+  }
+
+  function qfPdfAvailable() {
+    return typeof window !== 'undefined' && !!window.AiCmPdf &&
+      typeof window.AiCmPdf.fromUrl === 'function';
+  }
+
   function qfBytes(n) {
     var v = qfNum(n);
     return (v > 0) ? (String(v) + ' Б') : 'размер неизвестен';
@@ -198,7 +213,11 @@
       return '\n\n[FILE: ' + name + ']\n' + rec.text;
     }
     if (rec && qfStr(rec.note)) {
-      return '\n\n[FILE: ' + name + ' — ' + rec.note + ']';
+      // fix A: у метки «текст не извлекается» тоже должна быть видна причина
+      // (pdf-unavailable и т.п.), иначе экспорт не отличит отсутствие хелпера
+      // от неподдерживаемого формата.
+      var noteReason = qfStr(rec.reason);
+      return '\n\n[FILE: ' + name + ' — ' + rec.note + (noteReason ? ': ' + noteReason : '') + ']';
     }
     var reason = qfStr(rec && rec.reason);
     return '\n\n[FILE: ' + name + ' — текст не получен' + (reason ? ': ' + reason : '') + ']';
@@ -411,12 +430,50 @@
     return { text: s.slice(0, keep) + suffix, truncated: true, cut: cut };
   }
 
+  // v2.0.37: PDF-ветка. Ссылки R2 предподписанные, cookie не нужны — отсюда
+  // credentials:'omit', как и у обычной загрузки вложений Qwen.
+  function qfFetchPdf(item, ref) {
+    var pdf = (typeof window !== 'undefined') ? window.AiCmPdf : null;
+    if (!pdf || typeof pdf.fromUrl !== 'function') {
+      return Promise.resolve({ ok: false, reason: 'pdf-unavailable', text: '' });
+    }
+    return Promise.resolve(pdf.fromUrl(qfStr(item && item.url), {
+      fetch: qfFetchImpl(),
+      credentials: 'omit',
+      name: qfStr(ref && ref.name) || qfStr(item && item.name),
+      maxBytes: QF_PDF_MAX,
+      maxChars: QF_TEXT_CAP,
+      timeoutMs: QF_PDF_TIMEOUT_MS
+    })).then(function (r) {
+      var res = r || {};
+      var text = qfStr(res.text);
+      return {
+        ok: res.ok === true && text !== '',
+        pdf: true,
+        text: text,
+        truncated: res.truncated === true,
+        reason: qfStr(res.reason) || (res.ok === true ? '' : 'pdf-no-text')
+      };
+    }, function (ePdf) {
+      qfWarn('qwen:files:pdf', '[qwen-files] pdf.js не разобрал PDF:', ePdf);
+      return { ok: false, reason: 'pdf-host-error', text: '' };
+    });
+  }
+
   function qfFetchText(item) {
     var fetchImpl = qfFetchImpl();
     if (!fetchImpl) return Promise.resolve({ ok: false, reason: 'no-fetch', text: '' });
     var url = qfStr(item && item.url);
     if (!url) return Promise.resolve({ ok: false, reason: 'no-url', text: '' });
     var ref = { name: qfStr(item.name), mime: qfStr(item.mime) };
+    // v2.0.37: PDF нельзя читать как текст (битый UTF-8 и гигантская строка) —
+    // байты скачивает и разбирает pdf-bytes.js, сюда приходит готовый текст.
+    // Без хелпера — явная причина, а не мусор из res.text(): текстовая ветка
+    // для PDF не запускается ни при каком раскладе.
+    if (qfIsPdf(ref)) {
+      if (qfPdfAvailable()) return qfFetchPdf(item, ref);
+      return Promise.resolve({ ok: false, reason: 'pdf-unavailable', text: '' });
+    }
     var ctrl = (typeof AbortController === 'function') ? new AbortController() : null;
     var opts = { method: 'GET', credentials: 'omit' };
     if (ctrl && ctrl.signal) opts.signal = ctrl.signal;
@@ -648,8 +705,16 @@
       for (var j = 0; j < refs.length; j++) {
         var r = refs[j];
         if (oldRecs[r.fileKey]) { m.recs[r.fileKey] = oldRecs[r.fileKey]; continue; }
-        if (r.isImage || !qfIsTextual(r)) {
-          m.recs[r.fileKey] = { fileKey: r.fileKey, name: r.name, ok: false, text: '', note: qfNote(r), reason: '', truncated: false, chars: 0, at: 0 };
+        var isPdfRef = qfIsPdf(r);
+        if (r.isImage || (!qfIsTextual(r) && !(isPdfRef && qfPdfAvailable()))) {
+          // Фикс A: не глотаем причину. PDF без pdf.js-хелпера получает
+          // pdf-unavailable — иначе в экспорте нет ни текста, ни объяснения.
+          var skipReason = (isPdfRef && !qfPdfAvailable()) ? 'pdf-unavailable' : '';
+          m.recs[r.fileKey] = { fileKey: r.fileKey, name: r.name, ok: false, text: '', note: qfNote(r), reason: skipReason, truncated: false, chars: 0, at: 0 };
+          if (skipReason) {
+            qfDiag('pdf-unavailable', { file: qfStr(r.name), mime: qfStr(r.mime) });
+            qfWarn('qwen:files:pdf-unavailable', '[qwen-files] pdf.js-хелпер недоступен, PDF не разобран: ' + qfStr(r.name));
+          }
           continue;
         }
         if (!r.url) {

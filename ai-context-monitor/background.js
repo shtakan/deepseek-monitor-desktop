@@ -1471,6 +1471,477 @@
           module.exports = api;
         }
       })();
+      (function(root) {
+        "use strict";
+        var PORT_PREFIX = "ai-cm-pdf:";
+        var HOST_PORT = "ai-cm-pdf-host";
+        var HOST_URL = "parser/offscreen.html";
+        var HOST_OFFSCREEN_REASONS = ["WORKERS"];
+        var HOST_JUSTIFICATION = "pdf.js worker for attachment text extraction";
+        var WATCHDOG_MS = 2e4;
+        var HOST_PORT_WAIT_MS = 5e3;
+        var IDLE_MS = 12e4;
+        var MAX_BYTES = 10 * 1024 * 1024;
+        var MAX_CHUNKS = 64;
+        var DEFAULT_MAX_CHARS = 2e5;
+        var DEFAULT_MAX_PAGES = 500;
+        var hostPort = null;
+        var hostWaiters = [];
+        var sessions = {};
+        var idleTimer = null;
+        var offscreenPromise = null;
+        function warn(tag, e) {
+          if (typeof debugLog === "function") debugLog("warn", "[ai-cm-pdf] " + tag + ":", e);
+        }
+        function num(v) {
+          var n = typeof v === "number" ? v : parseInt(v, 10);
+          return isFinite(n) && n > 0 ? n : 0;
+        }
+        function runtimeApi() {
+          if (typeof chrome === "undefined" || !chrome) return null;
+          return chrome.runtime || null;
+        }
+        function offscreenApi() {
+          if (typeof chrome === "undefined" || !chrome) return null;
+          return chrome.offscreen || null;
+        }
+        function hasOffscreenHost() {
+          var off = offscreenApi();
+          return !!(off && typeof off.createDocument === "function");
+        }
+        function hasFirefoxHost() {
+          var host = root.AiCmPdfHost;
+          return !!(host && typeof host.parsePdf === "function");
+        }
+        function hasDocument() {
+          var off = offscreenApi();
+          if (!off || typeof off.hasDocument !== "function") return Promise.resolve(false);
+          try {
+            return Promise.resolve(off.hasDocument()).then(function(open) {
+              return open === true;
+            }, function(eHas) {
+              warn("hasDocument", eHas);
+              return false;
+            });
+          } catch (eThrow) {
+            warn("hasDocument-throw", eThrow);
+            return Promise.resolve(false);
+          }
+        }
+        function isOffscreenOpen() {
+          var rt = runtimeApi();
+          if (rt && typeof rt.getContexts === "function") {
+            var url = typeof rt.getURL === "function" ? rt.getURL(HOST_URL) : HOST_URL;
+            try {
+              return Promise.resolve(rt.getContexts({
+                contextTypes: ["OFFSCREEN_DOCUMENT"],
+                documentUrls: [url]
+              })).then(function(list) {
+                return !!(list && list.length);
+              }, function(eCtx) {
+                warn("getContexts", eCtx);
+                return hasDocument();
+              });
+            } catch (eThrow) {
+              warn("getContexts-throw", eThrow);
+            }
+          }
+          return hasDocument();
+        }
+        function createOffscreen() {
+          var off = offscreenApi();
+          if (!off || typeof off.createDocument !== "function") {
+            return Promise.reject(new Error("offscreen-api-missing"));
+          }
+          try {
+            return Promise.resolve(off.createDocument({
+              url: HOST_URL,
+              reasons: HOST_OFFSCREEN_REASONS.slice(0),
+              justification: HOST_JUSTIFICATION
+            }));
+          } catch (eCreate) {
+            warn("createDocument", eCreate);
+            return Promise.reject(eCreate);
+          }
+        }
+        function ensureOffscreen() {
+          if (hostPort) return Promise.resolve(true);
+          if (offscreenPromise) return offscreenPromise;
+          offscreenPromise = isOffscreenOpen().then(function(open) {
+            if (open === true) return true;
+            return createOffscreen().then(function() {
+              return true;
+            }, function(eCreate) {
+              return isOffscreenOpen().then(function(nowOpen) {
+                if (nowOpen === true) return true;
+                throw eCreate;
+              });
+            });
+          }).then(function(ok) {
+            return ok;
+          }, function(eEnsure) {
+            offscreenPromise = null;
+            throw eEnsure;
+          });
+          return offscreenPromise;
+        }
+        function closeHost() {
+          if (idleTimer !== null) {
+            clearTimeout(idleTimer);
+            idleTimer = null;
+          }
+          if (hostPort) {
+            try {
+              hostPort.disconnect();
+            } catch (eDisc) {
+              warn("host-disconnect", eDisc);
+            }
+            hostPort = null;
+          }
+          var off = offscreenApi();
+          if (!off || typeof off.closeDocument !== "function") {
+            offscreenPromise = null;
+            return Promise.resolve(false);
+          }
+          try {
+            return Promise.resolve(off.closeDocument()).then(function() {
+              offscreenPromise = null;
+              return true;
+            }, function(eClose) {
+              warn("closeDocument", eClose);
+              offscreenPromise = null;
+              return false;
+            });
+          } catch (eThrow) {
+            warn("closeDocument-throw", eThrow);
+            offscreenPromise = null;
+            return Promise.resolve(false);
+          }
+        }
+        function scheduleIdle() {
+          if (idleTimer !== null) return;
+          if (Object.keys(sessions).length > 0) return;
+          idleTimer = setTimeout(function() {
+            idleTimer = null;
+            if (Object.keys(sessions).length > 0) return;
+            closeHost();
+          }, IDLE_MS);
+        }
+        function flushHostWaiters(port) {
+          var waiters = hostWaiters;
+          hostWaiters = [];
+          if (port) {
+            for (var i = 0; i < waiters.length; i++) waiters[i](port);
+          }
+        }
+        function waitHostPort(timeoutMs) {
+          if (hostPort) return Promise.resolve(hostPort);
+          return new Promise(function(resolve, reject) {
+            var done = false;
+            var timer = setTimeout(function() {
+              if (done) return;
+              done = true;
+              reject(new Error("pdf-host-port-timeout"));
+            }, timeoutMs || HOST_PORT_WAIT_MS);
+            hostWaiters.push(function(port) {
+              if (done) return;
+              done = true;
+              clearTimeout(timer);
+              resolve(port);
+            });
+          });
+        }
+        function startSession(id, port) {
+          return {
+            id,
+            port,
+            total: 0,
+            name: "",
+            maxChars: DEFAULT_MAX_CHARS,
+            maxPages: DEFAULT_MAX_PAGES,
+            chunks: [],
+            bytes: 0,
+            timer: null,
+            started: Date.now()
+          };
+        }
+        function armWatchdog(session) {
+          if (session.timer !== null) clearTimeout(session.timer);
+          session.timer = setTimeout(function() {
+            session.timer = null;
+            finishSession(session.id, { ok: false, reason: "pdf-timeout" });
+          }, WATCHDOG_MS);
+        }
+        function finishSession(id, res) {
+          var session = sessions[id];
+          if (!session) return;
+          delete sessions[id];
+          if (session.timer !== null) {
+            clearTimeout(session.timer);
+            session.timer = null;
+          }
+          var out = res && typeof res === "object" ? res : {};
+          var payload = {
+            t: "result",
+            id,
+            ok: out.ok === true,
+            text: typeof out.text === "string" ? out.text : "",
+            pages: num(out.pages),
+            truncated: out.truncated === true,
+            reason: typeof out.reason === "string" ? out.reason : out.ok === true ? "" : "pdf-host-error",
+            size: num(out.size) || session.bytes,
+            ms: num(out.ms)
+          };
+          if (typeof debugLog === "function") {
+            debugLog("log", "[ai-cm-pdf] id=" + id + " ok=" + (payload.ok ? 1 : 0) + " size=" + payload.size + " pages=" + payload.pages + " chars=" + payload.text.length + " ms=" + payload.ms + " reason=" + (payload.reason || "-"));
+          }
+          try {
+            session.port.postMessage(payload);
+          } catch (ePost) {
+            warn("reply", ePost);
+          }
+          try {
+            if (typeof session.port.disconnect === "function") session.port.disconnect();
+          } catch (eDisc) {
+            warn("reply-disconnect", eDisc);
+          }
+          scheduleIdle();
+        }
+        function cancelHost(id) {
+          if (hostPort) {
+            try {
+              hostPort.postMessage({ t: "cancel", id });
+            } catch (eCancel) {
+              warn("host-cancel", eCancel);
+            }
+            return;
+          }
+          var host = root.AiCmPdfHost;
+          if (host && typeof host.stop === "function") {
+            try {
+              host.stop();
+            } catch (eStop) {
+              warn("host-stop", eStop);
+            }
+          }
+        }
+        function b64ToBytes(b64) {
+          var atobFn = root.atob || (typeof atob === "function" ? atob : null);
+          if (typeof atobFn !== "function") return null;
+          var bin;
+          try {
+            bin = atobFn(String(b64 || ""));
+          } catch (eDecode) {
+            warn("atob", eDecode);
+            return null;
+          }
+          var out = new Uint8Array(bin.length);
+          for (var i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i) & 255;
+          return out;
+        }
+        function concatChunks(chunks) {
+          var parts = [];
+          var total = 0;
+          for (var i = 0; i < chunks.length; i++) {
+            var part = b64ToBytes(chunks[i]);
+            if (!part) return null;
+            parts.push(part);
+            total += part.length;
+          }
+          if (total === 0 || total > MAX_BYTES) return null;
+          var out = new Uint8Array(total);
+          var offset = 0;
+          for (var j = 0; j < parts.length; j++) {
+            out.set(parts[j], offset);
+            offset += parts[j].length;
+          }
+          return out;
+        }
+        function parseChrome(session) {
+          return ensureOffscreen().then(function() {
+            return waitHostPort(HOST_PORT_WAIT_MS);
+          }).then(function(port) {
+            try {
+              port.postMessage({
+                t: "begin",
+                id: session.id,
+                total: session.chunks.length,
+                name: session.name,
+                maxChars: session.maxChars,
+                maxPages: session.maxPages
+              });
+              for (var i = 0; i < session.chunks.length; i++) {
+                port.postMessage({ t: "chunk", id: session.id, seq: i, b64: session.chunks[i] });
+              }
+              port.postMessage({ t: "end", id: session.id });
+            } catch (ePost) {
+              warn("host-post", ePost);
+              return { ok: false, reason: "pdf-host-error" };
+            }
+            return null;
+          });
+        }
+        function parseFirefox(session) {
+          var bytes = concatChunks(session.chunks);
+          if (!bytes) return { ok: false, reason: "pdf-invalid" };
+          var started = Date.now();
+          return root.AiCmPdfHost.parsePdf(bytes, {
+            maxChars: session.maxChars,
+            maxPages: session.maxPages
+          }).then(function(res) {
+            var out = res && typeof res === "object" ? res : { ok: false, reason: "pdf-host-error" };
+            out.size = bytes.length;
+            out.ms = Date.now() - started;
+            return out;
+          });
+        }
+        function startParse(session) {
+          var pending;
+          if (hasOffscreenHost()) {
+            pending = parseChrome(session);
+          } else if (hasFirefoxHost()) {
+            pending = parseFirefox(session);
+          } else {
+            finishSession(session.id, { ok: false, reason: "pdf-unavailable" });
+            return;
+          }
+          Promise.resolve(pending).then(function(res) {
+            if (!res) return;
+            finishSession(session.id, res);
+          }, function(eStart) {
+            warn("parse-start", eStart);
+            finishSession(session.id, { ok: false, reason: "pdf-host-error" });
+          });
+        }
+        function onContentMessage(session, msg) {
+          if (!msg || typeof msg !== "object") return;
+          if (!session || sessions[session.id] !== session) return;
+          var type = String(msg.t || "");
+          if (type === "begin") {
+            session.total = num(msg.total);
+            session.name = String(msg.name || "");
+            session.maxChars = num(msg.maxChars) || DEFAULT_MAX_CHARS;
+            session.maxPages = num(msg.maxPages) || DEFAULT_MAX_PAGES;
+            armWatchdog(session);
+            return;
+          }
+          if (type === "chunk") {
+            var b64 = typeof msg.b64 === "string" ? msg.b64 : "";
+            var add = Math.floor(b64.length * 3 / 4);
+            if (session.chunks.length >= MAX_CHUNKS || session.bytes + add > MAX_BYTES) {
+              finishSession(session.id, { ok: false, reason: "pdf-too-large", size: session.bytes });
+              return;
+            }
+            session.chunks.push(b64);
+            session.bytes += add;
+            return;
+          }
+          if (type === "end") {
+            armWatchdog(session);
+            startParse(session);
+            return;
+          }
+          if (type === "cancel") {
+            cancelHost(session.id);
+            finishSession(session.id, { ok: false, reason: "pdf-aborted" });
+          }
+        }
+        function onHostMessage(msg) {
+          if (!msg || typeof msg !== "object") return;
+          var type = String(msg.t || "");
+          if (type === "result") {
+            finishSession(String(msg.id || ""), msg);
+            return;
+          }
+          if (type === "idle") closeHost();
+        }
+        function onConnect(port) {
+          if (!port || typeof port !== "object") return;
+          var name = String(port.name || "");
+          if (name === HOST_PORT) {
+            hostPort = port;
+            if (port.onMessage && typeof port.onMessage.addListener === "function") {
+              port.onMessage.addListener(function(msg) {
+                onHostMessage(msg);
+              });
+            }
+            if (port.onDisconnect && typeof port.onDisconnect.addListener === "function") {
+              port.onDisconnect.addListener(function() {
+                if (hostPort === port) hostPort = null;
+                try {
+                  void (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.lastError);
+                } catch (eLast) {
+                  warn("lastError", eLast);
+                }
+              });
+            }
+            offscreenPromise = Promise.resolve(true);
+            flushHostWaiters(port);
+            return;
+          }
+          if (name.indexOf(PORT_PREFIX) !== 0) return;
+          var id = name.slice(PORT_PREFIX.length);
+          if (!id || sessions[id]) return;
+          var session = startSession(id, port);
+          sessions[id] = session;
+          if (port.onMessage && typeof port.onMessage.addListener === "function") {
+            port.onMessage.addListener(function(msg) {
+              onContentMessage(session, msg);
+            });
+          }
+          if (port.onDisconnect && typeof port.onDisconnect.addListener === "function") {
+            port.onDisconnect.addListener(function() {
+              if (!sessions[id]) return;
+              delete sessions[id];
+              if (session.timer !== null) {
+                clearTimeout(session.timer);
+                session.timer = null;
+              }
+              cancelHost(id);
+              scheduleIdle();
+            });
+          }
+        }
+        var api = {
+          MAX_BYTES,
+          MAX_CHUNKS,
+          WATCHDOG_MS,
+          IDLE_MS,
+          HOST_URL,
+          HOST_PORT,
+          onConnect,
+          onHostMessage,
+          finishSession,
+          closeHost,
+          sessions,
+          hasOffscreenHost,
+          hasFirefoxHost,
+          reset: function() {
+            if (idleTimer !== null) {
+              clearTimeout(idleTimer);
+              idleTimer = null;
+            }
+            var ids = Object.keys(sessions);
+            for (var i = 0; i < ids.length; i++) {
+              var s = sessions[ids[i]];
+              if (s && s.timer !== null) clearTimeout(s.timer);
+              delete sessions[ids[i]];
+            }
+            hostWaiters = [];
+            hostPort = null;
+            offscreenPromise = null;
+          }
+        };
+        root.AiCmPdfBroker = api;
+        if (typeof module !== "undefined" && module.exports) module.exports = api;
+        try {
+          if (typeof chrome !== "undefined" && chrome && chrome.runtime && chrome.runtime.onConnect && typeof chrome.runtime.onConnect.addListener === "function") {
+            chrome.runtime.onConnect.addListener(onConnect);
+          }
+        } catch (eListen) {
+          warn("onConnect-register", eListen);
+        }
+      })(typeof self !== "undefined" ? self : globalThis);
       var DEBUG = false;
       var lastGoodModel = "";
       function debugLog(level) {
@@ -1553,6 +2024,98 @@
           } else throw e;
         }
       }
+      var PDF_HELPER_ID = "ai-cm-pdf-bytes-v1";
+      var PDF_HELPER_MATCHES = [
+        "https://gemini.google.com/*",
+        "https://aistudio.google.com/*",
+        "https://chat.qwen.ai/*",
+        "https://chat.deepseek.com/*"
+      ];
+      function pdfSelfCheckWarn(reason, detail) {
+        console.warn("AI Context Monitor: PDF-\u0441\u0430\u043C\u043E\u043F\u0440\u043E\u0432\u0435\u0440\u043A\u0430 \u043D\u0435 \u043F\u0440\u043E\u0448\u043B\u0430 (" + reason + ")", detail || "");
+      }
+      async function ensurePdfHelper(ids) {
+        if (ids.indexOf(PDF_HELPER_ID) !== -1) return false;
+        await registerSafe(PDF_HELPER_ID, {
+          id: PDF_HELPER_ID,
+          matches: PDF_HELPER_MATCHES,
+          js: ["core/pdf-bytes.js"],
+          runAt: "document_start",
+          world: "MAIN",
+          allFrames: false
+        });
+        console.log("AI Context Monitor: PDF-\u0445\u0435\u043B\u043F\u0435\u0440 (pdf.js, MAIN) \u0437\u0430\u0440\u0435\u0433\u0438\u0441\u0442\u0440\u0438\u0440\u043E\u0432\u0430\u043D (\u043C\u0438\u0440 \u0441\u0430\u0439\u0442\u0430, document_start)");
+        await selfCheckPdfHelper();
+        return true;
+      }
+      async function selfCheckPdfHelper() {
+        if (chrome.runtime && typeof chrome.runtime.getBrowserInfo === "function") return;
+        if (!chrome.tabs || typeof chrome.tabs.query !== "function") return;
+        if (!chrome.scripting || typeof chrome.scripting.executeScript !== "function") return;
+        var tabs;
+        try {
+          tabs = await chrome.tabs.query({ url: PDF_HELPER_MATCHES });
+        } catch (eTab) {
+          pdfSelfCheckWarn("tabs.query", eTab);
+          return;
+        }
+        var tab = tabs && tabs.length ? tabs[0] : null;
+        if (!tab || tab.id == null) return;
+        var results;
+        try {
+          results = await chrome.scripting.executeScript({
+            target: { tabId: tab.id },
+            world: "MAIN",
+            func: function() {
+              return new Promise(function(resolve) {
+                var settled = false;
+                function finish(ok, reason) {
+                  if (settled) return;
+                  settled = true;
+                  try {
+                    clearTimeout(timer);
+                  } catch (eT) {
+                  }
+                  try {
+                    window.removeEventListener("ai-cm-pdf-ready", onReady);
+                  } catch (eR) {
+                  }
+                  resolve({ ok, reason: reason || "" });
+                }
+                function onReady() {
+                  finish(true, "");
+                }
+                var timer = setTimeout(function() {
+                  finish(false, "ready-timeout");
+                }, 1500);
+                var pageWin = (
+                  /** @type {any} */
+                  window
+                );
+                if (!pageWin.AiCmPdf || typeof pageWin.AiCmPdf.fromUrl !== "function") {
+                  finish(false, "helper-missing");
+                  return;
+                }
+                window.addEventListener("ai-cm-pdf-ready", onReady);
+                try {
+                  window.dispatchEvent(new CustomEvent("ai-cm-pdf-hello", {
+                    detail: JSON.stringify({ id: "sw-self-check" })
+                  }));
+                } catch (eHello) {
+                  finish(false, "hello-failed");
+                }
+              });
+            }
+          });
+        } catch (eExec) {
+          pdfSelfCheckWarn("executeScript", eExec);
+          return;
+        }
+        var res = results && results[0] ? results[0].result : null;
+        if (!res || res.ok !== true) {
+          pdfSelfCheckWarn("helper not ready: " + (res && res.reason || "no-result"), tab.url || "");
+        }
+      }
       async function ensureInterceptor() {
         try {
           if (!chrome.scripting || !chrome.scripting.registerContentScripts) return;
@@ -1565,6 +2128,11 @@
           var ids = existing.map(function(s) {
             return s.id;
           });
+          try {
+            await ensurePdfHelper(ids);
+          } catch (ePdf) {
+            pdfSelfCheckWarn("register", ePdf);
+          }
           if (ids.indexOf("ai-cm-page-intercept") === -1) {
             await registerSafe("ai-cm-page-intercept", {
               id: "ai-cm-page-intercept",
