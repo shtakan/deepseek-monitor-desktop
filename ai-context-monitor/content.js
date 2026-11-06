@@ -14,9 +14,9 @@
     }
   };
 
-  // content.js
-  var require_content = __commonJS({
-    "content.js"(exports, module) {
+  // entry-content.js
+  var require_entry_content = __commonJS({
+    "entry-content.js"(exports, module) {
       function aiCmIsFirefox() {
         try {
           var api = typeof browser !== "undefined" && browser && browser.runtime ? browser : typeof chrome !== "undefined" && chrome && chrome.runtime ? chrome : null;
@@ -274,6 +274,8 @@
         CYRILLIC_CHARS_PER_TOKEN,
         /**
          * Определяет тип символа.
+         * @param {string} char Один символ текста.
+         * @returns {CharType} Класс символа для выбора эвристики.
          */
         _getCharType(char) {
           if (/[а-яёА-ЯЁ]/.test(char)) return "cyrillic";
@@ -351,8 +353,8 @@
          * Оценивает токены в диалоге с учётом структуры чата.
          * Учитывает накладные расходы на форматирование сообщений.
          * @param {string} dialogText - полный текст диалога
-         * @param {number} messageCount - количество сообщений
-         * @returns {number}
+         * @param {number} [messageCount=1] - количество сообщений
+         * @returns {number} - токены текста плюс накладные расходы на форматирование
          */
         estimateDialogTokens(dialogText, messageCount = 1) {
           const textTokens = this.countTokens(dialogText);
@@ -364,7 +366,9 @@
         module.exports = Tokenizer;
       }
       var ModelConfig = {
+        /** Общий потолок окна: действующий лимит = min(contextLimit, это значение). @type {number} */
         EFFECTIVE_CAP_DEFAULT: 128e3,
+        /** @type {ModelCatalog} */
         models: {
           // ---- OpenAI: текущая линейка 2026-10 ----
           // Окна взяты с официальной страницы моделей OpenAI (platform.openai.com/docs/models).
@@ -831,6 +835,7 @@
             description: "\u0411\u044B\u0441\u0442\u0440\u0430\u044F \u043C\u043E\u0434\u0435\u043B\u044C Google"
           }
         },
+        /** @type {SiteDefaults} */
         siteDefaults: {
           "chatgpt": "gpt-5.5",
           "gemini": "gemini-2.5-flash",
@@ -845,6 +850,7 @@
         // не несёт номера версии). Пункт (c) приоритета DOM-сигнала — когда ни кэш меню,
         // ни сетевая версия с совпадающей семьёй не дали точной версии.
         // Окна сверены с записями таблицы: Pro=128_000, Flash/Flash-Lite=1_048_576.
+        /** @type {Record<string, FamilyDefault>} */
         familyDefaults: {
           "pro": { modelId: "3.1 Pro", contextLimit: 128e3 },
           "pro-lite": { modelId: "3.1 Pro", contextLimit: 128e3 },
@@ -858,12 +864,27 @@
           // Источник: https://ai.google.dev/gemini-api/docs/models (снят 2026-10-04)
           "ultra": { modelId: "3.1 Ultra", contextLimit: 1048576 }
         },
+        /**
+         * Запись модели по каноническому ключу.
+         * @param {string} modelId Канонический ключ каталога (либо его нормализованная форма).
+         * @returns {ModelRecord|null} Запись модели; null — ключа в каталоге нет.
+         */
         getModel(modelId) {
           return this.models[modelId] || null;
         },
+        /**
+         * Дефолтная модель сайта (по умолчанию — 'gpt-5.5').
+         * @param {string} site Имя сайта: chatgpt / gemini / deepseek / claude / …
+         * @returns {string} Ключ каталога ModelCatalog.
+         */
         getDefaultModel(site) {
           return this.siteDefaults[site] || "gpt-5.5";
         },
+        /**
+         * Окно контекста модели из каталога.
+         * @param {string} modelId Канонический ключ каталога.
+         * @returns {number} contextLimit записи; 128000 — если ключ неизвестен.
+         */
         getContextLimit(modelId) {
           const model = this.getModel(modelId);
           return model ? model.contextLimit : 128e3;
@@ -888,6 +909,12 @@
         // Явный выбор модели в дропдауне авторитетен для лимита и токенизации.
         // 'auto'/пусто/неизвестный id → null = «Автоопределение» (прежний путь: сетевой slug →
         // DOM-сигнал → дефолт сайта), поведение байтово прежнее.
+        /**
+         * Канонический id из значения дропдауна «Модель».
+         * 'auto'/пусто/неизвестный id → null (Автоопределение).
+         * @param {string|null|undefined} raw Сырое значение выбора попапа.
+         * @returns {string|null} Ключ каталога; null — режим «Авто».
+         */
         resolvePopupModelId(raw) {
           if (raw == null) return null;
           const s = String(raw).trim();
@@ -897,6 +924,11 @@
         },
         // Поле «Лимит контекста» = % от Авто-порога. Пусто/null → null (Авто).
         // Вне 1–100 (2000, 0, мусор) → фолбэк 100 = как Авто.
+        /**
+         * Процент от Авто-порога из поля «Лимит контекста».
+         * @param {string|number|null|undefined} raw Сырое значение поля ('' / null → Авто).
+         * @returns {number|null} 1…100; null — Авто (поле пустое).
+         */
         resolveLimitPct(raw) {
           if (raw == null) return null;
           const s = String(raw).trim();
@@ -907,10 +939,22 @@
         },
         // displayLimit = Авто-порог × pct/100 (округление 1:1 с прежним виджетом).
         // pct не задан → Авто-порог байтово.
+        /**
+         * Действующий лимит, урезанный процентом от Авто-порога.
+         * @param {number} effectiveLimit Авто-порог модели (getEffectiveLimit).
+         * @param {number|null|undefined} pct Процент 1…100; не число/≤0 — лимит не меняется.
+         * @returns {number} Лимит в токенах (минимум 1).
+         */
         applyLimitPct(effectiveLimit, pct) {
           if (typeof pct !== "number" || !(pct > 0)) return effectiveLimit;
           return Math.max(1, Math.round(pct / 100 * effectiveLimit));
         },
+        /**
+         * Отображаемый лимит модели с учётом процента попапа.
+         * @param {string} modelId Канонический ключ каталога.
+         * @param {number|null|undefined} pct Процент 1…100 (null — Авто).
+         * @returns {number} displayLimit в токенах.
+         */
         computeDisplayLimit(modelId, pct) {
           return this.applyLimitPct(this.getEffectiveLimit(modelId), pct);
         },
@@ -918,6 +962,12 @@
         // variant нормируется: «Расширенный»/«Расширенная»/«Расширенн…» → «pro/…-расширенный»? нет:
         // вариант влияет только при выборе подходящего семейного дефолта (flash-lite vs flash).
         // Окно возвращаемой модели уже лежит в записи таблицы (см. переопределения ниже).
+        /**
+         * Модель семейного дефолта Gemini по семье и варианту (v49).
+         * @param {string} fam Семья без номера версии: pro / flash / pro-lite / flash-lite / ultra.
+         * @param {string} [variant] Вариант из UI («Lite», «Расширенная», «Extended»).
+         * @returns {string|null} Имя модели семейства; null — семьи нет в familyDefaults.
+         */
         getFamilyDefaultModelId(fam, variant) {
           const famK = String(fam || "").toLowerCase().replace(/[^a-z]/g, "");
           const varK = String(variant || "").toLowerCase();
@@ -930,6 +980,12 @@
         },
         // Привести сырое имя/slug к каноническому ключу. Нормализация схлопывает пробелы,
         // подчёркивания И ТОЧКИ в дефис (gpt-5-5 из сети == gpt-5.5; 3.6 Flash Расширенная == ключу).
+        /**
+         * Приводит сырое имя/slug модели к каноническому ключу каталога.
+         * Порядок: авто-регистрация Gemini-слаг-а → точное совпадение → префикс → подстрока.
+         * @param {string|null|undefined} raw Сырое имя модели (slug из сети, DOM-ярлык, API-id).
+         * @returns {string|null} Ключ ModelCatalog; null — совпадений нет.
+         */
         resolveModelId(raw) {
           if (!raw) return null;
           const norm = function(s) {
@@ -975,6 +1031,12 @@
           }
           return null;
         },
+        /**
+         * Процент занятого контекста для бейджа (округление до 0.1, потолок 100).
+         * @param {number} usedTokens Использовано токенов.
+         * @param {number} contextLimit Действующий лимит контекста.
+         * @returns {number} Процент 0…100 (0 — лимит не положителен).
+         */
         calculatePercentage(usedTokens, contextLimit) {
           if (contextLimit <= 0) return 0;
           const percentage = usedTokens / contextLimit * 100;
@@ -984,6 +1046,12 @@
         // Принимает канонический ключ (gemini-2.5-flash) или необработанный slug.
         // Токенизатор у Gemini общий, поэтому дефолт — стабильная общедоступная модель.
         // 09.2026: семейства 1.5/2.0 целиком 404 в v1beta → дефолт/фолбэк 'gemini-flash-latest'.
+        /**
+         * API-id модели для Google countTokens (токенизатор у Gemini общий).
+         * Принимает канонический ключ или необработанный slug.
+         * @param {string|null|undefined} modelId Ключ каталога либо сырой slug.
+         * @returns {string} Валидный API-id; 'gemini-flash-latest' — фолбэк.
+         */
         getGeminiApiModelId(modelId) {
           var passthrough = ["gemini-3.5-flash-lite", "gemini-3.5-flash", "gemini-3-flash"];
           if (passthrough.indexOf(modelId) !== -1) return modelId;
@@ -3528,6 +3596,8 @@
             var type = typeof n[1] === "number" ? n[1] : 0;
             var token = typeof n[5] === "string" ? n[5] : "";
             var img = typeof n[3] === "string" ? n[3] : "";
+            var tail = n ? n[15] : null;
+            var size = Array.isArray(tail) && typeof tail[2] === "number" && isFinite(tail[2]) && tail[2] > 0 ? tail[2] : 0;
             var dl = "";
             var urls = [];
             (function walk(v) {
@@ -3543,6 +3613,7 @@
               mime,
               type,
               token,
+              size,
               img,
               dl,
               urls,
@@ -3559,11 +3630,177 @@
             if (!Array.isArray(arr)) return out;
             for (var i = 0; i < arr.length; i++) {
               var ref = fileRefFromNode(arr[i]);
-              if (ref) out.push(ref);
+              if (ref) {
+                ref.pos = i;
+                out.push(ref);
+              }
             }
           } catch (e) {
           }
           return out;
+        }
+        var filePoolsByConv = {};
+        function fileOwnerTs(ts) {
+          return typeof ts === "number" && isFinite(ts) && ts > 0 ? ts : 0;
+        }
+        function fileOwnerOrder(order) {
+          return typeof order === "number" && isFinite(order) && order >= 0 ? order : -1;
+        }
+        function filePoolForConv(convId, create) {
+          var cid = typeof convId === "string" ? convId : "";
+          var pool = filePoolsByConv[cid];
+          if (!pool && create) {
+            pool = { turns: {}, seq: 0 };
+            filePoolsByConv[cid] = pool;
+          }
+          return pool || null;
+        }
+        function fileRefPoolName(ref) {
+          return ref && typeof ref.name === "string" ? ref.name : "";
+        }
+        function poolSharedPrefixLen(a, b) {
+          var n = Math.min(a.length, b.length);
+          var k = 0;
+          while (k < n && fileRefPoolName(a[k]) === fileRefPoolName(b[k])) k++;
+          return k;
+        }
+        function isTurnBefore(a, b) {
+          var aTs = fileOwnerTs(a.ts);
+          var bTs = fileOwnerTs(b.ts);
+          if (aTs > 0 && bTs > 0 && aTs !== bTs) return aTs < bTs;
+          if (aTs > 0 && bTs === 0) return true;
+          if (aTs === 0 && bTs > 0) return false;
+          var aRefs = Array.isArray(a.refs) ? a.refs : null;
+          var bRefs = Array.isArray(b.refs) ? b.refs : null;
+          if (aRefs && bRefs && aRefs.length !== bRefs.length) {
+            var nest = poolSharedPrefixLen(aRefs, bRefs);
+            if (nest === Math.min(aRefs.length, bRefs.length)) return aRefs.length < bRefs.length;
+          }
+          var aTid = typeof a.turnId === "string" ? a.turnId : "";
+          var bTid = typeof b.turnId === "string" ? b.turnId : "";
+          if (aTid && bTid && aTid !== bTid) return aTid < bTid;
+          var aOrd = fileOwnerOrder(a.order);
+          var bOrd = fileOwnerOrder(b.order);
+          if (aOrd >= 0 && bOrd >= 0 && aOrd !== bOrd) return aOrd < bOrd;
+          return a.seq < b.seq;
+        }
+        function fileRefIdentityKey(ref) {
+          var name = ref && typeof ref.name === "string" ? ref.name : "";
+          var size = ref && typeof ref.size === "number" && isFinite(ref.size) ? ref.size : 0;
+          return name + "|" + size;
+        }
+        function fileOwnerKey(convId, ref) {
+          var cid = typeof convId === "string" ? convId : "";
+          return cid + "|" + fileRefIdentityKey(ref);
+        }
+        function registerTurnFileOwner(turn, convId, turnId, ts, order) {
+          var own = typeof turnId === "string" ? turnId : "";
+          if (!own) return 0;
+          var all = collectTurnFiles(turn);
+          var pool = filePoolForConv(convId, true);
+          if (!all.length) {
+            if (pool && pool.turns[own]) delete pool.turns[own];
+            return 0;
+          }
+          var nTs = fileOwnerTs(ts);
+          var nOrd = fileOwnerOrder(order);
+          var prev = pool.turns[own];
+          if (prev) {
+            prev.refs = all;
+            if (nTs > 0) prev.ts = nTs;
+            if (nOrd >= 0) prev.order = nOrd;
+            return all.length;
+          }
+          pool.seq++;
+          pool.turns[own] = { turnId: own, ts: nTs, order: nOrd, seq: pool.seq, refs: all };
+          return all.length;
+        }
+        function previousPoolTurn(pool, rec, all) {
+          var ids = Object.keys(pool.turns);
+          var chrono = null;
+          var i;
+          for (i = 0; i < ids.length; i++) {
+            if (ids[i] === rec.turnId) continue;
+            var cand = pool.turns[ids[i]];
+            if (!cand || !Array.isArray(cand.refs)) continue;
+            if (!isTurnBefore(cand, rec)) continue;
+            if (!chrono || isTurnBefore(chrono, cand)) chrono = cand;
+          }
+          var donor = null;
+          for (i = 0; i < ids.length; i++) {
+            if (ids[i] === rec.turnId) continue;
+            var reg = pool.turns[ids[i]];
+            if (!reg || !Array.isArray(reg.refs)) continue;
+            var len = reg.refs.length;
+            if (!len || len >= all.length) continue;
+            if (poolSharedPrefixLen(reg.refs, all) !== len) continue;
+            if (!donor || len > donor.refs.length) donor = reg;
+          }
+          if (donor && (!chrono || donor.refs.length > chrono.refs.length)) return donor;
+          return chrono;
+        }
+        function poolDelta(prevRefs, all) {
+          var k = poolSharedPrefixLen(prevRefs, all);
+          if (k === prevRefs.length || k === all.length) return all.slice(k);
+          var spent = {};
+          var i;
+          for (i = 0; i < prevRefs.length; i++) {
+            var pk = fileRefIdentityKey(prevRefs[i]);
+            spent[pk] = (spent[pk] || 0) + 1;
+          }
+          var out = [];
+          for (i = 0; i < all.length; i++) {
+            var ck = fileRefIdentityKey(all[i]);
+            if (spent[ck] > 0) {
+              spent[ck]--;
+              continue;
+            }
+            out.push(all[i]);
+          }
+          return out;
+        }
+        function assignPoolOwners(turns) {
+          var list = Array.isArray(turns) ? turns : [];
+          var out = [];
+          var prevPool = [];
+          for (var i = 0; i < list.length; i++) {
+            var item = list[i];
+            if (!item) continue;
+            var pool = Array.isArray(item.refs) ? item.refs : [];
+            var own = [];
+            if (pool.length) {
+              own = prevPool.length ? poolDelta(prevPool, pool) : pool.slice(0);
+              prevPool = pool;
+            }
+            out.push({ id: item.id, own });
+          }
+          return out;
+        }
+        function collectTurnFilesForOwner(turn, convId, ownerId, ts, order) {
+          var all = collectTurnFiles(turn);
+          var own = typeof ownerId === "string" ? ownerId : "";
+          if (!own) return all;
+          if (!all.length) return [];
+          var pool = filePoolForConv(convId, true);
+          var rec = pool.turns[own];
+          if (!rec) {
+            pool.seq++;
+            rec = { turnId: own, ts: fileOwnerTs(ts), order: fileOwnerOrder(order), seq: pool.seq, refs: all };
+            pool.turns[own] = rec;
+          }
+          rec.refs = all;
+          if (fileOwnerTs(ts) > 0) rec.ts = fileOwnerTs(ts);
+          if (fileOwnerOrder(order) >= 0) rec.order = fileOwnerOrder(order);
+          var prev = previousPoolTurn(pool, rec, all);
+          if (!prev) return all;
+          return poolDelta(prev.refs, all);
+        }
+        function __resetFileOwners(convId) {
+          if (convId === void 0 || convId === null || convId === "") {
+            filePoolsByConv = {};
+            return;
+          }
+          delete filePoolsByConv[typeof convId === "string" ? convId : String(convId)];
         }
         var THINKING_ASSISTANT_RE = /^([A-Z][a-z]+ing\b|I'm\b|I've\b|My (?:focus|goal)\b|sr |Ev )/;
         var LEADING_THINKING_RE = /^\s*\*?\*?([A-Z][a-z]+ing\b|I'm|I've|My (focus|goal)|sr |Ev )/;
@@ -3859,7 +4096,12 @@
           injectDrLinks,
           __setDrTexts,
           fileRefFromNode,
+          fileRefIdentityKey,
           collectTurnFiles,
+          registerTurnFileOwner,
+          collectTurnFilesForOwner,
+          assignPoolOwners,
+          __resetFileOwners,
           parseGeminiHistory
         };
         if (typeof window !== "undefined") {
@@ -4466,13 +4708,18 @@
           }
           return s;
         }
-        function canonicalTurnKeyOf(turn) {
-          if (!turn) return "";
+        function turnIdentityParts(turn) {
+          if (!turn) return { u: "", a: "" };
           var wrapper = answerWrapperParts(turn.assistantText);
           var u = normalizeTurnKeyPart(turn.userText);
           if (!u && wrapper) u = normalizeTurnKeyPart(wrapper.question);
           var a = normalizeTurnKeyPart(wrapper ? wrapper.body : canonicalAnswerBody(turn.assistantText));
-          return u + "||" + a;
+          return { u, a };
+        }
+        function canonicalTurnKeyOf(turn) {
+          if (!turn) return "";
+          var parts = turnIdentityParts(turn);
+          return parts.u + "||" + parts.a;
         }
         function canonicalizeTurnForThread(turn) {
           if (!turn) return turn;
@@ -4501,6 +4748,43 @@
             assistantText: t && t.assistantText || null
           };
         }
+        var PREFIX_MIN_CHARS = 12;
+        var PREFIX_FUZZY_RATIO = 0.8;
+        function bodiesPrefixCompatible(a, b) {
+          var x = String(a == null ? "" : a);
+          var y = String(b == null ? "" : b);
+          if (!x || !y) return false;
+          if (x === y) return true;
+          var n = Math.min(x.length, y.length);
+          if (n < PREFIX_MIN_CHARS) return false;
+          var common = 0;
+          while (common < n && x.charCodeAt(common) === y.charCodeAt(common)) common++;
+          if (common === n) return true;
+          return common / n >= PREFIX_FUZZY_RATIO;
+        }
+        function isFullerTurn(candidate, current) {
+          var la = turnIdentityParts(candidate).a.length;
+          var lb = turnIdentityParts(current).a.length;
+          if (la !== lb) return la > lb;
+          return isBetterTurn(candidate, current);
+        }
+        function findPrefixCompatibleIndex(turns, turn) {
+          var parts = turnIdentityParts(turn);
+          if (!parts.u || !parts.a) return -1;
+          for (var i = 0; i < turns.length; i++) {
+            var other = turnIdentityParts(turns[i]);
+            if (other.u === parts.u && bodiesPrefixCompatible(other.a, parts.a)) return i;
+          }
+          return -1;
+        }
+        function reindexTurnKey(byKey, turns, at) {
+          var k;
+          for (k in byKey) {
+            if (byKey[k] === at) delete byKey[k];
+          }
+          var key = canonicalTurnKeyOf(turns[at]);
+          if (key !== "||") byKey[key] = at;
+        }
         function mergeTurnsById(baseTurns, extraTurns) {
           baseTurns = Array.isArray(baseTurns) ? baseTurns : [];
           extraTurns = Array.isArray(extraTurns) ? extraTurns : [];
@@ -4513,9 +4797,13 @@
             var key = canonicalTurnKeyOf(t);
             var hasId = Object.prototype.hasOwnProperty.call(byId, id);
             var hasKey = key !== "||" && Object.prototype.hasOwnProperty.call(byKey, key);
-            if (hasId || hasKey) {
-              var at = hasId ? byId[id] : byKey[key];
-              if (isBetterTurn(t, out[at])) out[at] = turnRecord(t, out[at].id);
+            var at = hasId ? byId[id] : hasKey ? byKey[key] : findPrefixCompatibleIndex(out, t);
+            if (at !== -1) {
+              var richer = hasId || hasKey ? isBetterTurn(t, out[at]) : isFullerTurn(t, out[at]);
+              if (richer) {
+                out[at] = turnRecord(t, out[at].id);
+                reindexTurnKey(byKey, out, at);
+              }
               return;
             }
             byId[id] = out.length;
@@ -4533,22 +4821,50 @@
         function mergeTurnsByKey(baseTurns, extraTurns) {
           baseTurns = Array.isArray(baseTurns) ? baseTurns : [];
           extraTurns = Array.isArray(extraTurns) ? extraTurns : [];
-          var seen = {};
+          var byKey = {};
           var out = [];
           function add(t) {
             if (!t) return;
             var key = canonicalTurnKeyOf(t);
             if (key === "||") return;
-            if (seen[key] === void 0) {
-              seen[key] = out.length;
+            var hasKey = Object.prototype.hasOwnProperty.call(byKey, key);
+            var at = hasKey ? byKey[key] : findPrefixCompatibleIndex(out, t);
+            if (at === -1) {
+              byKey[key] = out.length;
               out.push(turnRecord(t, "x" + out.length));
               return;
             }
-            var at = seen[key];
-            if (isBetterTurn(t, out[at])) out[at] = turnRecord(t, out[at].id);
+            var richer = hasKey ? isBetterTurn(t, out[at]) : isFullerTurn(t, out[at]);
+            if (richer) {
+              out[at] = turnRecord(t, out[at].id);
+              reindexTurnKey(byKey, out, at);
+            }
           }
           for (var i = 0; i < baseTurns.length; i++) add(baseTurns[i]);
           for (var j = 0; j < extraTurns.length; j++) add(extraTurns[j]);
+          return out;
+        }
+        function dedupeTurns(turns) {
+          var list = Array.isArray(turns) ? turns : [];
+          var byKey = {};
+          var out = [];
+          for (var i = 0; i < list.length; i++) {
+            var t = list[i];
+            if (!t) continue;
+            var key = canonicalTurnKeyOf(t);
+            var hasKey = key !== "||" && Object.prototype.hasOwnProperty.call(byKey, key);
+            var at = hasKey ? byKey[key] : findPrefixCompatibleIndex(out, t);
+            if (at === -1) {
+              if (key !== "||") byKey[key] = out.length;
+              out.push(t);
+              continue;
+            }
+            var richer = hasKey ? isBetterTurn(t, out[at]) : isFullerTurn(t, out[at]);
+            if (richer) {
+              out[at] = t;
+              reindexTurnKey(byKey, out, at);
+            }
+          }
           return out;
         }
         function classifyFolwrContinuation(input) {
@@ -4560,7 +4876,8 @@
           var cursor = i.cursor ? String(i.cursor) : null;
           var sentCursor = i.sentCursor ? String(i.sentCursor) : null;
           var cursorRepeated = !!(cursor && sentCursor && cursor === sentCursor);
-          var kind, complete, canContinue;
+          var kind;
+          var complete, canContinue;
           if (!ok) {
             kind = "http-error";
             complete = false;
@@ -4611,6 +4928,10 @@
             canonicalAnswerBody,
             canonicalizeTurnForThread,
             normalizeTurnKeyPart,
+            // O-32 (фикс A/C): префикс-терпимая идентичность хода и дедуп списка перед кэшем.
+            turnIdentityParts,
+            bodiesPrefixCompatible,
+            dedupeTurns,
             // O-45: общий рендер код-блоков (```lang … ```) и отбор узлов DOM-пути —
             // переиспользуются адаптером (adapters/google-search-adapter.js) и тестами.
             renderCodeBlock,
@@ -4633,6 +4954,9 @@
             canonicalAnswerBody,
             canonicalizeTurnForThread,
             normalizeTurnKeyPart,
+            turnIdentityParts,
+            bodiesPrefixCompatible,
+            dedupeTurns,
             renderCodeBlock,
             answerTextOf,
             answerDomNodes,
@@ -4837,6 +5161,17 @@
           if (site === "gemini" && hist.sourceTier && out) out = hist.sourceTier + "\n\n" + out;
           return out === null ? "" : out;
         }
+        function exportTokenSnapshot(history) {
+          var h = history || {};
+          var tokens = typeof h.tokens === "number" ? h.tokens : 0;
+          var limit = typeof h.limit === "number" ? h.limit : 0;
+          var percent = typeof h.percent === "number" ? h.percent : 0;
+          if (limit > 0) {
+            var calc = Math.round(tokens / limit * 1e3) / 10;
+            if (calc !== percent) percent = calc;
+          }
+          return { tokens, limit, percent };
+        }
         function buildMdFromHistory(history, platform) {
           var h = history || {};
           var site = typeof h.site === "string" ? h.site : "";
@@ -4847,10 +5182,15 @@
           lines.push(aiCmI18nMessage2("export_md_model", "\u041C\u043E\u0434\u0435\u043B\u044C: " + (h.model || "\u2014"), [h.model || "\u2014"]));
           var exportedAt = (/* @__PURE__ */ new Date()).toISOString();
           lines.push(aiCmI18nMessage2("export_md_date", "\u0414\u0430\u0442\u0430 \u044D\u043A\u0441\u043F\u043E\u0440\u0442\u0430: " + exportedAt, [exportedAt]));
-          var tokens = typeof h.tokens === "number" ? h.tokens : 0;
-          var limit = typeof h.limit === "number" ? h.limit : 0;
-          var percent = typeof h.percent === "number" ? h.percent : 0;
-          lines.push(aiCmI18nMessage2("export_md_tokens", "\u0422\u043E\u043A\u0435\u043D\u044B: " + tokens + " / " + limit + " (" + percent + "%)", [String(tokens), String(limit), String(percent)]));
+          var snap = exportTokenSnapshot(h);
+          var tokens = snap.tokens;
+          var limit = snap.limit;
+          var percent = snap.percent;
+          if (tokens === 0 && limit === 0) {
+            lines.push("\u0422\u043E\u043A\u0435\u043D\u044B: \u043D/\u0434 (" + percent + "%)");
+          } else {
+            lines.push(aiCmI18nMessage2("export_md_tokens", "\u0422\u043E\u043A\u0435\u043D\u044B: " + tokens + " / " + limit + " (" + percent + "%)", [String(tokens), String(limit), String(percent)]));
+          }
           lines.push("");
           if (site === "gemini" && h.sourceTier) {
             lines.push(h.sourceTier, "");
@@ -10080,12 +10420,19 @@
                 aiCmDumpTurnsSnapshot("snapshot-at-fired", cid, msgs2);
               } catch (eDump) {
               }
+              var dispLimitAuto = typeof computeEffectiveLimit === "function" ? computeEffectiveLimit(lastResolvedModelId) : 0;
+              var snapTokens = typeof maxTokenCount === "number" ? maxTokenCount : 0;
+              var snapPercent = typeof percentage === "number" ? percentage : 0;
+              if (dispLimitAuto > 0) {
+                var snapCalc = Math.round(snapTokens / dispLimitAuto * 1e3) / 10;
+                if (snapCalc !== snapPercent) snapPercent = snapCalc;
+              }
               var hist = {
                 site: currentAdapter && currentAdapter.siteName || "",
                 model: ModelConfig.getModel(lastResolvedModelId || "")?.name || "",
-                tokens: maxTokenCount,
-                limit: 0,
-                percent: percentage,
+                tokens: snapTokens,
+                limit: dispLimitAuto,
+                percent: snapPercent,
                 // Two-Tier (v89): метка источника — из ОБЪЕДИНЁННОЙ базы в момент сборки файла;
                 // сборщики TXT/MD ставят её первой строкой/блоком только для Gemini.
                 // typeof-гард — как у снимка истории выше (срез-песочницы тестов).
@@ -10815,6 +11162,34 @@
         }
         return result;
       }
+      function aiCmCanonicalTokens(text, attachTokens, messageCount) {
+        var attach = typeof attachTokens === "number" && attachTokens > 0 ? attachTokens : 0;
+        var msgs = typeof messageCount === "number" && messageCount > 0 ? messageCount : 0;
+        if (typeof Tokenizer !== "undefined" && Tokenizer && typeof Tokenizer.estimateDialogTokens === "function") {
+          try {
+            return Tokenizer.estimateDialogTokens(text, msgs) + attach;
+          } catch (eCanon) {
+            swallowSoft(eCanon, "content:canonical-tokens");
+          }
+        }
+        return aiCmEstimateTokensTilde(text, attach) + msgs * 4;
+      }
+      function aiCmAttachPendingTokens(fullText, attachTokens, attachBreak) {
+        var pool = typeof attachTokens === "number" && attachTokens > 0 ? attachTokens : 0;
+        if (pool <= 0) return 0;
+        var text = typeof fullText === "string" ? fullText : "";
+        var imgRendered = (text.match(/\[IMAGE: /g) || []).length;
+        var docRendered = (text.match(/\[FILE: /g) || []).length;
+        if (imgRendered === 0 && docRendered === 0) return pool;
+        var br = attachBreak && typeof attachBreak === "object" ? attachBreak : {};
+        var imgTotal = typeof br.imgCount === "number" && br.imgCount > 0 ? br.imgCount : 0;
+        var docTotal = typeof br.docCount === "number" && br.docCount > 0 ? br.docCount : 0;
+        var total = imgTotal + docTotal;
+        if (total <= 0) return 0;
+        var done = Math.min(imgRendered, imgTotal) + Math.min(docRendered, docTotal);
+        if (done >= total) return 0;
+        return Math.round(pool * (total - done) / total);
+      }
       window.addEventListener("ai-cm-model-slug", function(ev) {
         var md = ev && ev.detail;
         if (md && typeof md.slug === "string" && md.slug) {
@@ -10829,6 +11204,35 @@
           }
         }
       });
+      var AI_CM_AUTOEXPORT_DEBOUNCE_MS = 500;
+      var autoExportDebounceTimer = null;
+      var autoExportDebouncePct = -1;
+      var autoExportDebounceCid = "";
+      function aiCmScheduleAutoExport(percentage) {
+        try {
+          if (!autoExportSettings || autoExportSettings.enabled !== true) return;
+          if (typeof percentage !== "number" || !isFinite(percentage) || percentage < 0) return;
+          autoExportDebouncePct = percentage;
+          autoExportDebounceCid = typeof aiCmAutoExportConvId === "function" ? aiCmAutoExportConvId() || "" : "";
+          if (autoExportDebounceTimer !== null) clearTimeout(autoExportDebounceTimer);
+          autoExportDebounceTimer = setTimeout(function() {
+            autoExportDebounceTimer = null;
+            var pct = autoExportDebouncePct;
+            var cid = autoExportDebounceCid;
+            autoExportDebouncePct = -1;
+            autoExportDebounceCid = "";
+            if (typeof pct !== "number" || pct < 0) return;
+            if (cid && typeof aiCmAutoExportConvId === "function" && (aiCmAutoExportConvId() || "") !== cid) return;
+            try {
+              maybeAutoExport(pct);
+            } catch (eFire) {
+              swallowSoft(eFire, "content:autoexport-debounce");
+            }
+          }, AI_CM_AUTOEXPORT_DEBOUNCE_MS);
+        } catch (eSched) {
+          swallowSoft(eSched, "content:autoexport-schedule");
+        }
+      }
       window.addEventListener("ai-cm-full-history", function(ev) {
         try {
           if (typeof aiCmDiagLine === "function") {
@@ -10867,7 +11271,7 @@
             return;
           }
         }
-        var tokenTilde = typeof aiCmEstimateTokensTilde === "function" ? aiCmEstimateTokensTilde(detail.text, detail.attachTokens) : Math.round((detail.text || "").length / 4) + (detail.attachTokens || 0);
+        var tokenTilde = aiCmCanonicalTokens(detail.text, detail.attachTokens, detail.count || 0);
         debugLog("log", "[AI CM][trace] badge-recv convId=" + (detail.convId || "-") + " msgs=" + (detail.count || 0) + " tokens~" + tokenTilde);
         try {
           if (typeof aiCmDiagLine === "function") {
@@ -11060,12 +11464,6 @@
           try {
             var cid79 = emitConvId || lastEmitConvId || getCurrentConvId() || "";
             if (cid79) {
-              if (aiCmLateCheckByConv[cid79]) {
-                aiCmTryLateAutoExport(cid79);
-              } else if (autoExportSettings.enabled === true && typeof autoExportLastPct === "number" && autoExportLastPct >= 0) {
-                debugLog("log", "[AI CM][auto-export] base-complete 0\u21921 check (\u043D\u0435 loader-stop) convId=" + cid79 + " pct=" + autoExportLastPct);
-                maybeAutoExport(autoExportLastPct);
-              }
               try {
                 aiCmFlushDeferredHistWrite(cid79, "base-complete");
               } catch (eF79) {
@@ -11075,6 +11473,13 @@
                 aiCmResyncMetricsAfterFlush(cid79, "base-complete");
               } catch (eRs79) {
                 swallowSoft(eRs79, "content:metrics-resync-flush");
+              }
+              var freshPct79 = typeof lastPercentage === "number" && lastPercentage >= 0 ? lastPercentage : autoExportLastPct;
+              if (aiCmLateCheckByConv[cid79]) {
+                aiCmTryLateAutoExport(cid79);
+              } else if (autoExportSettings.enabled === true && typeof freshPct79 === "number" && freshPct79 >= 0) {
+                debugLog("log", "[AI CM][auto-export] base-complete 0\u21921 check (\u043D\u0435 loader-stop) convId=" + cid79 + " pct=" + freshPct79);
+                maybeAutoExport(freshPct79);
               }
             }
           } catch (e79) {
@@ -11091,6 +11496,7 @@
         } catch (eO22L2) {
         }
         processAndSend();
+        if (typeof aiCmScheduleAutoExport === "function") aiCmScheduleAutoExport(lastPercentage);
       });
       var AI_CM_H23_SITES = ["claude"];
       var aiCmContentReadySent = false;
@@ -12275,9 +12681,10 @@
           if (baseComplete === true && metricServerTokens === 0 && netEffectiveLen > 0 && fullText && fullText.length > 0 && netEffectiveLen > fullText.length) {
             tokenEstimate = Math.round(tokenEstimate * (netEffectiveLen / fullText.length));
           }
-          if (netAttachTokens > 0 && String(fullText || "").indexOf("[FILE:") === -1) tokenEstimate += netAttachTokens;
-          if (svc === "aistudio" && typeof aiCmAistudioNativePromptTokens === "function" && aiCmAistudioNativePromptTokens() > 0 && String(fullText || "").indexOf("[FILE:") === -1) {
-            tokenEstimate -= netAttachTokens;
+          var attachAdd = aiCmAttachPendingTokens(fullText, netAttachTokens, netAttachBreak);
+          if (attachAdd > 0) tokenEstimate += attachAdd;
+          if (svc === "aistudio" && typeof aiCmAistudioNativePromptTokens === "function" && aiCmAistudioNativePromptTokens() > 0 && attachAdd > 0) {
+            tokenEstimate -= attachAdd;
           }
           const contextLimit = ModelConfig.getContextLimit(modelId);
           const effectiveLimit = ModelConfig.getEffectiveLimit(modelId);
@@ -12311,6 +12718,9 @@
           } else if (byokHeuristicHold) {
           } else if (baseComplete === true) {
             maxTokenCount = tokenEstimate;
+          } else if (typeof baseSeen !== "undefined" && baseSeen === true && typeof baseCount === "number" && baseCount > 0 && typeof aiCmDomListS1 !== "undefined" && aiCmDomListS1 && aiCmDomListS1.length > 0 && baseCount > aiCmDomListS1.length && tokenEstimate < maxTokenCount) {
+            maxTokenCount = tokenEstimate;
+            lastBounded = false;
           } else if (useMonotonic) {
             if (tokenEstimate > maxTokenCount) maxTokenCount = tokenEstimate;
           } else {
@@ -12376,7 +12786,6 @@
             }
           } catch (eQbw) {
           }
-          maybeAutoExport(percentage);
           sendThresholdPct(percentage);
           if (hasChanged) {
             const tagPct = aiCmActivePct();
@@ -12516,6 +12925,7 @@
               if (msgsS24.length > 0 && histKeyS24 !== lastHistoryWroteKey && cidS24 !== "") {
                 lastHistoryWroteKey = histKeyS24;
                 adapterBaseSeen = true;
+                if (typeof aiCmScheduleAutoExport === "function") aiCmScheduleAutoExport(percentage);
                 debugLog("log", "[AI CM][trace] history-write source=adapter site=" + (currentAdapter.siteName || "") + " convId=" + cidS24 + " msgs=" + msgsS24.length);
                 try {
                   if (typeof aiCmDiagLine === "function" && currentAdapter && currentAdapter.siteName === "qwen") {
@@ -12766,9 +13176,10 @@
               if (baseComplete === true && metricServerTokens === 0 && netEffectiveLen > 0 && fullText && fullText.length > 0 && netEffectiveLen > fullText.length) {
                 tokenEstimate = Math.round(tokenEstimate * (netEffectiveLen / fullText.length));
               }
-              if (netAttachTokens > 0 && String(fullText || "").indexOf("[FILE:") === -1) tokenEstimate += netAttachTokens;
-              if (currentAdapter.siteName === "aistudio" && typeof aiCmAistudioNativePromptTokens === "function" && aiCmAistudioNativePromptTokens() > 0 && String(fullText || "").indexOf("[FILE:") === -1) {
-                tokenEstimate -= netAttachTokens;
+              var attachAddM = aiCmAttachPendingTokens(fullText, netAttachTokens, netAttachBreak);
+              if (attachAddM > 0) tokenEstimate += attachAddM;
+              if (currentAdapter.siteName === "aistudio" && typeof aiCmAistudioNativePromptTokens === "function" && aiCmAistudioNativePromptTokens() > 0 && attachAddM > 0) {
+                tokenEstimate -= attachAddM;
               }
               const displayTokens = metricServerTokens > 0 ? tokenEstimate : Math.max(tokenEstimate, maxTokenCount);
               const contextLimit = ModelConfig.getContextLimit(modelId);
@@ -13386,10 +13797,17 @@
       aiCmAistudioHistoryCacheRestore();
       var aiCmPdfBridgeStarted = false;
       var aiCmPdfJobs = {};
+      var aiCmPdfLocalReady = false;
       var AI_CM_PDF_SRC = "ai-cm-pdf";
+      var AI_CM_PDF_LOCAL_SRC = "ai-cm-pdf-local";
       var AI_CM_PDF_MAX_BYTES = 10 * 1024 * 1024;
       var AI_CM_PDF_MAX_CHUNKS = 64;
       var AI_CM_PDF_CHUNK_MAX = 1024 * 1024;
+      var AI_CM_PDF_PORT_RETRY = 1;
+      var AI_CM_PDF_RETRY_DELAY_MS = 250;
+      var AI_CM_PDF_LOCAL_MAX_BYTES = 5 * 1024 * 1024;
+      var AI_CM_PDF_LOCAL_TIMEOUT_MS = 12e3;
+      var AI_CM_PDF_LOCAL_READY_WAIT_MS = 1200;
       function aiCmPdfLog(tag, err) {
         if (typeof debugLog === "function") debugLog("warn", "[AI CM][pdf] " + tag, err);
       }
@@ -13423,9 +13841,47 @@
           aiCmPdfLog("ready", eReady);
         }
       }
+      function aiCmPdfIsFirefox() {
+        try {
+          if (typeof navigator === "undefined" || !navigator) return false;
+          return String(navigator.userAgent || "").indexOf("Firefox/") !== -1;
+        } catch (eUa) {
+          aiCmPdfLog("ua", eUa);
+          return false;
+        }
+      }
+      function aiCmPdfConcat(job) {
+        if (!job || !job.parts || job.got <= 0 || job.size <= 0) return null;
+        var out = new Uint8Array(job.size);
+        var at = 0;
+        for (var i = 0; i < job.parts.length; i++) {
+          var part = job.parts[i];
+          if (!part) return null;
+          out.set(part, at);
+          at += part.length;
+        }
+        return at === job.size ? out : null;
+      }
+      function aiCmPdfClearJobTimers(job) {
+        if (!job || typeof job !== "object") return;
+        var keys = ["retryTimer", "localTimer", "localReadyTimer"];
+        for (var i = 0; i < keys.length; i++) {
+          var timer = job[keys[i]];
+          if (timer !== null && timer !== void 0) {
+            try {
+              clearTimeout(timer);
+            } catch (eTimer) {
+              aiCmPdfLog("clear-timer", eTimer);
+            }
+          }
+          job[keys[i]] = null;
+        }
+        job.localBytes = null;
+      }
       function aiCmPdfDeliver(id, res) {
         var job = aiCmPdfJobs[id];
         delete aiCmPdfJobs[id];
+        aiCmPdfClearJobTimers(job);
         var out = res && typeof res === "object" ? res : {};
         var payload = {
           id,
@@ -13450,12 +13906,121 @@
           aiCmPdfLog("result-event", eEvent);
         }
       }
-      function aiCmPdfDispatch(id) {
+      function aiCmPdfDropPort(job) {
+        if (!job || typeof job !== "object") return;
+        if (job.retryTimer !== null && job.retryTimer !== void 0) {
+          clearTimeout(job.retryTimer);
+          job.retryTimer = null;
+        }
+        var port = job.port;
+        job.port = null;
+        if (!port) return;
+        try {
+          port.disconnect();
+        } catch (eDisc) {
+          aiCmPdfLog("drop-port", eDisc);
+        }
+      }
+      function aiCmPdfAfterPort(id, reason, retryable) {
         var job = aiCmPdfJobs[id];
-        if (!job || job.sent) return;
-        job.sent = true;
+        if (!job) return;
+        aiCmPdfDropPort(job);
+        if (retryable === true && job.attempt < AI_CM_PDF_PORT_RETRY) {
+          if (job.retryTimer !== null) return;
+          job.retryTimer = setTimeout(function() {
+            job.retryTimer = null;
+            if (!aiCmPdfJobs[id]) return;
+            aiCmPdfPortAttempt(id, job.attempt + 1);
+          }, AI_CM_PDF_RETRY_DELAY_MS);
+          return;
+        }
+        if (job.localTried === true) {
+          aiCmPdfDeliver(id, { ok: false, reason: typeof reason === "string" && reason ? reason : "pdf-aborted" });
+          return;
+        }
+        aiCmPdfLocalStart(id);
+      }
+      function aiCmPdfLocalSend(id) {
+        var job = aiCmPdfJobs[id];
+        if (!job || !job.localBytes) return;
+        if (job.localReadyTimer !== null && job.localReadyTimer !== void 0) {
+          clearTimeout(job.localReadyTimer);
+          job.localReadyTimer = null;
+        }
+        var bytes = job.localBytes;
+        job.localBytes = null;
+        try {
+          window.postMessage({
+            source: AI_CM_PDF_LOCAL_SRC,
+            id,
+            bytes: bytes.buffer,
+            maxChars: job.maxChars || 2e5
+          }, "*", [bytes.buffer]);
+        } catch (ePost) {
+          aiCmPdfLog("local-post", ePost);
+          aiCmPdfAfterLocal(id, { ok: false, reason: "pdf-host-error" });
+        }
+      }
+      function aiCmPdfLocalStart(id) {
+        var job = aiCmPdfJobs[id];
+        if (!job) return;
+        if (job.localTried === true || job.localPending === true) return;
+        if (job.size > AI_CM_PDF_LOCAL_MAX_BYTES) {
+          aiCmPdfDeliver(id, { ok: false, reason: "pdf-too-large" });
+          return;
+        }
+        var bytes = aiCmPdfConcat(job);
+        if (!bytes) {
+          aiCmPdfDeliver(id, { ok: false, reason: "pdf-invalid" });
+          return;
+        }
+        job.localTried = true;
+        job.localPending = true;
+        job.localBytes = bytes;
+        job.localTimer = setTimeout(function() {
+          job.localTimer = null;
+          if (!aiCmPdfJobs[id]) return;
+          aiCmPdfAfterLocal(id, { ok: false, reason: "pdf-timeout" });
+        }, AI_CM_PDF_LOCAL_TIMEOUT_MS);
+        if (aiCmPdfLocalReady === true) {
+          aiCmPdfLocalSend(id);
+          return;
+        }
+        job.localReadyTimer = setTimeout(function() {
+          job.localReadyTimer = null;
+          if (!aiCmPdfJobs[id]) return;
+          aiCmPdfLocalSend(id);
+        }, AI_CM_PDF_LOCAL_READY_WAIT_MS);
+      }
+      function aiCmPdfAfterLocal(id, res) {
+        var job = aiCmPdfJobs[id];
+        if (!job) return;
+        if (job.localTimer !== null && job.localTimer !== void 0) {
+          clearTimeout(job.localTimer);
+          job.localTimer = null;
+        }
+        if (job.localReadyTimer !== null && job.localReadyTimer !== void 0) {
+          clearTimeout(job.localReadyTimer);
+          job.localReadyTimer = null;
+        }
+        job.localPending = false;
+        job.localBytes = null;
+        var out = res && typeof res === "object" ? res : {};
+        if (out.ok === true && typeof out.text === "string" && out.text !== "") {
+          aiCmPdfDeliver(id, out);
+          return;
+        }
+        if (job.portEverStarted !== true) {
+          aiCmPdfPortAttempt(id, 0);
+          return;
+        }
+        aiCmPdfDeliver(id, { ok: false, reason: "pdf-aborted" });
+      }
+      function aiCmPdfPortAttempt(id, attempt) {
+        var job = aiCmPdfJobs[id];
+        if (!job) return;
         if (typeof chrome === "undefined" || !chrome.runtime || typeof chrome.runtime.connect !== "function") {
-          aiCmPdfDeliver(id, { ok: false, reason: "pdf-unavailable" });
+          aiCmPdfLocalStart(id);
           return;
         }
         var port = null;
@@ -13463,12 +14028,23 @@
           port = chrome.runtime.connect({ name: "ai-cm-pdf:" + id });
         } catch (ePort) {
           aiCmPdfLog("connect", ePort);
-          aiCmPdfDeliver(id, { ok: false, reason: "pdf-unavailable" });
+          aiCmPdfAfterPort(id, "pdf-unavailable", false);
+          return;
+        }
+        if (!aiCmPdfJobs[id]) {
+          try {
+            port.disconnect();
+          } catch (eDisc) {
+            aiCmPdfLog("disconnect", eDisc);
+          }
           return;
         }
         job.port = port;
+        job.attempt = attempt;
+        job.portEverStarted = true;
         port.onMessage.addListener(function(msg) {
           if (!msg || typeof msg !== "object") return;
+          if (aiCmPdfJobs[id] !== job || job.port !== port) return;
           if (String(msg.t || "") !== "result") return;
           aiCmPdfDeliver(id, msg);
         });
@@ -13478,15 +14054,32 @@
           } catch (eLast) {
             aiCmPdfLog("lastError", eLast);
           }
-          if (!aiCmPdfJobs[id]) return;
-          aiCmPdfDeliver(id, { ok: false, reason: "pdf-aborted" });
+          if (aiCmPdfJobs[id] !== job || job.port !== port) return;
+          job.port = null;
+          aiCmPdfAfterPort(id, "pdf-aborted", true);
         });
-        port.postMessage({ t: "begin", id, total: job.got, maxChars: job.maxChars || 2e5 });
-        for (var i = 0; i < job.parts.length; i++) {
-          if (!job.parts[i]) continue;
-          port.postMessage({ t: "chunk", id, seq: i, b64: aiCmPdfB64(job.parts[i]) });
+        try {
+          port.postMessage({ t: "begin", id, total: job.got, maxChars: job.maxChars || 2e5 });
+          for (var i = 0; i < job.parts.length; i++) {
+            if (!job.parts[i]) continue;
+            port.postMessage({ t: "chunk", id, seq: i, b64: aiCmPdfB64(job.parts[i]) });
+          }
+          port.postMessage({ t: "end", id });
+        } catch (ePost) {
+          aiCmPdfLog("post", ePost);
+          job.port = null;
+          aiCmPdfAfterPort(id, "pdf-host-error", false);
         }
-        port.postMessage({ t: "end", id });
+      }
+      function aiCmPdfDispatch(id) {
+        var job = aiCmPdfJobs[id];
+        if (!job || job.sent) return;
+        job.sent = true;
+        if (aiCmPdfIsFirefox() && job.size > 0 && job.size <= AI_CM_PDF_LOCAL_MAX_BYTES) {
+          aiCmPdfLocalStart(id);
+          return;
+        }
+        aiCmPdfPortAttempt(id, 0);
       }
       function aiCmPdfOnMessage(ev) {
         if (!ev || ev.source !== window) return;
@@ -13496,7 +14089,23 @@
         if (!id) return;
         var job = aiCmPdfJobs[id];
         if (!job) {
-          job = aiCmPdfJobs[id] = { total: 0, parts: [], got: 0, size: 0, port: null, sent: false, maxChars: 0 };
+          job = aiCmPdfJobs[id] = {
+            total: 0,
+            parts: [],
+            got: 0,
+            size: 0,
+            port: null,
+            sent: false,
+            maxChars: 0,
+            attempt: -1,
+            portEverStarted: false,
+            localTried: false,
+            localPending: false,
+            retryTimer: null,
+            localTimer: null,
+            localReadyTimer: null,
+            localBytes: null
+          };
         }
         if (typeof data.maxChars === "number" && data.maxChars > 0) job.maxChars = data.maxChars;
         var total = typeof data.total === "number" ? data.total : 0;
@@ -13523,6 +14132,7 @@
         for (var i = 0; i < ids.length; i++) {
           var job = aiCmPdfJobs[ids[i]];
           delete aiCmPdfJobs[ids[i]];
+          aiCmPdfClearJobTimers(job);
           if (job && job.port) {
             try {
               job.port.postMessage({ t: "cancel", id: ids[i] });
@@ -13543,6 +14153,22 @@
         if (!id) return;
         aiCmPdfDeliver(id, { ok: false, reason: "pdf-aborted" });
       }
+      function aiCmPdfOnLocalResult(ev) {
+        var detail = aiCmPdfDetail(ev);
+        var id = detail && typeof detail.id === "string" ? detail.id : "";
+        if (!id) return;
+        var job = aiCmPdfJobs[id];
+        if (!job || job.localPending !== true) return;
+        aiCmPdfAfterLocal(id, detail);
+      }
+      function aiCmPdfOnLocalReady() {
+        aiCmPdfLocalReady = true;
+        var ids = Object.keys(aiCmPdfJobs);
+        for (var i = 0; i < ids.length; i++) {
+          var job = aiCmPdfJobs[ids[i]];
+          if (job && job.localBytes) aiCmPdfLocalSend(ids[i]);
+        }
+      }
       function aiCmPdfBridgeStart() {
         if (aiCmPdfBridgeStarted) return;
         if (typeof chrome === "undefined" || !chrome.runtime || typeof chrome.runtime.connect !== "function") return;
@@ -13550,12 +14176,14 @@
         window.addEventListener("message", aiCmPdfOnMessage);
         window.addEventListener("ai-cm-pdf-hello", aiCmPdfAnnounceReady);
         window.addEventListener("ai-cm-pdf-cancel", aiCmPdfOnCancel);
+        window.addEventListener("ai-cm-pdf-local-result", aiCmPdfOnLocalResult);
+        window.addEventListener("ai-cm-pdf-local-ready", aiCmPdfOnLocalReady);
         window.addEventListener("pagehide", aiCmPdfAbortAll);
         aiCmPdfAnnounceReady();
       }
       aiCmPdfBridgeStart();
     }
   });
-  require_content();
+  require_entry_content();
 })();
 //# sourceMappingURL=content.js.map

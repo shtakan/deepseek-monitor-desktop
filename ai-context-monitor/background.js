@@ -8,9 +8,9 @@
     }
   };
 
-  // background.js
-  var require_background = __commonJS({
-    "background.js"(exports, module) {
+  // entry-background.js
+  var require_entry_background = __commonJS({
+    "entry-background.js"(exports, module) {
       function aiCmIsFirefox() {
         try {
           var api = typeof browser !== "undefined" && browser && browser.runtime ? browser : typeof chrome !== "undefined" && chrome && chrome.runtime ? chrome : null;
@@ -2896,6 +2896,6 @@
       }
     }
   });
-  require_background();
+  require_entry_background();
 })();
 //# sourceMappingURL=background.js.map

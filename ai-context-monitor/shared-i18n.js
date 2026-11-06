@@ -8,9 +8,9 @@
     }
   };
 
-  // shared-i18n.js
-  var require_shared_i18n = __commonJS({
-    "shared-i18n.js"(exports, module) {
+  // entry-shared-i18n.js
+  var require_entry_shared_i18n = __commonJS({
+    "entry-shared-i18n.js"(exports, module) {
       (function() {
         "use strict";
         var BINDINGS = [
@@ -73,6 +73,6 @@
       })();
     }
   });
-  require_shared_i18n();
+  require_entry_shared_i18n();
 })();
 //# sourceMappingURL=shared-i18n.js.map

@@ -139,7 +139,15 @@
   }
   function extractTurnTs(t) {
     try {
-      if (Array.isArray(t) && Array.isArray(t[1]) && typeof t[1][0] === 'number' && t[1][0] > 1000000000) return t[1][0];
+      if (Array.isArray(t)) {
+        // v2.3 (chronology fix): реальный ts хода лежит в t[4][0] (там же его
+        // читает парсер). В t[1][0] у Gemini строка convId, из-за чего ingest
+        // раньше отдавал 0 всем ходам и владелец вложения выбирался по
+        // локальному порядку страницы, а не по времени. Старый путь t[1][0]
+        // оставлен фолбэком для фикстур/старых раскладок.
+        if (Array.isArray(t[4]) && typeof t[4][0] === 'number' && t[4][0] > 1000000000) return t[4][0];
+        if (Array.isArray(t[1]) && typeof t[1][0] === 'number' && t[1][0] > 1000000000) return t[1][0];
+      }
     } catch (e) { swallowSoft(e, 'gemini:extractTurnTs'); }
     return 0;
   }
@@ -297,6 +305,26 @@
           window.GeminiBatchexecuteParser.__setDrTexts(window.GeminiBatchexecuteParser.extractDrTexts(realTurns));
         }
       } catch (eD13) { debugLog('log', '[gemini-intercept] parse-top fail (eD13/DR): ' + (eD13 && eD13.message || eD13)); }
+      // v2.3 (chronology): владелец вложения — ход с НАИМЕНЬШИМ ts (хронологически
+      // первый), а не первый встреченный при обходе. Обход идёт с конца
+      // (новые→старые), поэтому раньше файлы прилипали к последнему сообщению.
+      // Регистрируем владельцев ДО эмиссии: иначе более новый ход успевает их
+      // забрать. Индекс (0 = самый старый) — фолбэк, когда timestamps нет.
+      // Id ходов считаем в том же порядке, что и основной цикл, чтобы
+      // stableTurnFallbackId(out.total) нумеровал ходы как раньше.
+      var turnIds = [];
+      var turnTss = [];
+      for (var pre = realTurns.length - 1; pre >= 0; pre--) {
+        var t = realTurns[pre];
+        if (!Array.isArray(t)) { turnIds[pre] = ''; turnTss[pre] = 0; continue; }
+        turnIds[pre] = extractTurnId(t) || stableTurnFallbackId(t, out);
+        turnTss[pre] = extractTurnTs(t);
+        try {
+          turnFilesRegister(t, turnIds[pre], turnTss[pre], realTurns.length - 1 - pre);
+        } catch (ePreFiles) {
+          debugLog('log', '[gemini-files] owner preregister fail: ' + (ePreFiles && ePreFiles.message || ePreFiles));
+        }
+      }
       // v38: raw внутри страницы идёт «новые→старые». Обходим С КОНЦА, чтобы
       // по возрастанию order (assignPageOrders) итог был «старые→новые»;
       // внутри хода user стоит раньше assistant → получает меньший order.
@@ -307,18 +335,27 @@
         collectAttachments(t, localSeen, items);
         ingestAttachments(items);
         var modelName = extractModelName(t);
-        var turnId = extractTurnId(t) || stableTurnFallbackId(t, out);
-        var turnTs = extractTurnTs(t);
+        var turnId = turnIds[i];
+        var turnTs = turnTss[i] || 0;
         var r1 = extractTurnR1(t);
         // v2.0 (Gemini files): ref-ы вложений хода. Парсер не бросает; пустой
         // массив — обычный ход без файлов.
+        // v2.2 (A+C): только вложения ЭТОГО хода — парсер закрепляет файл за
+        // ходом первого упоминания (общий список Gemini повторяется в соседях),
+        // реестр dk → turnId чистится на SPA-переходе (gfReset).
         var turnFiles = [];
+        // v2.5 (Фикс D1): полный кумулятивный пул хода. Раздача вложений
+        // откладывается до reachedStart и идёт по пулам в хронологическом
+        // порядке — так файл закрепляется за ходом, где он впервые появился,
+        // даже если страницы пришли новые→старые.
+        var turnFilePool = null;
         try {
+          turnFiles = turnFilesForIngest(t, turnId, turnTs);
           if (typeof window !== 'undefined' && window.GeminiBatchexecuteParser &&
               typeof window.GeminiBatchexecuteParser.collectTurnFiles === 'function') {
-            turnFiles = window.GeminiBatchexecuteParser.collectTurnFiles(t) || [];
+            turnFilePool = window.GeminiBatchexecuteParser.collectTurnFiles(t);
           }
-        } catch (eFiles) { turnFiles = []; }
+        } catch (eFiles) { turnFiles = []; turnFilePool = null; }
         // v30/v31: текст хода и роли собираем через чистый сетевой парсер
         // (utils/gemini-batchexecute-parser.js): вычищаем $AXzLiR-токены и сегменты «мышления»,
         // разделяем вопрос пользователя и ответ модели, сохраняем таблицы.
@@ -343,18 +380,13 @@
           out.turns.push({
             id: mid, text: stxt, modelName: modelName, ts: turnTs, role: role,
             turnId: turnId, r1: r1,
-            files: (role === 'user' && turnFiles.length) ? turnFiles : null
+            files: (role === 'user' && turnFiles.length) ? turnFiles : null,
+            filePool: (role === 'user' && turnFilePool && turnFilePool.length) ? turnFilePool : null
           });
-          // Вложения привязаны к ПОЛЬЗОВАТЕЛЬСКОМУ ходу: модуль скачивания
-          // раскладывает их по msgId и дописывает секции при эмиссии.
-          if (role === 'user' && turnFiles.length) {
-            try {
-              if (typeof window !== 'undefined' && window.AiCmGeminiFiles &&
-                  typeof window.AiCmGeminiFiles.gfEnqueueTurnFiles === 'function') {
-                window.AiCmGeminiFiles.gfEnqueueTurnFiles(getConvId(), mid, turnFiles);
-              }
-            } catch (eEnqFiles) { }
-          }
+          // v2.3.1: файлы НЕ раздаём здесь. Пока не подтверждено начало истории,
+          // «самый старый» ход текущей страницы может смениться на более старый
+          // с предыдущей страницы, а gfEnqueueTurnFiles закрепляет владельца
+          // навсегда. Раздача — в emitBaseSnapshot, когда reachedStart=true.
         }
         if (doIdmap) {
           try {
@@ -601,6 +633,10 @@
     // v2.0 (Gemini files): convId нужен и для секций вложений, и для гварда
     // полноты ниже — вычисляем один раз.
     var fid = getConvId();
+    // v2.3.1: раздаём вложения только после подтверждения начала истории —
+    // к этому моменту парсер уже видел самый старый ход и выбрал владельца по
+    // минимальному ts, а не по порядку страниц.
+    if (reachedStart === true) enqueueOwnedTurnFiles(fid, ids);
     // v31: сообщения с ролями (user/assistant) для экспорта истории
     var messages = [];
     for (var mi = 0; mi < ids.length; mi++) {
@@ -660,9 +696,40 @@
         filesPending = window.AiCmGeminiFiles.gfPendingCount(fid) || 0;
       }
     } catch (ePend) { filesPending = 0; }
-    var baseComplete = historyFullByQuiet && filesPending === 0;
+    // v2.3 (A1): таймаут больше НЕ финализирует базу с потерянными [FILE:]-секциями.
+    // Пока filesPending > 0, база неполная: ждём опустошения очереди (fetch-done →
+    // gfScheduleEmit → повторный emitBaseSnapshot) окном GF_FILES_GATE_MS = 30 с,
+    // после чего окно открывается заново. Ни один таймаут не выдаёт baseComplete.
+    // filesTruncated остаётся только полем формы снимка (совместимость detail)
+    // и всегда false — флаг больше не «отпускает» экспорт.
+    var gateKey = fid || '__';
+    var filesTruncated = false;
+    if (filesPending > 0) {
+      var gateNow = Date.now();
+      if (!filesGateSince[gateKey]) filesGateSince[gateKey] = gateNow;
+      var gate = filesGateDecision(filesPending, filesGateSince[gateKey], gateNow);
+      if (gate.release) {
+        // Очередь не опустела за окно: перезапускаем ожидание, полноты не даём.
+        filesGateSince[gateKey] = gateNow;
+        if (filesGateTimers[gateKey]) { clearTimeout(filesGateTimers[gateKey]); delete filesGateTimers[gateKey]; }
+        debugLog('log', '[gemini-base-diag] files-gate wait-timeout pending=' + filesPending + ' — ждём дальше');
+      }
+      if (typeof setTimeout === 'function' && !filesGateTimers[gateKey]) {
+        var gateReemit = emitBaseSnapshot;
+        var gateDelay = (gate.release || !gate.delay) ? GF_FILES_GATE_MS : gate.delay;
+        filesGateTimers[gateKey] = setTimeout(function () {
+          delete filesGateTimers[gateKey];
+          try { gateReemit(); } catch (eGate) { swallowSoft(eGate, 'gemini:files-gate-emit'); }
+        }, gateDelay);
+      }
+    } else {
+      delete filesGateSince[gateKey];
+      if (filesGateTimers[gateKey]) { clearTimeout(filesGateTimers[gateKey]); delete filesGateTimers[gateKey]; }
+    }
+    var baseComplete = baseCompleteWithFiles(historyFullByQuiet, filesPending);
     debugLog('log', '[gemini-base-diag] count=' + ids.length + ' textLen=' + text.length +
       ' baseComplete=' + baseComplete + ' filesPending=' + filesPending +
+      ' filesTruncated=' + filesTruncated +
       ' floorCount=' + (savedFloor ? savedFloor.count : '-'));
 
     // v27/vXX: пол применяем ТОЛЬКО как защиту от просадки при НЕполной загрузке
@@ -712,6 +779,7 @@
           attachBreak: { imgTokens: attachBreak.imgTokens, docTokens: attachBreak.docTokens, imgCount: attachBreak.imgCount, docCount: attachBreak.docCount },
           historyComplete: baseComplete,
           filesPending: filesPending,
+          filesTruncated: filesTruncated,
           reachedStart: reachedStart === true, // v1.13.1: подтверждение полноты для гейта экспорта
           isLowConfidenceBase: isLowConfidenceBase === true, // v63: sanity-фолбэк без proof — префикс [LOW CONFIDENCE]_
           floorApplied: floorApplied,
@@ -720,6 +788,93 @@
       }));
     } catch (e) { swallowSoft(e, 'gemini:emitBaseSnapshot-dispatch'); }
     return { count: ids.length, textLen: text.length, effectiveLen: effectiveLen, lastModelName: lastModelName, floorApplied: floorApplied, floorValue: floorValue };
+  }
+
+  // ---- v2.2 (A): вложения строго своего хода ----
+  // Парсер закрепляет уникальный файл за ходом первого упоминания (реестр
+  // dk → turnId): один и тот же список Gemini повторяет в соседних ходах.
+  // v2.3: «первое» — хронологически первое (min ts), а не первое встреченное.
+  function turnFilesForIngest(turn, turnId, turnTs) {
+    if (typeof window === 'undefined' || !window.GeminiBatchexecuteParser) return [];
+    var P = window.GeminiBatchexecuteParser;
+    if (typeof P.collectTurnFilesForOwner === 'function') {
+      return P.collectTurnFilesForOwner(turn, getConvId(), turnId, turnTs) || [];
+    }
+    if (typeof P.collectTurnFiles === 'function') return P.collectTurnFiles(turn) || [];
+    return [];
+  }
+
+  // Предварительная регистрация владельцев до эмиссии: ход с наименьшим ts
+  // забирает файл, даже если при обходе он встретился последним.
+  function turnFilesRegister(turn, turnId, turnTs, order) {
+    if (typeof window === 'undefined' || !window.GeminiBatchexecuteParser) return;
+    var P = window.GeminiBatchexecuteParser;
+    if (typeof P.registerTurnFileOwner === 'function') {
+      P.registerTurnFileOwner(turn, getConvId(), turnId, turnTs, order);
+    }
+  }
+
+  // v2.7 (владение на эмиссии): раздача вложений считается ОДИН РАЗ по полному
+  // хронологическому списку ходов — ids (r1-цепочка, старые→новые). Кумулятивный
+  // пул хода (rec.filePool) — префикс пула следующего хода, поэтому собственные
+  // вложения хода = хвост после общего префикса (parser.assignPoolOwners).
+  // Прежняя схема считала дельту при приходе страницы и накапливала её в
+  // rec.files: у самого старого хода НОВОЙ страницы предшественника ещё не было,
+  // и он забирал весь пул (16-24 блока в одном сообщении, 42 [FILE:] вместо 14).
+  // Пересчёт на каждом эмите снимает зависимость от порядка прихода страниц и
+  // идемпотентен: если дельта сузилась, прежние секции хода исчезают.
+  function enqueueOwnedTurnFiles(fid, ids) {
+    if (typeof window === 'undefined' || !window.AiCmGeminiFiles ||
+        typeof window.AiCmGeminiFiles.gfEnqueueTurnFiles !== 'function') return;
+    var items = [];
+    for (var i = 0; i < ids.length; i++) {
+      var rec = turnsMap[ids[i]];
+      if (!rec || rec.role !== 'user') continue;
+      items.push({
+        id: ids[i],
+        refs: (Array.isArray(rec.filePool) && rec.filePool.length) ? rec.filePool : []
+      });
+    }
+    var P = window.GeminiBatchexecuteParser;
+    var assigned = (P && typeof P.assignPoolOwners === 'function') ? P.assignPoolOwners(items) : null;
+    if (!assigned) {
+      // Старый парсер (не пересобранный бандл): ведём себя как прежде — отдаём
+      // замороженную дельту страницы, чтобы не потерять вложения совсем.
+      assigned = [];
+      for (var f = 0; f < items.length; f++) {
+        var frec = turnsMap[items[f].id];
+        assigned.push({ id: items[f].id, own: (frec && Array.isArray(frec.files)) ? frec.files : [] });
+      }
+    }
+    for (var k = 0; k < assigned.length; k++) {
+      var item = assigned[k];
+      if (!item || !item.id) continue;
+      try {
+        window.AiCmGeminiFiles.gfEnqueueTurnFiles(fid, item.id, item.own || []);
+      } catch (eEnq) { swallowSoft(eEnq, 'gemini:enqueueOwnedTurnFiles'); }
+    }
+  }
+
+  // ---- v2.3 (A1): гейт файлового ожидания ----
+  // База НЕ финализируется, пока в очереди есть вложения: экспорт, зафиксированный
+  // по 5-секундному таймауту, терял [FILE:]-секции (A1). Окно ожидания — 30 с,
+  // дальше перезапускается; полноту даёт только опустевшая очередь
+  // (fetch-done → gfScheduleEmit → re-emit). Порог «больше 10 файлов» снят:
+  // он же и разрывал ожидание на больших пакетах.
+  var GF_FILES_GATE_MS = 30000;
+  var filesGateSince = {};
+  var filesGateTimers = {};
+  function filesGateDecision(filesPending, sinceMs, nowMs) {
+    var pending = (typeof filesPending === 'number') ? filesPending : 0;
+    var now = (typeof nowMs === 'number') ? nowMs : Date.now();
+    if (pending <= 0) return { release: false, delay: 0, since: 0 };
+    var since = (typeof sinceMs === 'number' && sinceMs > 0) ? sinceMs : (now || 1);
+    var waited = now - since;
+    if (waited >= GF_FILES_GATE_MS) return { release: true, delay: 0, since: since };
+    return { release: false, delay: GF_FILES_GATE_MS - waited, since: since };
+  }
+  function baseCompleteWithFiles(historyFullByQuiet, filesPending) {
+    return !!historyFullByQuiet && (filesPending === 0);
   }
 
   // ---- v2.1 (dedupe): устойчивый fallback-id хода ----
@@ -1171,7 +1326,7 @@
     for (var i = 0; i < pageSeq.length; i++) {
       var p = pageSeq[i];
       if (!turnsMap[p.id]) {
-        turnsMap[p.id] = { text: p.text, modelName: p.modelName, order: pageOrders[i], pageMode: src, ts: p.ts || 0, role: (p.role === 'user') ? 'user' : 'assistant', turnId: p.turnId || null, r1: p.r1 || null, files: p.files || null };
+        turnsMap[p.id] = { text: p.text, modelName: p.modelName, order: pageOrders[i], pageMode: src, ts: p.ts || 0, role: (p.role === 'user') ? 'user' : 'assistant', turnId: p.turnId || null, r1: p.r1 || null, files: p.files || null, filePool: p.filePool || null };
         added++;
       } else if (turnsMap[p.id].pageMode === 'restored') {
         // v1.14.1 (SHRINK-GUARD): сетевой ход перезаписывает restored-ход того же id
@@ -1189,7 +1344,7 @@
             : { replace: false, r1: (!recRest.r1 && p.r1) ? p.r1 : null, turnId: (!recRest.turnId && p.turnId) ? p.turnId : null };
         }
         if (dRm.replace) {
-          turnsMap[p.id] = { text: p.text, modelName: p.modelName, order: pageOrders[i], pageMode: src, ts: p.ts || 0, role: (p.role === 'user') ? 'user' : 'assistant', turnId: p.turnId || null, r1: p.r1 || null, files: p.files || null };
+          turnsMap[p.id] = { text: p.text, modelName: p.modelName, order: pageOrders[i], pageMode: src, ts: p.ts || 0, role: (p.role === 'user') ? 'user' : 'assistant', turnId: p.turnId || null, r1: p.r1 || null, files: p.files || null, filePool: p.filePool || null };
         } else {
           if (dRm.r1) recRest.r1 = dRm.r1;
           if (dRm.turnId) recRest.turnId = dRm.turnId;

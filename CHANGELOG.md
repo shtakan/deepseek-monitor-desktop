@@ -3,6 +3,21 @@
 Все заметные изменения проекта. Формат — [Keep a Changelog](https://keepachangelog.com/ru/1.1.0/),
 версионирование — [Semantic Versioning](https://semver.org/lang/ru/).
 
+## [1.1.5] - 2026-11-06
+
+Обновление поставки встроенного расширения **AI Context Monitor** (2.0.38 → 2.0.40).
+Логика приложения не менялась: правки — метаданные, встроенное расширение и документация.
+
+### Изменено
+
+- Встроенное расширение **AI Context Monitor**: 2.0.38 → 2.0.40.
+- Gemini: хронология ходов и владельцев вложений (`core/gemini-ingest.js`,
+  `utils/gemini-batchexecute-parser.js`), позиционная идентичность файлов (`core/gemini-files.js`).
+- Gemini/PDF: чтение байтов через Range и перенос байтов через Xray-границу Firefox
+  (`core/pdf-bytes.js`).
+- Google Поиск: префикс-терпимая идентичность хода — база больше не удваивается
+  на прерванном стриме (`utils/google-search-folwr-parser.js`).
+
 ## [1.1.4] - 2026-11-03
 
 ### Changed

@@ -8,9 +8,9 @@
     }
   };
 
-  // print.js
-  var require_print = __commonJS({
-    "print.js"(exports, module) {
+  // entry-print.js
+  var require_entry_print = __commonJS({
+    "entry-print.js"(exports, module) {
       (function() {
         "use strict";
         var BINDINGS = [
@@ -477,6 +477,6 @@
       })();
     }
   });
-  require_print();
+  require_entry_print();
 })();
 //# sourceMappingURL=print.js.map

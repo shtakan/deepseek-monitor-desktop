@@ -14,9 +14,9 @@
     }
   };
 
-  // options.js
-  var require_options = __commonJS({
-    "options.js"(exports, module) {
+  // entry-options.js
+  var require_entry_options = __commonJS({
+    "entry-options.js"(exports, module) {
       (function() {
         "use strict";
         var BINDINGS = [
@@ -1004,7 +1004,10 @@
           };
           rec.label = describeSource(rec);
           if (x.fileName) rec.fileName = String(x.fileName);
-          return rec;
+          return (
+            /** @type {ArchiveSourceRecord} */
+            rec
+          );
         }
         function buildLiveSourceRecord(extra) {
           var x = extra || {};
@@ -1017,7 +1020,10 @@
             importedAt: 0
           };
           rec.label = describeSource(rec);
-          return rec;
+          return (
+            /** @type {ArchiveSourceRecord} */
+            rec
+          );
         }
         function describeSource(record) {
           if (!record || typeof record !== "object") return "\u2014";
@@ -1321,6 +1327,17 @@
           if (site === "gemini" && hist.sourceTier && out) out = hist.sourceTier + "\n\n" + out;
           return out === null ? "" : out;
         }
+        function exportTokenSnapshot(history) {
+          var h = history || {};
+          var tokens = typeof h.tokens === "number" ? h.tokens : 0;
+          var limit = typeof h.limit === "number" ? h.limit : 0;
+          var percent = typeof h.percent === "number" ? h.percent : 0;
+          if (limit > 0) {
+            var calc = Math.round(tokens / limit * 1e3) / 10;
+            if (calc !== percent) percent = calc;
+          }
+          return { tokens, limit, percent };
+        }
         function buildMdFromHistory(history, platform) {
           var h = history || {};
           var site = typeof h.site === "string" ? h.site : "";
@@ -1331,10 +1348,15 @@
           lines.push(aiCmI18nMessage2("export_md_model", "\u041C\u043E\u0434\u0435\u043B\u044C: " + (h.model || "\u2014"), [h.model || "\u2014"]));
           var exportedAt = (/* @__PURE__ */ new Date()).toISOString();
           lines.push(aiCmI18nMessage2("export_md_date", "\u0414\u0430\u0442\u0430 \u044D\u043A\u0441\u043F\u043E\u0440\u0442\u0430: " + exportedAt, [exportedAt]));
-          var tokens = typeof h.tokens === "number" ? h.tokens : 0;
-          var limit = typeof h.limit === "number" ? h.limit : 0;
-          var percent = typeof h.percent === "number" ? h.percent : 0;
-          lines.push(aiCmI18nMessage2("export_md_tokens", "\u0422\u043E\u043A\u0435\u043D\u044B: " + tokens + " / " + limit + " (" + percent + "%)", [String(tokens), String(limit), String(percent)]));
+          var snap = exportTokenSnapshot(h);
+          var tokens = snap.tokens;
+          var limit = snap.limit;
+          var percent = snap.percent;
+          if (tokens === 0 && limit === 0) {
+            lines.push("\u0422\u043E\u043A\u0435\u043D\u044B: \u043D/\u0434 (" + percent + "%)");
+          } else {
+            lines.push(aiCmI18nMessage2("export_md_tokens", "\u0422\u043E\u043A\u0435\u043D\u044B: " + tokens + " / " + limit + " (" + percent + "%)", [String(tokens), String(limit), String(percent)]));
+          }
           lines.push("");
           if (site === "gemini" && h.sourceTier) {
             lines.push(h.sourceTier, "");
@@ -2746,6 +2768,6 @@
       }
     }
   });
-  require_options();
+  require_entry_options();
 })();
 //# sourceMappingURL=options.js.map

@@ -17,15 +17,18 @@
  *   • PDF не парсится: запрашивается Range: bytes=0-0, из content-range берётся
  *     полный размер (запасной путь — content-length), в экспорт едет мета-секция;
  *   • изображения не скачиваются (CORS lh3), в экспорт едет [IMAGE: имя] URL;
- *   • FIFO-очередь, concurrency 2, дедуп convId|token|name: один файл,
- *     приложенный к двум ходам, качается один раз, секции получают оба хода;
+ *   • FIFO-очередь, concurrency 2, дедуп convId|name|size|token (v2.4, Фикс B):
+ *     токен различает разные загрузки с одинаковыми именами и размерами, а
+ *     уникальный файл приходит только из своего хода — парсер отдаёт дельту
+ *     пула (utils/gemini-batchexecute-parser.js), поэтому секции не дублируются;
  *   • готовый текст складывается в карту <convId>\u0000<msgId> и дописывается
  *     к тексту пользовательского хода в emitBaseSnapshot;
  *   • после прихода текста — дебаунс 250 мс и повторный снимок базы;
  *   • пока очередь не пуста, gfPendingCount()>0 и база не объявляется полной.
  *
- * Лимиты: 200 000 символов текста на файл, 2 000 000 на чат, тело файла
- * 200 КБ, таймаут запроса 15 с.
+ * Лимиты: 200 000 символов текста на файл (A3: жёсткого лимита 200 КБ по
+ * content-length больше нет — тело читается потоком до капа), 2 000 000 на чат,
+ * таймаут запроса 15 с.
  *
  * Контракт связки: только __bind(deps) из core/gemini-intercept.js.
  *   emitSnapshot — форвардер emitBaseSnapshot;
@@ -47,7 +50,11 @@
   var GF_TIMEOUT_MS = 15000;
   var GF_EMIT_DEBOUNCE_MS = 250;
   var GF_DRAIN_TIMEOUT_MS = 6000;
-  var GF_BODY_MAX = 200 * 1024;
+  // v2.3 (A3): жёсткого лимита по content-length (было 200 КБ) больше нет — DOCX
+  // на 500 КБ отбрасывался как too-large. Текст читается потоком до GF_TEXT_CAP
+  // символов, поэтому GF_BODY_MAX остался только потолком ПАМЯТИ для бинарных
+  // тел (DOCX — zip): кап по символам держит объём текста, а не объём файла.
+  var GF_BODY_MAX = 16 * 1024 * 1024;
   // v2.0.37 (PDF): pdf.js-ветка. Больше 10 МиБ не качаем вовсе — Range-проба уже
   // знает размер, а вложение такого объёма не стоит своих 15 секунд.
   var GF_PDF_MAX = 10 * 1024 * 1024;
@@ -86,8 +93,18 @@
     return gfStr(convId) + '\u0000' + gfStr(msgId);
   }
 
+  // v2.6 (позиционная идентичность): ключ = convId|name|size|pos.
+  // `pos` — индекс узла в кумулятивном списке разговора (Gemini только дописывает
+  // новые узлы в хвост). Токен и URL в ключ НЕ входят: они переподписываются на
+  // каждый ответ, из-за чего один и тот же файл экспортировался дважды. Позиция
+  // же различает РАЗНЫЕ загрузки с одинаковыми именем и размером (13 дублей имён
+  // в живом чате), потому что каждая занимает свою позицию. Размер берётся из
+  // узла (изображения) либо остаётся 0 до Range-пробы (PDF).
   function gfDedupeKey(convId, ref) {
-    return gfStr(convId) + '|' + gfStr(ref && ref.token) + '|' + gfStr(ref && ref.name);
+    var pos = (ref && typeof ref.pos === 'number' && isFinite(ref.pos) && ref.pos >= 0)
+      ? Math.floor(ref.pos) : -1;
+    return gfStr(convId) + '|' + gfStr(ref && ref.name) + '|' + (gfNum(ref && ref.size) || 0) +
+      '|' + pos;
   }
 
   function gfCurrentConvId() {
@@ -132,6 +149,9 @@
       var type = (typeof n[1] === 'number') ? n[1] : 0;
       var token = (typeof n[5] === 'string') ? n[5] : '';
       var img = (typeof n[3] === 'string') ? n[3] : '';
+      // Размер (Фикс B): хвост узла изображения — [width, height, bytes].
+      var tail = n ? n[15] : null;
+      var size = (Array.isArray(tail) && typeof tail[2] === 'number' && isFinite(tail[2]) && tail[2] > 0) ? tail[2] : 0;
       var dl = '';
       var urls = [];
       (function walk(v) {
@@ -147,9 +167,12 @@
         mime: mime,
         type: type,
         token: token,
+        size: size,
         img: img,
         dl: dl,
         urls: urls,
+        // pos проставляет gfCollectTurnFiles: индекс узла в кумулятивном списке.
+        pos: -1,
         isImage: (type === 1) || /^image\//i.test(mime)
       };
     } catch (e) { return null; }
@@ -162,7 +185,7 @@
       if (!Array.isArray(arr)) return out;
       for (var i = 0; i < arr.length; i++) {
         var ref = gfRefFromNode(arr[i]);
-        if (ref) out.push(ref);
+        if (ref) { ref.pos = i; out.push(ref); }
       }
     } catch (e) { }
     return out;
@@ -181,9 +204,12 @@
       mime: mime,
       type: type,
       token: gfStr(o.token),
+      size: gfNum(o.size),
       img: gfStr(o.img),
       dl: gfStr(o.dl),
       urls: Array.isArray(o.urls) ? o.urls.slice() : [],
+      // Позиция в кумулятивном пуле — часть идентичности загрузки (см. gfDedupeKey).
+      pos: (typeof o.pos === 'number' && isFinite(o.pos) && o.pos >= 0) ? Math.floor(o.pos) : -1,
       isImage: (o.isImage === true) || (type === 1) || /^image\//i.test(mime)
     };
   }
@@ -367,6 +393,27 @@
   }
 
   // ===== СЕКЦИЯ 6: СКАЧИВАНИЕ И РАЗБОР ТЕЛА =====
+  // v2.1 (fix 403): индекс аккаунта из пути /u/<N>/ текущей вкладки. Cookie
+  // сессии в мультиаккаунте принадлежат аккаунту из URL, а download-URL
+  // вложения приходит без authuser — Google отдаёт 403 как «чужому» аккаунту.
+  // Нет индекса в пути (/app/…) — параметр не добавляем (аккаунт по умолчанию).
+  function gfAuthUserIndex() {
+    try {
+      if (typeof location === 'undefined' || !location) return '';
+      var m = /\/u\/(\d+)\//.exec(gfStr(location.pathname));
+      return m ? m[1] : '';
+    } catch (eAu) { return ''; }
+  }
+
+  function gfWithAuthUser(url) {
+    var u = gfStr(url);
+    if (!u) return u;
+    var idx = gfAuthUserIndex();
+    if (!idx) return u;
+    if (/([?&])authuser=/.test(u)) return u;
+    return u + (u.indexOf('?') === -1 ? '?' : '&') + 'authuser=' + idx;
+  }
+
   function gfFetchImpl() {
     var f = null;
     try { f = D ? D.originalFetch : null; } catch (eF) { f = null; }
@@ -413,6 +460,55 @@
     return { text: s.slice(0, keep) + suffix, truncated: true };
   }
 
+  // v2.3 (A3): тело текстового вложения читается ПОТОКОМ и обрывается ровно на
+  // GF_TEXT_CAP символах. Прежняя проверка content-length > 200 КБ отбрасывала
+  // файл целиком, хотя его текст помещался в кап. Фолбэк без ReadableStream —
+  // res.text() + gfCapText (поведение прежнего успешного пути, без too-large).
+  function gfReadTextCapped(res) {
+    return new Promise(function (resolve) {
+      var body = res && res.body;
+      var reader = (body && typeof body.getReader === 'function') ? body.getReader() : null;
+      var dec = (typeof TextDecoder === 'function') ? new TextDecoder('utf-8') : null;
+      if (!reader || !dec) {
+        if (!res || typeof res.text !== 'function') { resolve({ text: '', truncated: false, error: true }); return; }
+        try {
+          Promise.resolve(res.text()).then(function (raw) {
+            var capped = gfCapText(raw);
+            resolve({ text: capped.text, truncated: capped.truncated === true });
+          }, function () { resolve({ text: '', truncated: false, error: true }); });
+        } catch (eRead) { resolve({ text: '', truncated: false, error: true }); }
+        return;
+      }
+      var out = '';
+      var truncated = false;
+      var stopped = false;
+      function finish(error) {
+        if (stopped) return;
+        stopped = true;
+        resolve({ text: out, truncated: truncated, error: error === true });
+      }
+      function pump() {
+        reader.read().then(function (step) {
+          if (stopped) return;
+          if (!step || step.done) { finish(false); return; }
+          try { out += dec.decode(step.value, { stream: true }); } catch (eDec) { gfDiag('text-decode-error', {}); }
+          if (out.length >= GF_TEXT_CAP) {
+            truncated = out.length > GF_TEXT_CAP;
+            out = out.slice(0, GF_TEXT_CAP);
+            try { if (typeof reader.cancel === 'function') reader.cancel(); } catch (eCancel) { gfDiag('reader-cancel-error', {}); }
+            finish(false);
+            return;
+          }
+          pump();
+        }, function () {
+          // Обрыв потока на середине: отдаём то, что успели прочитать.
+          finish(out === '');
+        });
+      }
+      pump();
+    });
+  }
+
   // v2.0.37: текст PDF достаёт MAIN-хелпер core/pdf-bytes.js (pdf.js в
   // offscreen-документе). Если хелпера нет (другая сборка, jsdom-тесты) —
   // ветка PDF остаётся прежней: мета-секция без текста.
@@ -421,11 +517,82 @@
       typeof window.AiCmPdf.fromUrl === 'function';
   }
 
+  // Xray (Firefox): fetch из песочницы в MAIN не передаём — страница тянет файл
+  // своим window.fetch. Иначе промис fetch и байты приходят из чужого realm, а
+  // `buf instanceof ArrayBuffer` там ложен (мост отдавал pdf-invalid).
+  // Возвращённый MAIN-хелпером promise тоже забираем в свой realm явным .then:
+  // Promise.resolve(чужой_promise) вернул бы его же, и .then ушёл бы за границу.
+  function gfAdoptPdf(p) {
+    return new Promise(function (resolve, reject) {
+      try {
+        p.then(resolve, reject);
+      } catch (eThen) { reject(eThen); }
+    });
+  }
+
+  // ===== СЕКЦИЯ 6.4: САНИТАРИЯ ТЕКСТА PDF =====
+  // PDF умеет отдавать «текст», который на самом деле — байты CID-шрифта или
+  // таблицы ToUnicode. pdf.js (Chrome) и локальный разбор (Firefox) ошибаются
+  // по-разному, но мусор всегда узнаваем: replacement-символы U+FFFD, зона
+  // приватного использования, суррогаты, управляющие коды, и текст без единого
+  // пробела на килобайты. Такой текст нельзя класть в базу: он раздувает textLen
+  // и ломает экспорт. Ограничение действует для обоих браузеров — это общая
+  // страховка поверх любого источника текста.
+  var GF_PDF_BAD_MAX = 0.02;
+  var GF_PDF_SPACES_MIN = 0.005;
+
+  function gfSanitizePdfText(text) {
+    var src = gfStr(text);
+    if (!src) return { text: '', garbage: false };
+    var out = '';
+    var total = 0;
+    var bad = 0;
+    var spaces = 0;
+    var longestRun = 0;
+    var run = 0;
+    for (var i = 0; i < src.length; i++) {
+      var code = src.charCodeAt(i);
+      total++;
+      var isBlank = (code === 0x20 || code === 0x09 || code === 0x0A || code === 0x0D);
+      if (isBlank) { spaces++; run = 0; } else { run++; if (run > longestRun) longestRun = run; }
+      if (code === 0xFFFD || code === 0xFFFE || code === 0xFFFF ||
+          (code >= 0xD800 && code <= 0xDFFF) || (code >= 0xE000 && code <= 0xF8FF) ||
+          (code < 0x20 && !isBlank) || (code >= 0x7F && code <= 0x9F)) {
+        bad++;
+        continue;
+      }
+      out += src.charAt(i);
+    }
+    var garbage = (total > 0 && bad / total > GF_PDF_BAD_MAX) ||
+      (out.length >= 400 && spaces / total < GF_PDF_SPACES_MIN) ||
+      longestRun > 2000;
+    if (!garbage && out.length >= 400 && !gfPdfLooksLikeLanguage(out)) garbage = true;
+    if (garbage) return { text: '', garbage: true };
+    return { text: out, garbage: false };
+  }
+
+  // Текст должен содержать заметную долю «слов» с латиницей, кириллицей или
+  // цифрой (см. localTextLooksLikeLanguage в core/pdf-bytes.js): CID-мусор
+  // вида «ÿýþø» похож на текст, но слов языка в нём нет.
+  function gfPdfLooksLikeLanguage(text) {
+    var sample = text.length > 20000 ? text.slice(0, 20000) : text;
+    var words = sample.split(/\s+/);
+    var count = 0;
+    var plausible = 0;
+    for (var i = 0; i < words.length; i++) {
+      var w = words[i];
+      if (!w) continue;
+      count++;
+      if (/[a-zA-Zа-яА-ЯёЁ0-9]/.test(w)) plausible++;
+    }
+    if (count < 10) return true;
+    return plausible / count >= 0.5;
+  }
+
   function gfFetchPdfText(item, size) {
     var pdf = (typeof window !== 'undefined') ? window.AiCmPdf : null;
     var ref = (item && item.ref) || {};
-    return Promise.resolve(pdf.fromUrl(gfStr(item && item.url), {
-      fetch: gfFetchImpl(),
+    return gfAdoptPdf(pdf.fromUrl(gfStr(item && item.url), {
       credentials: 'include',
       name: gfStr(ref.name),
       maxBytes: GF_PDF_MAX,
@@ -433,7 +600,8 @@
       timeoutMs: GF_PDF_TIMEOUT_MS
     })).then(function (r) {
       var res = r || {};
-      var text = gfStr(res.text);
+      var clean = gfSanitizePdfText(gfStr(res.text));
+      var text = (res.ok === true) ? clean.text : '';
       return {
         ok: res.ok === true && text !== '',
         pdf: true,
@@ -441,7 +609,8 @@
         text: text,
         pages: gfNum(res.pages),
         truncated: res.truncated === true,
-        reason: gfStr(res.reason) || (res.ok === true ? '' : 'pdf-no-text')
+        reason: clean.garbage ? 'pdf-no-text'
+          : (gfStr(res.reason) || (res.ok === true && text !== '' ? '' : 'pdf-no-text'))
       };
     }, function (ePdf) {
       gfWarn('gemini:files:pdf', '[gemini-files] pdf.js не разобрал вложение:', ePdf);
@@ -513,8 +682,9 @@
           done({ ok: false, pdf: true, size: pdfSize, reason: 'pdf-no-text', text: '' });
           return;
         }
-        var clen = gfNum(gfHeader(res, 'content-length'));
-        if (clen > GF_BODY_MAX) { gfCancelBody(res, ctrl); done({ ok: false, reason: 'too-large', text: '' }); return; }
+        // v2.3 (A3): content-length больше не отбраковывает файл — размер тела
+        // не связан с объёмом текста (DOCX/PDF — контейнеры). Кап ставится на
+        // СИМВОЛЫ при чтении/разборе, а не на байты тела.
         if (gfIsDocx(item.ref)) {
           if (typeof res.arrayBuffer !== 'function') { done({ ok: false, reason: 'body-error', text: '' }); return; }
           var ab;
@@ -537,12 +707,12 @@
             done({ ok: false, reason: 'body-error', text: '' });
           });
         }
-        if (typeof res.text !== 'function') { done({ ok: false, reason: 'body-error', text: '' }); return; }
-        return Promise.resolve(res.text()).then(function (raw) {
-          var text = gfStr(raw);
-          if (text.length > GF_BODY_MAX) { done({ ok: false, reason: 'too-large', text: '' }); return; }
-          if (!text) { done({ ok: false, reason: 'empty-body', text: '' }); return; }
-          done({ ok: true, text: text, truncated: false });
+        // v2.3 (A3): текст читается потоком до GF_TEXT_CAP символов; прежний
+        // отброс по text.length > 200 КБ (это и был «лимит DOCX») снят.
+        return gfReadTextCapped(res).then(function (rr) {
+          var text = gfStr(rr && rr.text);
+          if (!text) { done({ ok: false, reason: (rr && rr.error) ? 'body-error' : 'empty-body', text: '' }); return; }
+          done({ ok: true, text: text, truncated: (rr && rr.truncated) === true });
         }, function (eBody) {
           gfWarn('gemini:files:body', '[gemini-files] тело вложения не прочитано:', eBody);
           done({ ok: false, reason: 'body-error', text: '' });
@@ -849,7 +1019,7 @@
       dk: ref.dk,
       chatId: cid,
       ref: ref,
-      url: ref.dl || ref.img,
+      url: gfWithAuthUser(ref.dl || ref.img),
       targets: {},
       result: null,
       state: 'queued',
@@ -866,7 +1036,6 @@
 
   function gfEnqueueTurnFiles(convId, msgId, files) {
     try {
-      if (!Array.isArray(files) || !files.length) return 0;
       var mid = gfStr(msgId);
       if (!mid) return 0;
       var cid = gfStr(convId) || gfCurrentConvId();
@@ -875,19 +1044,32 @@
         gfDiag('enqueue-skip', { reason: 'other-chat' });
         return 0;
       }
+      var list = Array.isArray(files) ? files : [];
       var m = gfMsgEntry(cid, mid);
       var oldRecs = m.recs || {};
       var refs = [];
       var seen = {};
-      for (var i = 0; i < files.length; i++) {
-        var ref = gfNormalizeRef(files[i]);
+      for (var i = 0; i < list.length; i++) {
+        var ref = gfNormalizeRef(list[i]);
         if (!ref) continue;
         ref.dk = gfDedupeKey(cid, ref);
+        // v2.4 (B): владелец в модуле больше не нужен — парсер отдаёт дельту
+        // пула, т.е. только файлы, загруженные в этом ходе. Дедуп остаётся
+        // внутри сообщения (одна секция на файл).
         if (seen[ref.dk]) continue;
         seen[ref.dk] = 1;
         refs.push(ref);
       }
-      if (!refs.length) return 0;
+      if (!refs.length) {
+        // v2.6: пустая дельта обязана снять прежние секции сообщения. Файл мог
+        // «переехать» в более старый ход, когда пришла следующая страница; без
+        // очистки в экспорте осталась бы вторая копия [FILE:]/[IMAGE:].
+        if (m.refs && m.refs.length) {
+          m.refs = [];
+          m.recs = {};
+        }
+        return 0;
+      }
       m.refs = refs;
       m.recs = {};
       var msgKey = gfMsgKey(cid, mid);
@@ -969,6 +1151,14 @@
   function gfReset(convId) {
     gfEpoch++;
     gfMsgs = {};
+    // Реестр пулов в парсере живёт отдельно — чистим и его, иначе после
+    // SPA-перехода файлы старого разговора остались бы «занятыми».
+    try {
+      if (typeof window !== 'undefined' && window.GeminiBatchexecuteParser &&
+          typeof window.GeminiBatchexecuteParser.__resetFileOwners === 'function') {
+        window.GeminiBatchexecuteParser.__resetFileOwners(convId);
+      }
+    } catch (eOwn) { gfWarn('reset', 'owner-registry', eOwn); }
     gfCharsByChat = {};
     gfQueue = [];
     gfQueueByKey = {};
