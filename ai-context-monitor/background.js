@@ -1,5 +1,13 @@
 (() => {
   var __getOwnPropNames = Object.getOwnPropertyNames;
+  var __esm = (fn, res, err) => function __init() {
+    if (err) throw err[0];
+    try {
+      return fn && (res = (0, fn[__getOwnPropNames(fn)[0]])(fn = 0)), res;
+    } catch (e) {
+      throw err = [e], e;
+    }
+  };
   var __commonJS = (cb, mod) => function __require() {
     try {
       return mod || (0, cb[__getOwnPropNames(cb)[0]])((mod = { exports: {} }).exports, mod), mod.exports;
@@ -8,27 +16,142 @@
     }
   };
 
+  // ../utils/platform.js
+  function aiCmIsFirefox() {
+    try {
+      var api = typeof browser !== "undefined" && browser && browser.runtime ? browser : typeof chrome !== "undefined" && chrome && chrome.runtime ? chrome : null;
+      if (!api) return false;
+      if (api.runtime && typeof api.runtime.getURL === "function") {
+        return String(api.runtime.getURL("")).indexOf("moz-extension://") === 0;
+      }
+      if (typeof api.getURL === "function") {
+        return String(api.getURL("")).indexOf("moz-extension://") === 0;
+      }
+      return false;
+    } catch (e) {
+      return false;
+    }
+  }
+  var init_platform = __esm({
+    "../utils/platform.js"() {
+    }
+  });
+
+  // ../utils/debug.js
+  function __aiCmStringifyArg(a) {
+    if (typeof a === "string") return a;
+    try {
+      var s = JSON.stringify(a);
+      if (s === void 0) return String(a);
+      if (s.length > 500) s = s.slice(0, 500) + "\u2026";
+      return s;
+    } catch (e) {
+      return String(a);
+    }
+  }
+  function __aiCmPushLogRing(line) {
+    try {
+      __aiCmLogRing.push(line);
+      if (__aiCmLogRing.length > __aiCmLogRingMax) __aiCmLogRing.shift();
+    } catch (e) {
+    }
+  }
+  function debugLog(level) {
+    var args = Array.prototype.slice.call(arguments, 1);
+    try {
+      var line = args.map(__aiCmStringifyArg).join(" ");
+      __aiCmPushLogRing(line);
+    } catch (e) {
+    }
+    if (level === "error" || level === "warn") {
+      (console[level] || console.log).apply(console, args);
+      return;
+    }
+    var enabled = DEBUG;
+    try {
+      if (typeof window !== "undefined" && window.__aiCmDebugLogs === true) enabled = true;
+    } catch (e) {
+    }
+    if (enabled) {
+      (console[level] || console.log).apply(console, args);
+    }
+  }
+  function swallow(error, tag) {
+    try {
+      if (typeof debugLog !== "function") return;
+      debugLog("error", "[swallow][" + (tag || "unlabeled") + "]", error);
+    } catch (eSwallow) {
+    }
+  }
+  function aiCmDiagOn() {
+    try {
+      if (typeof sessionStorage !== "undefined" && sessionStorage && sessionStorage.getItem("aiCmDebug") === "1") return true;
+    } catch (eSess) {
+    }
+    try {
+      if (typeof window !== "undefined" && window && window.__aiCmDebugLogs === true) return true;
+    } catch (eWin) {
+    }
+    return false;
+  }
+  function aiCmDiagLine(tag, fields) {
+    if (!aiCmDiagOn()) return false;
+    try {
+      var parts = [];
+      var f = fields || {};
+      for (var k in f) {
+        if (!Object.prototype.hasOwnProperty.call(f, k)) continue;
+        var v = f[k];
+        parts.push(k + "=" + (v === void 0 || v === null ? "(\u043D\u0435\u0442)" : String(v)));
+      }
+      console.log("[AI CM][diag] " + tag + " " + parts.join(" "));
+    } catch (eLine) {
+    }
+    return true;
+  }
+  function swallowSoft(error, tag) {
+    var label = tag || "unlabeled";
+    var msg = "";
+    try {
+      msg = error && error.message ? String(error.message) : String(error);
+    } catch (eSoftMsg) {
+      msg = "(\u043D\u0435\u0447\u0438\u0442\u0430\u0435\u043C\u0430\u044F \u043E\u0448\u0438\u0431\u043A\u0430)";
+    }
+    try {
+      if (typeof __aiCmPushLogRing === "function") __aiCmPushLogRing("[swallow-soft][" + label + "] " + msg);
+    } catch (eSoftRing) {
+      return void 0;
+    }
+    try {
+      if (typeof aiCmDiagLine !== "function") return;
+      aiCmDiagLine("swallow-soft", { tag: label, err: error });
+    } catch (eSoftDiag) {
+      return void 0;
+    }
+  }
+  var DEBUG, __aiCmLogRing, __aiCmLogRingMax;
+  var init_debug = __esm({
+    "../utils/debug.js"() {
+      DEBUG = false;
+      __aiCmLogRing = [];
+      __aiCmLogRingMax = 200;
+      try {
+        if (typeof window !== "undefined") window.__aiCmSwallow = swallow;
+      } catch (eSwallowExport) {
+      }
+      try {
+        if (typeof window !== "undefined") window.__aiCmSwallowSoft = swallowSoft;
+      } catch (eSoftExport) {
+        __aiCmPushLogRing("[swallow-soft-export] " + eSoftExport);
+      }
+    }
+  });
+
   // entry-background.js
   var require_entry_background = __commonJS({
     "entry-background.js"(exports, module) {
-      function aiCmIsFirefox() {
-        try {
-          var api = typeof browser !== "undefined" && browser && browser.runtime ? browser : typeof chrome !== "undefined" && chrome && chrome.runtime ? chrome : null;
-          if (!api) return false;
-          if (api.runtime && typeof api.runtime.getURL === "function") {
-            return String(api.runtime.getURL("")).indexOf("moz-extension://") === 0;
-          }
-          if (typeof api.getURL === "function") {
-            return String(api.getURL("")).indexOf("moz-extension://") === 0;
-          }
-          return false;
-        } catch (e) {
-          return false;
-        }
-      }
-      if (typeof module !== "undefined" && module.exports) {
-        module.exports = { aiCmIsFirefox };
-      }
+      init_platform();
+      init_debug();
       (function() {
         var FLOOR_KEY_PREFIX = "ai-cm-gemini-floor";
         function floorStorageKey(convId, parserVersion) {
@@ -86,7 +209,7 @@
             try {
               storage.setItem(key, val);
             } catch (e) {
-              swallowSoft(e, "gemini-utils:saveFloor");
+              swallowSoft2(e, "gemini-utils:saveFloor");
             }
           }
         }
@@ -985,7 +1108,7 @@
               try {
                 parsedLine = JSON.parse(ln);
               } catch (e) {
-                swallowSoft(e, "gemini-utils:streamParseFrames-line");
+                swallowSoft2(e, "gemini-utils:streamParseFrames-line");
                 continue;
               }
               if (!Array.isArray(parsedLine)) continue;
@@ -1006,7 +1129,7 @@
               }
             }
           } catch (e) {
-            swallowSoft(e, "gemini-utils:streamParseFrames-outer");
+            swallowSoft2(e, "gemini-utils:streamParseFrames-outer");
           }
           return frames;
         }
@@ -1942,25 +2065,7 @@
           warn("onConnect-register", eListen);
         }
       })(typeof self !== "undefined" ? self : globalThis);
-      var DEBUG = false;
       var lastGoodModel = "";
-      function debugLog(level) {
-        var args = Array.prototype.slice.call(arguments, 1);
-        if (level === "error" || level === "warn") {
-          (console[level] || console.log).apply(console, args);
-          return;
-        }
-        if (DEBUG) {
-          (console[level] || console.log).apply(console, args);
-        }
-      }
-      function swallow(error, tag) {
-        try {
-          if (typeof debugLog !== "function") return;
-          debugLog("error", "[swallow][" + (tag || "unlabeled") + "]", error);
-        } catch (eSwallow) {
-        }
-      }
       function aiCmI18nMessage(key, fallback, substitutions) {
         try {
           if (typeof chrome !== "undefined" && chrome.i18n && typeof chrome.i18n.getMessage === "function") {
@@ -1979,7 +2084,7 @@
           chrome.storage.local.set({ aiCmLastSwStart: "COLD_START@" + aiCmSwBootTs });
         }
       } catch (eCsBoot) {
-        swallowSoft(eCsBoot, "background:coldStartMarker");
+        swallowSoft2(eCsBoot, "background:coldStartMarker");
       }
       try {
         if (chrome.storage.session && chrome.storage.session.setAccessLevel) {
@@ -2137,7 +2242,7 @@
             await registerSafe("ai-cm-page-intercept", {
               id: "ai-cm-page-intercept",
               matches: ["https://chatgpt.com/*"],
-              js: ["utils/debug.js", "utils/chatgpt-conversation-parser.js", "utils/intercept-common.js", "core/page-intercept.js"],
+              js: ["utils/debug.js", "utils/chatgpt-conversation-parser.js", "core/page-intercept.js"],
               runAt: "document_start",
               world: "MAIN",
               allFrames: false
@@ -2178,7 +2283,7 @@
             await registerSafe("ai-cm-claude-intercept", {
               id: "ai-cm-claude-intercept",
               matches: ["https://claude.ai/*"],
-              js: ["utils/debug.js", "utils/intercept-common.js", "core/claude-intercept.js"],
+              js: ["utils/debug.js", "core/claude-intercept.js"],
               runAt: "document_start",
               world: "MAIN",
               allFrames: false
@@ -2189,7 +2294,7 @@
             await registerSafe("ai-cm-perplexity-intercept", {
               id: "ai-cm-perplexity-intercept",
               matches: ["https://www.perplexity.ai/*", "https://perplexity.ai/*"],
-              js: ["utils/debug.js", "utils/perplexity-parser.js", "utils/intercept-common.js", "core/perplexity-intercept.js"],
+              js: ["utils/debug.js", "utils/perplexity-parser.js", "core/perplexity-intercept.js"],
               runAt: "document_start",
               world: "MAIN",
               allFrames: false
@@ -2200,27 +2305,29 @@
             await registerSafe("ai-cm-google-search-intercept", {
               id: "ai-cm-google-search-intercept",
               matches: ["https://www.google.com/*"],
-              js: ["utils/debug.js", "utils/google-search-folwr-parser.js", "utils/intercept-common.js", "core/google-search-intercept.js"],
+              js: ["utils/debug.js", "utils/google-search-folwr-parser.js", "core/google-search-intercept.js"],
               runAt: "document_start",
               world: "MAIN",
               allFrames: false
             });
             console.log("AI Context Monitor: \u043F\u0435\u0440\u0435\u0445\u0432\u0430\u0442\u0447\u0438\u043A Google Search AI \u0437\u0430\u0440\u0435\u0433\u0438\u0441\u0442\u0440\u0438\u0440\u043E\u0432\u0430\u043D (\u043C\u0438\u0440 \u0441\u0430\u0439\u0442\u0430, document_start)");
           }
-          if (ids.indexOf("ai-cm-qwen-intercept-v3") === -1) {
+          if (ids.indexOf("ai-cm-qwen-intercept-v4") === -1) {
             try {
-              await chrome.scripting.unregisterContentScripts({ ids: ["ai-cm-qwen-intercept", "ai-cm-qwen-intercept-v2"] });
+              await chrome.scripting.unregisterContentScripts({
+                ids: ["ai-cm-qwen-intercept", "ai-cm-qwen-intercept-v2", "ai-cm-qwen-intercept-v3"]
+              });
             } catch (eUnregQwen) {
             }
-            await registerSafe("ai-cm-qwen-intercept-v3", {
-              id: "ai-cm-qwen-intercept-v3",
+            await registerSafe("ai-cm-qwen-intercept-v4", {
+              id: "ai-cm-qwen-intercept-v4",
               matches: ["https://chat.qwen.ai/*"],
-              js: ["utils/debug.js", "utils/stream-frames.js", "core/qwen-pagination.js", "core/qwen-files.js", "core/qwen-intercept.js"],
+              js: ["utils/debug.js", "core/qwen-pagination.js", "core/qwen-files.js", "core/qwen-intercept.js"],
               runAt: "document_start",
               world: "MAIN",
               allFrames: false
             });
-            console.log("AI Context Monitor: \u043F\u0435\u0440\u0435\u0445\u0432\u0430\u0442\u0447\u0438\u043A Qwen (v3, \u043F\u0430\u0433\u0438\u043D\u0430\u0446\u0438\u044F \u0438\u0441\u0442\u043E\u0440\u0438\u0438 + \u0432\u043B\u043E\u0436\u0435\u043D\u0438\u044F) \u0437\u0430\u0440\u0435\u0433\u0438\u0441\u0442\u0440\u0438\u0440\u043E\u0432\u0430\u043D (\u043C\u0438\u0440 \u0441\u0430\u0439\u0442\u0430, document_start)");
+            console.log("AI Context Monitor: \u043F\u0435\u0440\u0435\u0445\u0432\u0430\u0442\u0447\u0438\u043A Qwen (v4, ESM-\u0431\u0430\u043D\u0434\u043B \u043A\u0430\u0434\u0440\u043E\u0432 + \u043F\u0430\u0433\u0438\u043D\u0430\u0446\u0438\u044F + \u0432\u043B\u043E\u0436\u0435\u043D\u0438\u044F) \u0437\u0430\u0440\u0435\u0433\u0438\u0441\u0442\u0440\u0438\u0440\u043E\u0432\u0430\u043D (\u043C\u0438\u0440 \u0441\u0430\u0439\u0442\u0430, document_start)");
           }
           if (ids.indexOf("ai-cm-aistudio-intercept-v2") === -1) {
             try {
@@ -2478,7 +2585,7 @@
           if (!chrome.storage || !chrome.storage.local || typeof chrome.storage.local.remove !== "function") return;
           chrome.storage.local.remove(AI_CM_BYOK_LEGACY_KEYS);
         } catch (ePurge) {
-          swallowSoft(ePurge, "background:purgeLegacyByokKeys");
+          swallowSoft2(ePurge, "background:purgeLegacyByokKeys");
         }
       }
       function aiCmMigrateByokToSession() {
@@ -2494,13 +2601,13 @@
                 chrome.storage.session.set(patch);
               }
             } catch (eSet) {
-              swallowSoft(eSet, "background:migrateByok-sessionWrite");
+              swallowSoft2(eSet, "background:migrateByok-sessionWrite");
             }
             aiCmPurgeLegacyByokKeys();
             console.log("[AI CM][byok] migrated plaintext\u2192session");
           });
         } catch (eMig) {
-          swallowSoft(eMig, "background:migrateByok-sessionRead");
+          swallowSoft2(eMig, "background:migrateByok-sessionRead");
         }
       }
       function aiCmSessionByokGet() {
@@ -2543,7 +2650,7 @@
             chrome.storage.session.set(patch);
           }
         } catch (eSet) {
-          swallowSoft(eSet, "background:readByokApiKey-sessionWrite");
+          swallowSoft2(eSet, "background:readByokApiKey-sessionWrite");
         }
         aiCmPurgeLegacyByokKeys();
         console.log("[AI CM][byok] migrated plaintext\u2192session");
@@ -2588,13 +2695,12 @@
       function aiCmLatchWrite(service, convId, fired) {
         return new Promise(function(resolve) {
           try {
-            let finish2 = function(ok) {
+            let finish = function(ok) {
               if (!done) {
                 done = true;
                 resolve(ok);
               }
             };
-            var finish = finish2;
             if (!service || !convId) {
               resolve(false);
               return;
@@ -2613,7 +2719,7 @@
               var patch = {};
               patch[k] = 1;
               chrome.storage.session.set(patch, function() {
-                finish2(true);
+                finish(true);
               });
             } else {
               if (typeof chrome.storage.session.remove !== "function") {
@@ -2621,7 +2727,7 @@
                 return;
               }
               chrome.storage.session.remove([k], function() {
-                finish2(true);
+                finish(true);
               });
             }
           } catch (eWrite) {
@@ -2876,7 +2982,7 @@
           if (touched) aiCmPruneHistory();
         });
       }
-      function swallowSoft(error, tag) {
+      function swallowSoft2(error, tag) {
         try {
           if (typeof debugLog !== "function") return;
           if (!aiCmHistWinDebugOn) return;

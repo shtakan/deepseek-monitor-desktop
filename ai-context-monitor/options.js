@@ -6,6 +6,14 @@
     if (typeof require !== "undefined") return require.apply(this, arguments);
     throw Error('Dynamic require of "' + x + '" is not supported');
   });
+  var __esm = (fn, res, err) => function __init() {
+    if (err) throw err[0];
+    try {
+      return fn && (res = (0, fn[__getOwnPropNames(fn)[0]])(fn = 0)), res;
+    } catch (e) {
+      throw err = [e], e;
+    }
+  };
   var __commonJS = (cb, mod) => function __require2() {
     try {
       return mod || (0, cb[__getOwnPropNames(cb)[0]])((mod = { exports: {} }).exports, mod), mod.exports;
@@ -14,9 +22,73 @@
     }
   };
 
+  // ../utils/buildReferenceText.js
+  function cleanInline(s) {
+    s = s.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, "$1");
+    s = s.replace(/(\*\*|__)/g, "");
+    s = s.replace(/(?<![*\w])\*([^*\n]+)\*(?![\w*])/g, "$1");
+    s = s.replace(/(?<![\w_])\_([^_\n]+)\_(?![\w_])/g, "$1");
+    s = s.replace(/`/g, "");
+    return s;
+  }
+  function cleanLine(line) {
+    var s = String(line == null ? "" : line);
+    s = s.replace(/^#{1,6}\s+/, "");
+    s = s.replace(/^>\s?/, "");
+    s = s.replace(/^[-*+]\s+/, "");
+    return s;
+  }
+  function cleanText(text) {
+    var lines = String(text).split("\n");
+    var out = [];
+    for (var i = 0; i < lines.length; i++) {
+      var line = lines[i];
+      var trimmed = line.trim();
+      if (/^-{3,}$/.test(trimmed)) continue;
+      out.push(cleanInline(cleanLine(line)));
+    }
+    return out.join("\n");
+  }
+  function buildReferenceText(messages) {
+    var list = Array.isArray(messages) ? messages : [];
+    var parts = [];
+    for (var i = 0; i < list.length; i++) {
+      var msg = list[i] || {};
+      parts.push(cleanText(msg.text == null ? "" : msg.text));
+    }
+    return parts.join("\n\n");
+  }
+  var init_buildReferenceText = __esm({
+    "../utils/buildReferenceText.js"() {
+    }
+  });
+
+  // ../utils/platform.js
+  function aiCmIsFirefox() {
+    try {
+      var api = typeof browser !== "undefined" && browser && browser.runtime ? browser : typeof chrome !== "undefined" && chrome && chrome.runtime ? chrome : null;
+      if (!api) return false;
+      if (api.runtime && typeof api.runtime.getURL === "function") {
+        return String(api.runtime.getURL("")).indexOf("moz-extension://") === 0;
+      }
+      if (typeof api.getURL === "function") {
+        return String(api.getURL("")).indexOf("moz-extension://") === 0;
+      }
+      return false;
+    } catch (e) {
+      return false;
+    }
+  }
+  var init_platform = __esm({
+    "../utils/platform.js"() {
+    }
+  });
+
   // entry-options.js
   var require_entry_options = __commonJS({
     "entry-options.js"(exports, module) {
+      init_buildReferenceText();
+      init_platform();
       (function() {
         "use strict";
         var BINDINGS = [
@@ -1132,46 +1204,6 @@
       })();
       (function() {
         "use strict";
-        function cleanInline(s) {
-          s = s.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, "$1");
-          s = s.replace(/(\*\*|__)/g, "");
-          s = s.replace(/(?<![*\w])\*([^*\n]+)\*(?![\w*])/g, "$1");
-          s = s.replace(/(?<![\w_])\_([^_\n]+)\_(?![\w_])/g, "$1");
-          s = s.replace(/`/g, "");
-          return s;
-        }
-        function cleanLine(line) {
-          var s = String(line == null ? "" : line);
-          s = s.replace(/^#{1,6}\s+/, "");
-          s = s.replace(/^>\s?/, "");
-          s = s.replace(/^[-*+]\s+/, "");
-          return s;
-        }
-        function cleanText(text) {
-          var lines = String(text).split("\n");
-          var out = [];
-          for (var i = 0; i < lines.length; i++) {
-            var line = lines[i];
-            var trimmed = line.trim();
-            if (/^-{3,}$/.test(trimmed)) continue;
-            out.push(cleanInline(cleanLine(line)));
-          }
-          return out.join("\n");
-        }
-        function buildReferenceText(messages) {
-          var list = Array.isArray(messages) ? messages : [];
-          var parts = [];
-          for (var i = 0; i < list.length; i++) {
-            var msg = list[i] || {};
-            parts.push(cleanText(msg.text == null ? "" : msg.text));
-          }
-          return parts.join("\n\n");
-        }
-        if (typeof module !== "undefined" && module.exports) module.exports = buildReferenceText;
-        if (typeof window !== "undefined") window.buildReferenceText = buildReferenceText;
-      })();
-      (function() {
-        "use strict";
         function aiCmI18nMessage2(key, fallback, substitutions) {
           try {
             if (typeof chrome !== "undefined" && chrome.i18n && typeof chrome.i18n.getMessage === "function") {
@@ -1278,16 +1310,7 @@
           return true;
         }
         function renderReferenceText(list) {
-          if (typeof window !== "undefined" && typeof window.buildReferenceText === "function") {
-            return window.buildReferenceText(list);
-          }
-          if (typeof __require === "function") {
-            try {
-              return __require("./buildReferenceText.js")(list);
-            } catch (e) {
-            }
-          }
-          return null;
+          return buildReferenceText(list);
         }
         function renderReferenceTextWithRoleMarkers(list) {
           var src = Array.isArray(list) ? list : [];
@@ -1567,24 +1590,6 @@
         if (typeof module !== "undefined" && module.exports) module.exports = Api;
         if (typeof window !== "undefined") window.AiCmExportBuilders = Api;
       })();
-      function aiCmIsFirefox() {
-        try {
-          var api = typeof browser !== "undefined" && browser && browser.runtime ? browser : typeof chrome !== "undefined" && chrome && chrome.runtime ? chrome : null;
-          if (!api) return false;
-          if (api.runtime && typeof api.runtime.getURL === "function") {
-            return String(api.runtime.getURL("")).indexOf("moz-extension://") === 0;
-          }
-          if (typeof api.getURL === "function") {
-            return String(api.getURL("")).indexOf("moz-extension://") === 0;
-          }
-          return false;
-        } catch (e) {
-          return false;
-        }
-      }
-      if (typeof module !== "undefined" && module.exports) {
-        module.exports = { aiCmIsFirefox };
-      }
       console.log("AI Context Monitor: \u041D\u0430\u0441\u0442\u0440\u043E\u0439\u043A\u0438 \u0437\u0430\u0433\u0440\u0443\u0436\u0435\u043D\u044B");
       var siteEl = document.getElementById("stat-site");
       var modelEl = document.getElementById("stat-model");
@@ -1730,7 +1735,7 @@
       }
       function aiCmLoadByokKey() {
         try {
-          let onSession2 = function(data) {
+          let onSession = function(data) {
             if (handled) return;
             handled = true;
             var key = data ? data[AI_CM_BYOK_SESSION_KEY] : "";
@@ -1756,15 +1761,14 @@
               aiCmPopupDiagLine("aiCmLoadByokKey", { err: String(eLeg) });
             }
           };
-          var onSession = onSession2;
           if (!chrome.storage || !chrome.storage.session || typeof chrome.storage.session.get !== "function") {
             aiCmRenderApiKeyStatus(false);
             return;
           }
           var handled = false;
-          var maybePromise = chrome.storage.session.get([AI_CM_BYOK_SESSION_KEY], onSession2);
+          var maybePromise = chrome.storage.session.get([AI_CM_BYOK_SESSION_KEY], onSession);
           if (maybePromise && typeof maybePromise.then === "function") {
-            maybePromise.then(onSession2, function() {
+            maybePromise.then(onSession, function() {
               if (!handled) {
                 handled = true;
                 aiCmRenderApiKeyStatus(false);

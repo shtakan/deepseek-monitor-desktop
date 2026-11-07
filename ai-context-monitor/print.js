@@ -1,5 +1,13 @@
 (() => {
   var __getOwnPropNames = Object.getOwnPropertyNames;
+  var __esm = (fn, res, err) => function __init() {
+    if (err) throw err[0];
+    try {
+      return fn && (res = (0, fn[__getOwnPropNames(fn)[0]])(fn = 0)), res;
+    } catch (e) {
+      throw err = [e], e;
+    }
+  };
   var __commonJS = (cb, mod) => function __require() {
     try {
       return mod || (0, cb[__getOwnPropNames(cb)[0]])((mod = { exports: {} }).exports, mod), mod.exports;
@@ -8,9 +16,149 @@
     }
   };
 
+  // ../utils/markdown.js
+  function escapeHtml(s) {
+    return String(s == null ? "" : s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  }
+  function inline(text) {
+    var src = escapeHtml(text);
+    return src.replace(
+      /(`[^`\n]+`)|(\*{2}[^*\n]+\*{2})|(\*[^*\s\n][^*\n]*\*)|(_[^_\s\n][^_\n]*_)|(\[[^\]]+\]\(([^)\s]+)\))/g,
+      function(m, code, bold, italic, underline, link, url) {
+        if (code) return "<code>" + code.slice(1, -1) + "</code>";
+        if (bold) return "<strong>" + bold.slice(2, -2) + "</strong>";
+        if (italic) return "<em>" + italic.slice(1, -1) + "</em>";
+        if (underline) return "<em>" + underline.slice(1, -1) + "</em>";
+        if (link) {
+          var u = String(url || "").trim();
+          if (/^(https?:|mailto:|#|\/)/i.test(u)) {
+            var label = link.slice(1, link.indexOf("]("));
+            return '<a href="' + escapeHtml(u) + '">' + label + "</a>";
+          }
+          return m;
+        }
+        return m;
+      }
+    );
+  }
+  function isTableSeparator(line) {
+    if (!line) return false;
+    var c = line.charAt(0);
+    if (c !== "|" && c !== "-" && c !== ":") return false;
+    return /^[\s|:—-]+$/.test(line) && /-/.test(line);
+  }
+  function parseRow(line, tag) {
+    var s = String(line || "").trim();
+    if (s.charAt(0) === "|") s = s.slice(1);
+    if (s.charAt(s.length - 1) === "|") s = s.slice(0, -1);
+    var cells = s.split("|");
+    var out = "<tr>";
+    for (var c = 0; c < cells.length; c++) {
+      out += "<" + tag + ">" + inline(cells[c].trim()) + "</" + tag + ">";
+    }
+    return out + "</tr>";
+  }
+  function renderTable(lines, i) {
+    var head = parseRow(lines[i], "th");
+    var body = [];
+    var j = i + 2;
+    while (j < lines.length) {
+      var t = (lines[j] || "").trim();
+      if (t === "" || t.indexOf("|") === -1) break;
+      body.push(parseRow(lines[j], "td"));
+      j++;
+    }
+    return {
+      html: "<table><thead>" + head + "</thead>" + (body.length ? "<tbody>" + body.join("") + "</tbody>" : "") + "</table>",
+      nextIndex: j
+    };
+  }
+  function render(md) {
+    if (typeof md !== "string") return "";
+    var lines = String(md).replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
+    var out = [];
+    var i = 0;
+    while (i < lines.length) {
+      var trimmed = (lines[i] || "").trim();
+      if (FENCE_RE.test(trimmed)) {
+        var lang = trimmed.slice(3).trim();
+        var codeLines = [];
+        i++;
+        while (i < lines.length && !FENCE_RE.test((lines[i] || "").trim())) {
+          codeLines.push(lines[i]);
+          i++;
+        }
+        i++;
+        out.push("<pre" + (lang ? ' data-lang="' + escapeHtml(lang) + '"' : "") + "><code>" + escapeHtml(codeLines.join("\n")) + "</code></pre>");
+        continue;
+      }
+      var hm = trimmed.match(HEADING_RE);
+      if (hm) {
+        var level = hm[1].length;
+        out.push("<h" + level + ">" + inline(hm[2]) + "</h" + level + ">");
+        i++;
+        continue;
+      }
+      if (trimmed.charAt(0) === "|" && isTableSeparator((lines[i + 1] || "").trim())) {
+        var tbl = renderTable(lines, i);
+        out.push(tbl.html);
+        i = tbl.nextIndex;
+        continue;
+      }
+      var lm = trimmed.match(LIST_RE);
+      if (lm) {
+        var ordered = /\d+[.)]/.test(lm[1]);
+        var tag = ordered ? "ol" : "ul";
+        var items = [];
+        while (i < lines.length) {
+          var t2 = (lines[i] || "").trim();
+          if (t2 === "") break;
+          var m2 = t2.match(LIST_RE);
+          if (!m2) break;
+          items.push("<li>" + inline(m2[2]) + "</li>");
+          i++;
+        }
+        out.push("<" + tag + ">" + items.join("") + "</" + tag + ">");
+        continue;
+      }
+      if (trimmed === "") {
+        i++;
+        continue;
+      }
+      var paraLines = [lines[i]];
+      i++;
+      while (i < lines.length) {
+        var t3 = (lines[i] || "").trim();
+        if (t3 === "") break;
+        if (HEADING_RE.test(t3) || FENCE_RE.test(t3)) break;
+        if (LIST_RE.test(t3)) break;
+        if (t3.charAt(0) === "|" && isTableSeparator((lines[i + 1] || "").trim())) break;
+        paraLines.push(lines[i]);
+        i++;
+      }
+      out.push("<p>" + inline(paraLines.join("\n")) + "</p>");
+    }
+    return out.join("\n");
+  }
+  var LIST_RE, HEADING_RE, FENCE_RE, MarkdownRenderer, markdown_default;
+  var init_markdown = __esm({
+    "../utils/markdown.js"() {
+      LIST_RE = /^([-*+]|\d+[.)])\s+(.*)$/;
+      HEADING_RE = /^(#{1,6})\s+(.*)$/;
+      FENCE_RE = /^```/;
+      MarkdownRenderer = {
+        render,
+        inline,
+        escapeHtml
+      };
+      markdown_default = MarkdownRenderer;
+    }
+  });
+
   // entry-print.js
   var require_entry_print = __commonJS({
     "entry-print.js"(exports, module) {
+      init_markdown();
       (function() {
         "use strict";
         var BINDINGS = [
@@ -70,142 +218,6 @@
             bindings: BINDINGS
           };
         }
-      })();
-      (function() {
-        "use strict";
-        function escapeHtml(s) {
-          return String(s == null ? "" : s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
-        }
-        function inline(text) {
-          var src = escapeHtml(text);
-          return src.replace(
-            /(`[^`\n]+`)|(\*{2}[^*\n]+\*{2})|(\*[^*\s\n][^*\n]*\*)|(_[^_\s\n][^_\n]*_)|(\[[^\]]+\]\(([^)\s]+)\))/g,
-            function(m, code, bold, italic, underline, link, url) {
-              if (code) return "<code>" + code.slice(1, -1) + "</code>";
-              if (bold) return "<strong>" + bold.slice(2, -2) + "</strong>";
-              if (italic) return "<em>" + italic.slice(1, -1) + "</em>";
-              if (underline) return "<em>" + underline.slice(1, -1) + "</em>";
-              if (link) {
-                var u = String(url || "").trim();
-                if (/^(https?:|mailto:|#|\/)/i.test(u)) {
-                  var label = link.slice(1, link.indexOf("]("));
-                  return '<a href="' + escapeHtml(u) + '">' + label + "</a>";
-                }
-                return m;
-              }
-              return m;
-            }
-          );
-        }
-        function isTableSeparator(line) {
-          if (!line) return false;
-          var c = line.charAt(0);
-          if (c !== "|" && c !== "-" && c !== ":") return false;
-          return /^[\s|:—-]+$/.test(line) && /-/.test(line);
-        }
-        function parseRow(line, tag) {
-          var s = String(line || "").trim();
-          if (s.charAt(0) === "|") s = s.slice(1);
-          if (s.charAt(s.length - 1) === "|") s = s.slice(0, -1);
-          var cells = s.split("|");
-          var out = "<tr>";
-          for (var c = 0; c < cells.length; c++) {
-            out += "<" + tag + ">" + inline(cells[c].trim()) + "</" + tag + ">";
-          }
-          return out + "</tr>";
-        }
-        function renderTable(lines, i) {
-          var head = parseRow(lines[i], "th");
-          var body = [];
-          var j = i + 2;
-          while (j < lines.length) {
-            var t = (lines[j] || "").trim();
-            if (t === "" || t.indexOf("|") === -1) break;
-            body.push(parseRow(lines[j], "td"));
-            j++;
-          }
-          return {
-            html: "<table><thead>" + head + "</thead>" + (body.length ? "<tbody>" + body.join("") + "</tbody>" : "") + "</table>",
-            nextIndex: j
-          };
-        }
-        var LIST_RE = /^([-*+]|\d+[.)])\s+(.*)$/;
-        var HEADING_RE = /^(#{1,6})\s+(.*)$/;
-        var FENCE_RE = /^```/;
-        function renderMarkdown(md) {
-          if (typeof md !== "string") return "";
-          var lines = String(md).replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
-          var out = [];
-          var i = 0;
-          while (i < lines.length) {
-            var trimmed = (lines[i] || "").trim();
-            if (FENCE_RE.test(trimmed)) {
-              var lang = trimmed.slice(3).trim();
-              var codeLines = [];
-              i++;
-              while (i < lines.length && !FENCE_RE.test((lines[i] || "").trim())) {
-                codeLines.push(lines[i]);
-                i++;
-              }
-              i++;
-              out.push("<pre" + (lang ? ' data-lang="' + escapeHtml(lang) + '"' : "") + "><code>" + escapeHtml(codeLines.join("\n")) + "</code></pre>");
-              continue;
-            }
-            var hm = trimmed.match(HEADING_RE);
-            if (hm) {
-              var level = hm[1].length;
-              out.push("<h" + level + ">" + inline(hm[2]) + "</h" + level + ">");
-              i++;
-              continue;
-            }
-            if (trimmed.charAt(0) === "|" && isTableSeparator((lines[i + 1] || "").trim())) {
-              var tbl = renderTable(lines, i);
-              out.push(tbl.html);
-              i = tbl.nextIndex;
-              continue;
-            }
-            var lm = trimmed.match(LIST_RE);
-            if (lm) {
-              var ordered = /\d+[.)]/.test(lm[1]);
-              var tag = ordered ? "ol" : "ul";
-              var items = [];
-              while (i < lines.length) {
-                var t2 = (lines[i] || "").trim();
-                if (t2 === "") break;
-                var m2 = t2.match(LIST_RE);
-                if (!m2) break;
-                items.push("<li>" + inline(m2[2]) + "</li>");
-                i++;
-              }
-              out.push("<" + tag + ">" + items.join("") + "</" + tag + ">");
-              continue;
-            }
-            if (trimmed === "") {
-              i++;
-              continue;
-            }
-            var paraLines = [lines[i]];
-            i++;
-            while (i < lines.length) {
-              var t3 = (lines[i] || "").trim();
-              if (t3 === "") break;
-              if (HEADING_RE.test(t3) || FENCE_RE.test(t3)) break;
-              if (LIST_RE.test(t3)) break;
-              if (t3.charAt(0) === "|" && isTableSeparator((lines[i + 1] || "").trim())) break;
-              paraLines.push(lines[i]);
-              i++;
-            }
-            out.push("<p>" + inline(paraLines.join("\n")) + "</p>");
-          }
-          return out.join("\n");
-        }
-        var MarkdownRenderer = {
-          render: renderMarkdown,
-          inline,
-          escapeHtml
-        };
-        if (typeof module !== "undefined" && module.exports) module.exports = MarkdownRenderer;
-        if (typeof window !== "undefined") window.MarkdownRenderer = MarkdownRenderer;
       })();
       (function() {
         "use strict";
@@ -272,21 +284,34 @@
           }
           return html;
         }
-        function render(history) {
+        function render2(history) {
           var messages = history && Array.isArray(history.messages) ? history.messages : [];
           var header = buildHeader(history);
           var body = messages.length ? buildMessages(messages) : "<p>" + escapeText(aiCmI18nMessage("print_empty_body", "\u0418\u0441\u0442\u043E\u0440\u0438\u044F \u043F\u0443\u0441\u0442\u0430: \u0432 \u0445\u0440\u0430\u043D\u0438\u043B\u0438\u0449\u0435 \u043D\u0435\u0442 \u0441\u043E\u043E\u0431\u0449\u0435\u043D\u0438\u0439 \u0434\u043B\u044F \u044D\u0442\u043E\u0439 \u0432\u043A\u043B\u0430\u0434\u043A\u0438.")) + "</p>";
           return header + body;
         }
-        function escapeText(s) {
-          var md = typeof window.MarkdownRenderer !== "undefined" && window.MarkdownRenderer ? window.MarkdownRenderer : null;
-          if (md && md.escapeHtml) return md.escapeHtml(s);
+        function escapeTextFallback(s) {
           return String(s == null ? "" : s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
         }
+        function escapeText(s) {
+          if (markdown_default && typeof markdown_default.escapeHtml === "function") {
+            try {
+              return markdown_default.escapeHtml(s);
+            } catch (eRenderer) {
+              return escapeTextFallback(s);
+            }
+          }
+          return escapeTextFallback(s);
+        }
         function renderMarkdown(text) {
-          var md = typeof window.MarkdownRenderer !== "undefined" && window.MarkdownRenderer ? window.MarkdownRenderer : null;
-          if (md && md.render) return md.render(text);
-          return escapeText(text);
+          if (markdown_default && typeof markdown_default.render === "function") {
+            try {
+              return markdown_default.render(text);
+            } catch (eRenderer) {
+              return escapeTextFallback(text);
+            }
+          }
+          return escapeTextFallback(text);
         }
         function setPrintHtml(el, html) {
           var doc = new DOMParser().parseFromString("<body>" + html + "</body>", "text/html");
@@ -323,16 +348,10 @@
             diagBaseMsgs = 0;
           }
           document.getElementById("empty-state").style.display = "none";
-          setPrintHtml(document.getElementById("print-content"), render(history));
+          setPrintHtml(document.getElementById("print-content"), render2(history));
         }
         function waitForRenderer(cb) {
-          if (typeof window.MarkdownRenderer !== "undefined" && window.MarkdownRenderer) {
-            cb();
-            return;
-          }
-          setTimeout(function() {
-            waitForRenderer(cb);
-          }, 30);
+          cb();
         }
         function scheduleClosePrintTab() {
           var sent = false;

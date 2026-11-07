@@ -6,6 +6,14 @@
     if (typeof require !== "undefined") return require.apply(this, arguments);
     throw Error('Dynamic require of "' + x + '" is not supported');
   });
+  var __esm = (fn, res, err) => function __init() {
+    if (err) throw err[0];
+    try {
+      return fn && (res = (0, fn[__getOwnPropNames(fn)[0]])(fn = 0)), res;
+    } catch (e) {
+      throw err = [e], e;
+    }
+  };
   var __commonJS = (cb, mod) => function __require2() {
     try {
       return mod || (0, cb[__getOwnPropNames(cb)[0]])((mod = { exports: {} }).exports, mod), mod.exports;
@@ -14,261 +22,1603 @@
     }
   };
 
-  // entry-content.js
-  var require_entry_content = __commonJS({
-    "entry-content.js"(exports, module) {
-      function aiCmIsFirefox() {
-        try {
-          var api = typeof browser !== "undefined" && browser && browser.runtime ? browser : typeof chrome !== "undefined" && chrome && chrome.runtime ? chrome : null;
-          if (!api) return false;
-          if (api.runtime && typeof api.runtime.getURL === "function") {
-            return String(api.runtime.getURL("")).indexOf("moz-extension://") === 0;
-          }
-          if (typeof api.getURL === "function") {
-            return String(api.getURL("")).indexOf("moz-extension://") === 0;
-          }
-          return false;
-        } catch (e) {
-          return false;
-        }
+  // ../utils/buildReferenceText.js
+  function cleanInline(s) {
+    s = s.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, "$1");
+    s = s.replace(/(\*\*|__)/g, "");
+    s = s.replace(/(?<![*\w])\*([^*\n]+)\*(?![\w*])/g, "$1");
+    s = s.replace(/(?<![\w_])\_([^_\n]+)\_(?![\w_])/g, "$1");
+    s = s.replace(/`/g, "");
+    return s;
+  }
+  function cleanLine(line) {
+    var s = String(line == null ? "" : line);
+    s = s.replace(/^#{1,6}\s+/, "");
+    s = s.replace(/^>\s?/, "");
+    s = s.replace(/^[-*+]\s+/, "");
+    return s;
+  }
+  function cleanText(text) {
+    var lines = String(text).split("\n");
+    var out = [];
+    for (var i = 0; i < lines.length; i++) {
+      var line = lines[i];
+      var trimmed = line.trim();
+      if (/^-{3,}$/.test(trimmed)) continue;
+      out.push(cleanInline(cleanLine(line)));
+    }
+    return out.join("\n");
+  }
+  function buildReferenceText(messages) {
+    var list = Array.isArray(messages) ? messages : [];
+    var parts = [];
+    for (var i = 0; i < list.length; i++) {
+      var msg = list[i] || {};
+      parts.push(cleanText(msg.text == null ? "" : msg.text));
+    }
+    return parts.join("\n\n");
+  }
+  var init_buildReferenceText = __esm({
+    "../utils/buildReferenceText.js"() {
+    }
+  });
+
+  // ../utils/platform.js
+  function aiCmIsFirefox() {
+    try {
+      var api = typeof browser !== "undefined" && browser && browser.runtime ? browser : typeof chrome !== "undefined" && chrome && chrome.runtime ? chrome : null;
+      if (!api) return false;
+      if (api.runtime && typeof api.runtime.getURL === "function") {
+        return String(api.runtime.getURL("")).indexOf("moz-extension://") === 0;
       }
-      if (typeof module !== "undefined" && module.exports) {
-        module.exports = { aiCmIsFirefox };
+      if (typeof api.getURL === "function") {
+        return String(api.getURL("")).indexOf("moz-extension://") === 0;
       }
-      var DEBUG = false;
-      function __aiCmSetDebugLogs(v) {
-        DEBUG = !!v;
-        try {
-          if (typeof window !== "undefined") window.__aiCmDebugLogs = !!v;
-        } catch (e) {
-        }
+      return false;
+    } catch (e) {
+      return false;
+    }
+  }
+  var init_platform = __esm({
+    "../utils/platform.js"() {
+    }
+  });
+
+  // ../utils/debug.js
+  function __aiCmSetDebugLogs(v) {
+    DEBUG = !!v;
+    try {
+      if (typeof window !== "undefined") window.__aiCmDebugLogs = !!v;
+    } catch (e) {
+    }
+  }
+  function __aiCmStringifyArg(a) {
+    if (typeof a === "string") return a;
+    try {
+      var s = JSON.stringify(a);
+      if (s === void 0) return String(a);
+      if (s.length > 500) s = s.slice(0, 500) + "\u2026";
+      return s;
+    } catch (e) {
+      return String(a);
+    }
+  }
+  function __aiCmPushLogRing(line) {
+    try {
+      __aiCmLogRing.push(line);
+      if (__aiCmLogRing.length > __aiCmLogRingMax) __aiCmLogRing.shift();
+    } catch (e) {
+    }
+  }
+  function __aiCmGetLogRing() {
+    try {
+      return __aiCmLogRing.slice();
+    } catch (e) {
+      return [];
+    }
+  }
+  function debugLog(level) {
+    var args = Array.prototype.slice.call(arguments, 1);
+    try {
+      var line = args.map(__aiCmStringifyArg).join(" ");
+      __aiCmPushLogRing(line);
+    } catch (e) {
+    }
+    if (level === "error" || level === "warn") {
+      (console[level] || console.log).apply(console, args);
+      return;
+    }
+    var enabled = DEBUG;
+    try {
+      if (typeof window !== "undefined" && window.__aiCmDebugLogs === true) enabled = true;
+    } catch (e) {
+    }
+    if (enabled) {
+      (console[level] || console.log).apply(console, args);
+    }
+  }
+  function swallow(error, tag) {
+    try {
+      if (typeof debugLog !== "function") return;
+      debugLog("error", "[swallow][" + (tag || "unlabeled") + "]", error);
+    } catch (eSwallow) {
+    }
+  }
+  function aiCmDiagOn() {
+    try {
+      if (typeof sessionStorage !== "undefined" && sessionStorage && sessionStorage.getItem("aiCmDebug") === "1") return true;
+    } catch (eSess) {
+    }
+    try {
+      if (typeof window !== "undefined" && window && window.__aiCmDebugLogs === true) return true;
+    } catch (eWin) {
+    }
+    return false;
+  }
+  function aiCmDiagDocKind() {
+    var href = "";
+    var host = "";
+    try {
+      href = String(typeof location !== "undefined" && location && location.href || "");
+    } catch (eHref) {
+    }
+    try {
+      host = String(typeof location !== "undefined" && location && location.hostname || "");
+    } catch (eHost) {
+    }
+    var isGoogle = host === "google.com" || host === "www.google.com";
+    try {
+      if (href.indexOf("/sorry/") !== -1) return "captcha";
+      if (isGoogle && (document.querySelector("#captcha-form") || document.querySelector('form[action*="sorry"]') || document.querySelector('iframe[src*="recaptcha"]'))) return "captcha";
+    } catch (eCap) {
+    }
+    try {
+      var tid = "";
+      var el = document.querySelector("[data-session-thread-id]");
+      if (el) tid = String(el.getAttribute("data-session-thread-id") || "").trim();
+      if (tid) return "chat";
+      if (document.querySelector('[data-scope-id="turn"]') || document.querySelector('[data-subtree="aimfl"]')) return "chat";
+    } catch (eChat) {
+    }
+    if (isGoogle) return "search";
+    return "chat";
+  }
+  function aiCmDiagHead(v, n) {
+    try {
+      var lim = typeof n === "number" && n > 0 ? n : 100;
+      if (v === void 0 || v === null) return "(\u043F\u0443\u0441\u0442\u043E)";
+      var s = String(v);
+      if (!s) return "(\u043F\u0443\u0441\u0442\u043E)";
+      var flat = s.replace(/\s+/g, " ").trim();
+      if (!flat) return "(\u043F\u0443\u0441\u0442\u043E/\u043F\u0440\u043E\u0431\u0435\u043B\u044B)";
+      return flat.length > lim ? flat.slice(0, lim) + "\u2026" : flat;
+    } catch (eHead) {
+      return "(\u043E\u0448\u0438\u0431\u043A\u0430)";
+    }
+  }
+  function aiCmDiagStack(skip) {
+    try {
+      var st = String(new Error().stack || "");
+      if (!st) return "";
+      var lines = st.split("\n");
+      var out = [];
+      var from = 1 + (typeof skip === "number" && skip >= 0 ? skip : 0);
+      for (var i = from; i < lines.length && out.length < 4; i++) {
+        var s = String(lines[i] || "").replace(/\s+/g, " ").trim();
+        if (!s || s.indexOf("aiCmDiag") !== -1) continue;
+        out.push(s);
       }
-      var __aiCmLogRing = [];
-      var __aiCmLogRingMax = 200;
-      function __aiCmStringifyArg(a) {
-        if (typeof a === "string") return a;
-        try {
-          var s = JSON.stringify(a);
-          if (s === void 0) return String(a);
-          if (s.length > 500) s = s.slice(0, 500) + "\u2026";
-          return s;
-        } catch (e) {
-          return String(a);
-        }
+      return out.join(" <- ");
+    } catch (eStack) {
+      return "";
+    }
+  }
+  function aiCmDiagLine2(tag, fields) {
+    if (!aiCmDiagOn()) return false;
+    try {
+      var parts = [];
+      var f = fields || {};
+      for (var k in f) {
+        if (!Object.prototype.hasOwnProperty.call(f, k)) continue;
+        var v = f[k];
+        parts.push(k + "=" + (v === void 0 || v === null ? "(\u043D\u0435\u0442)" : String(v)));
       }
-      function __aiCmPushLogRing(line) {
-        try {
-          __aiCmLogRing.push(line);
-          if (__aiCmLogRing.length > __aiCmLogRingMax) __aiCmLogRing.shift();
-        } catch (e) {
-        }
-      }
-      function __aiCmGetLogRing() {
-        try {
-          return __aiCmLogRing.slice();
-        } catch (e) {
-          return [];
-        }
-      }
-      function debugLog(level) {
-        var args = Array.prototype.slice.call(arguments, 1);
-        try {
-          var line = args.map(__aiCmStringifyArg).join(" ");
-          __aiCmPushLogRing(line);
-        } catch (e) {
-        }
-        if (level === "error" || level === "warn") {
-          (console[level] || console.log).apply(console, args);
-          return;
-        }
-        var enabled = DEBUG;
-        try {
-          if (typeof window !== "undefined" && window.__aiCmDebugLogs === true) enabled = true;
-        } catch (e) {
-        }
-        if (enabled) {
-          (console[level] || console.log).apply(console, args);
-        }
-      }
-      function swallow(error, tag) {
-        try {
-          if (typeof debugLog !== "function") return;
-          debugLog("error", "[swallow][" + (tag || "unlabeled") + "]", error);
-        } catch (eSwallow) {
-        }
-      }
-      function aiCmDiagOn() {
-        try {
-          if (typeof sessionStorage !== "undefined" && sessionStorage && sessionStorage.getItem("aiCmDebug") === "1") return true;
-        } catch (eSess) {
-        }
-        try {
-          if (typeof window !== "undefined" && window && window.__aiCmDebugLogs === true) return true;
-        } catch (eWin) {
-        }
-        return false;
-      }
-      function aiCmDiagDocKind() {
-        var href = "";
-        var host = "";
-        try {
-          href = String(typeof location !== "undefined" && location && location.href || "");
-        } catch (eHref) {
-        }
-        try {
-          host = String(typeof location !== "undefined" && location && location.hostname || "");
-        } catch (eHost) {
-        }
-        var isGoogle = host === "google.com" || host === "www.google.com";
-        try {
-          if (href.indexOf("/sorry/") !== -1) return "captcha";
-          if (isGoogle && (document.querySelector("#captcha-form") || document.querySelector('form[action*="sorry"]') || document.querySelector('iframe[src*="recaptcha"]'))) return "captcha";
-        } catch (eCap) {
-        }
-        try {
-          var tid = "";
-          var el = document.querySelector("[data-session-thread-id]");
-          if (el) tid = String(el.getAttribute("data-session-thread-id") || "").trim();
-          if (tid) return "chat";
-          if (document.querySelector('[data-scope-id="turn"]') || document.querySelector('[data-subtree="aimfl"]')) return "chat";
-        } catch (eChat) {
-        }
-        if (isGoogle) return "search";
-        return "chat";
-      }
-      function aiCmDiagHead(v, n) {
-        try {
-          var lim = typeof n === "number" && n > 0 ? n : 100;
-          if (v === void 0 || v === null) return "(\u043F\u0443\u0441\u0442\u043E)";
-          var s = String(v);
-          if (!s) return "(\u043F\u0443\u0441\u0442\u043E)";
-          var flat = s.replace(/\s+/g, " ").trim();
-          if (!flat) return "(\u043F\u0443\u0441\u0442\u043E/\u043F\u0440\u043E\u0431\u0435\u043B\u044B)";
-          return flat.length > lim ? flat.slice(0, lim) + "\u2026" : flat;
-        } catch (eHead) {
-          return "(\u043E\u0448\u0438\u0431\u043A\u0430)";
-        }
-      }
-      function aiCmDiagStack(skip) {
-        try {
-          var st = String(new Error().stack || "");
-          if (!st) return "";
-          var lines = st.split("\n");
-          var out = [];
-          var from = 1 + (typeof skip === "number" && skip >= 0 ? skip : 0);
-          for (var i = from; i < lines.length && out.length < 4; i++) {
-            var s = String(lines[i] || "").replace(/\s+/g, " ").trim();
-            if (!s || s.indexOf("aiCmDiag") !== -1) continue;
-            out.push(s);
-          }
-          return out.join(" <- ");
-        } catch (eStack) {
-          return "";
-        }
-      }
-      function aiCmDiagLine(tag, fields) {
-        if (!aiCmDiagOn()) return false;
-        try {
-          var parts = [];
-          var f = fields || {};
-          for (var k in f) {
-            if (!Object.prototype.hasOwnProperty.call(f, k)) continue;
-            var v = f[k];
-            parts.push(k + "=" + (v === void 0 || v === null ? "(\u043D\u0435\u0442)" : String(v)));
-          }
-          console.log("[AI CM][diag] " + tag + " " + parts.join(" "));
-        } catch (eLine) {
-        }
-        return true;
-      }
-      function aiCmDiagDownload(trigger, content, fileName, extra) {
-        if (!aiCmDiagOn()) return false;
-        var e = extra || {};
-        var url = "";
-        try {
-          url = String(typeof location !== "undefined" && location && location.href || "");
-        } catch (eUrl) {
-        }
-        return aiCmDiagLine("download", {
-          trigger: trigger || "(\u043D\u0435\u0442)",
-          file: fileName === void 0 || fileName === null || String(fileName) === "" ? "\u043F\u0443\u0441\u0442\u043E\u0435" : String(fileName),
-          bytes100: aiCmDiagHead(content, 100),
-          len: content === void 0 || content === null ? 0 : String(content).length,
-          mime: e.mime,
-          url,
-          threadId: e.threadId,
-          site: e.site,
-          reason: e.reason,
-          src: aiCmDiagStack(1)
-        });
-      }
-      function aiCmDiagDownloadBlocked(trigger, content, fileName, reason, extra) {
-        if (!aiCmDiagOn()) return false;
-        var e = extra || {};
-        var url = "";
-        try {
-          url = String(typeof location !== "undefined" && location && location.href || "");
-        } catch (eUrlB) {
-        }
-        return aiCmDiagLine("download-blocked", {
-          reason: reason || "(\u043D\u0435\u0442)",
-          trigger: trigger || "(\u043D\u0435\u0442)",
-          file: fileName === void 0 || fileName === null || String(fileName) === "" ? "\u043F\u0443\u0441\u0442\u043E\u0435" : String(fileName),
-          bytes100: aiCmDiagHead(content, 100),
-          len: content === void 0 || content === null ? 0 : String(content).length,
-          mime: e.mime,
-          url,
-          threadId: e.threadId,
-          site: e.site,
-          src: aiCmDiagStack(1)
-        });
-      }
+      console.log("[AI CM][diag] " + tag + " " + parts.join(" "));
+    } catch (eLine) {
+    }
+    return true;
+  }
+  function aiCmDiagDownload2(trigger, content, fileName, extra) {
+    if (!aiCmDiagOn()) return false;
+    var e = extra || {};
+    var url = "";
+    try {
+      url = String(typeof location !== "undefined" && location && location.href || "");
+    } catch (eUrl) {
+    }
+    return aiCmDiagLine2("download", {
+      trigger: trigger || "(\u043D\u0435\u0442)",
+      file: fileName === void 0 || fileName === null || String(fileName) === "" ? "\u043F\u0443\u0441\u0442\u043E\u0435" : String(fileName),
+      bytes100: aiCmDiagHead(content, 100),
+      len: content === void 0 || content === null ? 0 : String(content).length,
+      mime: e.mime,
+      url,
+      threadId: e.threadId,
+      site: e.site,
+      reason: e.reason,
+      src: aiCmDiagStack(1)
+    });
+  }
+  function aiCmDiagDownloadBlocked2(trigger, content, fileName, reason, extra) {
+    if (!aiCmDiagOn()) return false;
+    var e = extra || {};
+    var url = "";
+    try {
+      url = String(typeof location !== "undefined" && location && location.href || "");
+    } catch (eUrlB) {
+    }
+    return aiCmDiagLine2("download-blocked", {
+      reason: reason || "(\u043D\u0435\u0442)",
+      trigger: trigger || "(\u043D\u0435\u0442)",
+      file: fileName === void 0 || fileName === null || String(fileName) === "" ? "\u043F\u0443\u0441\u0442\u043E\u0435" : String(fileName),
+      bytes100: aiCmDiagHead(content, 100),
+      len: content === void 0 || content === null ? 0 : String(content).length,
+      mime: e.mime,
+      url,
+      threadId: e.threadId,
+      site: e.site,
+      src: aiCmDiagStack(1)
+    });
+  }
+  function swallowSoft2(error, tag) {
+    var label = tag || "unlabeled";
+    var msg = "";
+    try {
+      msg = error && error.message ? String(error.message) : String(error);
+    } catch (eSoftMsg) {
+      msg = "(\u043D\u0435\u0447\u0438\u0442\u0430\u0435\u043C\u0430\u044F \u043E\u0448\u0438\u0431\u043A\u0430)";
+    }
+    try {
+      if (typeof __aiCmPushLogRing === "function") __aiCmPushLogRing("[swallow-soft][" + label + "] " + msg);
+    } catch (eSoftRing) {
+      return void 0;
+    }
+    try {
+      if (typeof aiCmDiagLine2 !== "function") return;
+      aiCmDiagLine2("swallow-soft", { tag: label, err: error });
+    } catch (eSoftDiag) {
+      return void 0;
+    }
+  }
+  function aiCmDiagWarn(tag, message, detail) {
+    var label = tag || "unlabeled";
+    var text = message === void 0 || message === null ? "" : String(message);
+    try {
+      var tail = "";
+      if (detail !== void 0) tail = " " + (typeof __aiCmStringifyArg === "function" ? __aiCmStringifyArg(detail) : String(detail));
+      if (typeof __aiCmPushLogRing === "function") __aiCmPushLogRing("[ai-cm-warn][" + label + "] " + text + tail);
+    } catch (eWarnRing) {
+      return void 0;
+    }
+    try {
+      if (typeof aiCmDiagOn !== "function" || !aiCmDiagOn()) return;
+      console.log("[AI CM][warn][" + label + "] " + text, detail);
+    } catch (eWarnPrint) {
+      return void 0;
+    }
+  }
+  var DEBUG, __aiCmLogRing, __aiCmLogRingMax;
+  var init_debug = __esm({
+    "../utils/debug.js"() {
+      DEBUG = false;
+      __aiCmLogRing = [];
+      __aiCmLogRingMax = 200;
       try {
         if (typeof window !== "undefined") window.__aiCmSwallow = swallow;
       } catch (eSwallowExport) {
       }
-      function swallowSoft(error, tag) {
-        var label = tag || "unlabeled";
-        var msg = "";
-        try {
-          msg = error && error.message ? String(error.message) : String(error);
-        } catch (eSoftMsg) {
-          msg = "(\u043D\u0435\u0447\u0438\u0442\u0430\u0435\u043C\u0430\u044F \u043E\u0448\u0438\u0431\u043A\u0430)";
-        }
-        try {
-          if (typeof __aiCmPushLogRing === "function") __aiCmPushLogRing("[swallow-soft][" + label + "] " + msg);
-        } catch (eSoftRing) {
-          return void 0;
-        }
-        try {
-          if (typeof aiCmDiagLine !== "function") return;
-          aiCmDiagLine("swallow-soft", { tag: label, err: error });
-        } catch (eSoftDiag) {
-          return void 0;
-        }
-      }
-      function aiCmDiagWarn(tag, message, detail) {
-        var label = tag || "unlabeled";
-        var text = message === void 0 || message === null ? "" : String(message);
-        try {
-          var tail = "";
-          if (detail !== void 0) tail = " " + (typeof __aiCmStringifyArg === "function" ? __aiCmStringifyArg(detail) : String(detail));
-          if (typeof __aiCmPushLogRing === "function") __aiCmPushLogRing("[ai-cm-warn][" + label + "] " + text + tail);
-        } catch (eWarnRing) {
-          return void 0;
-        }
-        try {
-          if (typeof aiCmDiagOn !== "function" || !aiCmDiagOn()) return;
-          console.log("[AI CM][warn][" + label + "] " + text, detail);
-        } catch (eWarnPrint) {
-          return void 0;
-        }
-      }
       try {
-        if (typeof window !== "undefined") window.__aiCmSwallowSoft = swallowSoft;
+        if (typeof window !== "undefined") window.__aiCmSwallowSoft = swallowSoft2;
       } catch (eSoftExport) {
         __aiCmPushLogRing("[swallow-soft-export] " + eSoftExport);
       }
+    }
+  });
+
+  // ../utils/google-search-folwr-parser.js
+  var require_google_search_folwr_parser = __commonJS({
+    "../utils/google-search-folwr-parser.js"(exports, module) {
+      (function() {
+        function decodeEntities(s) {
+          if (!s) return "";
+          var out = String(s);
+          out = out.replace(new RegExp("&quot;", "g"), '"');
+          out = out.replace(new RegExp("&amp;", "g"), "&");
+          out = out.replace(new RegExp("&#39;", "g"), "'");
+          out = out.replace(new RegExp("&lt;", "g"), "<");
+          out = out.replace(new RegExp("&gt;", "g"), ">");
+          out = out.replace(new RegExp("&nbsp;", "g"), " ");
+          out = out.replace(/&#(\d+);/g, function(m, d) {
+            try {
+              return String.fromCharCode(parseInt(d, 10));
+            } catch (e) {
+              return m;
+            }
+          });
+          return out;
+        }
+        var FENCE_RE = /(`{3,})[\s\S]*?\1/g;
+        function mapOutsideFences(s, fn) {
+          var str = String(s == null ? "" : s);
+          var out = "";
+          var last = 0;
+          var m;
+          FENCE_RE.lastIndex = 0;
+          while ((m = FENCE_RE.exec(str)) !== null) {
+            out += fn(str.slice(last, m.index)) + m[0];
+            last = m.index + m[0].length;
+          }
+          return out + fn(str.slice(last));
+        }
+        function stripTagsSeg(seg) {
+          return String(seg).replace(/<script[\s\S]*?<\/script>/gi, " ").replace(/<style[\s\S]*?<\/style>/gi, " ").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ");
+        }
+        function stripTags(html) {
+          if (!html) return "";
+          return mapOutsideFences(html, stripTagsSeg).replace(/^\s+/, "").replace(/\s+$/, "");
+        }
+        function sanitizeAssistantSeg(seg) {
+          return String(seg).replace(/<script[\s\S]*?<\/script>/gi, " ").replace(/<style[\s\S]*?<\/style>/gi, " ").replace(/<[^>]+>/g, " ").replace(/[ \t\f\v]+/g, " ").split("\n").map(function(ln) {
+            return ln.trim();
+          }).join("\n").replace(/\n{3,}/g, "\n\n");
+        }
+        function sanitizeAssistant(s) {
+          if (!s) return "";
+          return mapOutsideFences(s, sanitizeAssistantSeg).replace(/^\s+/, "").replace(/\s+$/, "");
+        }
+        function tableCellText(cellEl) {
+          var clone = cellEl.cloneNode(true);
+          clone.querySelectorAll("script, style, button, svg").forEach(function(el) {
+            el.remove();
+          });
+          return stripTags(decodeEntities(clone.innerHTML)).trim();
+        }
+        function tableToMarkdown(tableEl) {
+          var rows = tableEl.querySelectorAll("tr");
+          var lines = [];
+          for (var r = 0; r < rows.length; r++) {
+            var cells = rows[r].querySelectorAll("th, td");
+            var cellTexts = [];
+            for (var c = 0; c < cells.length; c++) {
+              cellTexts.push(tableCellText(cells[c]));
+            }
+            if (cellTexts.length === 0) continue;
+            lines.push("| " + cellTexts.join(" | ") + " |");
+          }
+          return lines.join("\n");
+        }
+        function isQuestionHeading(el) {
+          return el.tagName === "H2" && el.className && String(el.className).indexOf("iMqumd") !== -1;
+        }
+        var CODE_CONTAINER_SEL = 'pre, code, [class*="code-block"], [class*="codeBlock"], [class*="codeblock"]';
+        var CODE_LANG_RE = /^[A-Za-z][A-Za-z0-9+#._-]{0,19}$/;
+        function classOf(el) {
+          try {
+            return String(el && el.className || "");
+          } catch (e) {
+            return "";
+          }
+        }
+        function isCodeLikeNode(el) {
+          if (!el || !el.tagName) return false;
+          var tag = String(el.tagName).toUpperCase();
+          return tag === "PRE" || tag === "CODE" || /code-?block/i.test(classOf(el));
+        }
+        function codeTextOf(el) {
+          if (!el || typeof el.cloneNode !== "function") return "";
+          var clone;
+          try {
+            clone = el.cloneNode(true);
+          } catch (e) {
+            return "";
+          }
+          try {
+            var junk = clone.querySelectorAll("script, style, button, svg");
+            for (var i = 0; i < junk.length; i++) {
+              if (junk[i].parentNode) junk[i].parentNode.removeChild(junk[i]);
+            }
+            var brs = clone.querySelectorAll("br");
+            var doc = clone.ownerDocument || (typeof document !== "undefined" ? document : null);
+            for (var b = 0; b < brs.length; b++) {
+              if (brs[b].parentNode && doc && doc.createTextNode) {
+                brs[b].parentNode.replaceChild(doc.createTextNode("\n"), brs[b]);
+              }
+            }
+          } catch (e2) {
+          }
+          var txt = "";
+          try {
+            txt = String(clone.textContent || "");
+          } catch (e3) {
+            txt = "";
+          }
+          if (txt.indexOf("\n") === -1 && clone.children && clone.children.length > 1) {
+            var allBlock = true;
+            for (var k = 0; k < clone.children.length; k++) {
+              if (!/^(DIV|P|LI|TR|SECTION|ARTICLE|FIGURE|BLOCKQUOTE|H[1-6])$/.test(String(clone.children[k].tagName || "").toUpperCase())) {
+                allBlock = false;
+                break;
+              }
+            }
+            if (allBlock) {
+              var lines = [];
+              for (var k2 = 0; k2 < clone.children.length; k2++) {
+                lines.push(String(clone.children[k2].textContent || ""));
+              }
+              var joined = lines.join("\n");
+              if (joined.replace(/\s+/g, "")) txt = joined;
+            }
+          }
+          return txt.replace(/[ \t]+$/gm, "").replace(/^\n+/, "").replace(/\s+$/, "");
+        }
+        function codeBodyElement(el) {
+          try {
+            var inner = el.querySelectorAll ? el.querySelectorAll("pre, code") : null;
+            if (inner && inner.length) return inner[inner.length - 1];
+          } catch (e) {
+          }
+          return el;
+        }
+        function detectCodeLang(el, langHint) {
+          if (langHint != null && CODE_LANG_RE.test(String(langHint).trim())) return String(langHint).trim();
+          var attrNames = ["code-lang", "data-lang", "data-code-lang"];
+          try {
+            for (var a = 0; a < attrNames.length; a++) {
+              var v = el && el.getAttribute ? el.getAttribute(attrNames[a]) : null;
+              if (v && CODE_LANG_RE.test(String(v).trim())) return String(v).trim();
+            }
+          } catch (e) {
+          }
+          var m = classOf(el).match(/(?:^|[\s_-])(?:language|lang)[-_]([A-Za-z][A-Za-z0-9+#._-]{0,19})/);
+          if (m && CODE_LANG_RE.test(m[1])) return m[1];
+          var cur = el;
+          for (var up = 0; cur && up < 4; up++) {
+            var prev = cur.previousSibling;
+            for (var hops = 0; prev && hops < 3; hops++) {
+              var t = "";
+              try {
+                t = String(prev.textContent || "").trim();
+              } catch (e2) {
+                t = "";
+              }
+              if (t) {
+                if (CODE_LANG_RE.test(t)) return t;
+                break;
+              }
+              prev = prev.previousSibling;
+            }
+            cur = cur.parentNode;
+          }
+          return "";
+        }
+        function isCodeBlockElement(el) {
+          if (!el || !el.tagName) return false;
+          var tag = String(el.tagName).toUpperCase();
+          if (/code-?block/i.test(classOf(el))) return true;
+          if (tag === "PRE") return true;
+          if (tag !== "CODE") return false;
+          if (/(?:^|[\s_-])(?:language|lang)[-_]/.test(classOf(el))) return true;
+          return codeTextOf(el).indexOf("\n") !== -1;
+        }
+        function renderCodeBlock(node, langHint) {
+          if (!node) return "";
+          var body = codeBodyElement(node);
+          var text = codeTextOf(body);
+          if (!text) text = codeTextOf(node);
+          if (!text) return "";
+          var lang = detectCodeLang(node, langHint) || detectCodeLang(body, langHint);
+          var fence = "```";
+          while (text.indexOf(fence) !== -1) fence += "`";
+          return fence + lang + "\n" + text + "\n" + fence;
+        }
+        function answerTextOf(node) {
+          if (!node) return "";
+          if (isCodeBlockElement(node)) return renderCodeBlock(node);
+          if (typeof node.cloneNode !== "function") return "";
+          var clone;
+          try {
+            clone = node.cloneNode(true);
+          } catch (e) {
+            return "";
+          }
+          try {
+            var junk = clone.querySelectorAll("script, style, button, svg");
+            for (var i = 0; i < junk.length; i++) {
+              if (junk[i].parentNode) junk[i].parentNode.removeChild(junk[i]);
+            }
+            var found = clone.querySelectorAll ? clone.querySelectorAll(CODE_CONTAINER_SEL) : [];
+            var outer = [];
+            for (var f = 0; f < found.length; f++) {
+              if (!isCodeBlockElement(found[f])) continue;
+              var nested = false;
+              for (var o = 0; o < outer.length; o++) {
+                if (outer[o].contains && outer[o].contains(found[f])) {
+                  nested = true;
+                  break;
+                }
+              }
+              if (!nested) outer.push(found[f]);
+            }
+            var doc = clone.ownerDocument || (typeof document !== "undefined" ? document : null);
+            for (var c = outer.length - 1; c >= 0; c--) {
+              var fenced = renderCodeBlock(outer[c]);
+              if (!fenced || !outer[c].parentNode || !doc || !doc.createTextNode) continue;
+              outer[c].parentNode.replaceChild(doc.createTextNode("\n" + fenced + "\n"), outer[c]);
+            }
+          } catch (e2) {
+          }
+          var txt = "";
+          try {
+            txt = String(clone.textContent || "");
+          } catch (e3) {
+            txt = "";
+          }
+          return txt.trim();
+        }
+        function answerDomNodes(root) {
+          var doc = root || (typeof document !== "undefined" ? document : null);
+          if (!doc || typeof doc.querySelectorAll !== "function") return [];
+          var nodes = doc.querySelectorAll(".n6owBd.awi2gc, " + CODE_CONTAINER_SEL);
+          var out = [];
+          for (var i = 0; i < nodes.length; i++) {
+            var el = nodes[i];
+            if (isCodeLikeNode(el) && !isCodeBlockElement(el)) continue;
+            var nested = false;
+            for (var j = 0; j < out.length; j++) {
+              if (out[j].contains && out[j].contains(el)) {
+                nested = true;
+                break;
+              }
+            }
+            if (nested) continue;
+            out.push(el);
+          }
+          return out;
+        }
+        var WEB_SEARCH_CHIP_RE = /(?:Самые популярные результаты веб-поиска по этой теме|People also search|Related searches|Похожие запросы|Связанные запросы)/i;
+        var FOREIGN_QUESTION_RE = /^Вы сказали:\s*"/;
+        function nodeText(node) {
+          try {
+            return (node.textContent || "").trim();
+          } catch (e) {
+            return "";
+          }
+        }
+        function isWebSearchChipNode(node) {
+          return WEB_SEARCH_CHIP_RE.test(nodeText(node));
+        }
+        function isForeignQuestionNode(node) {
+          return FOREIGN_QUESTION_RE.test(nodeText(node));
+        }
+        function listItemToMarkdown(liEl) {
+          var clone = liEl.cloneNode(true);
+          clone.querySelectorAll("script, style, button, svg").forEach(function(el) {
+            el.remove();
+          });
+          var label = null;
+          var b = clone.querySelector("strong, b");
+          if (b) {
+            label = (b.textContent || "").replace(/\s+/g, " ").trim();
+            b.remove();
+          }
+          var rest = stripTags(decodeEntities(clone.innerHTML)).trim();
+          if (label) {
+            return "- **" + label + "**" + (rest ? ": " + rest : "");
+          }
+          return rest ? "- " + rest : "";
+        }
+        function listToText(listEl) {
+          var items = listEl.querySelectorAll("li");
+          var lines = [];
+          for (var r = 0; r < items.length; r++) {
+            var t = listItemToMarkdown(items[r]);
+            if (t) lines.push(t);
+          }
+          return lines.join("\n");
+        }
+        function gatherAnswerContentNodes(doc) {
+          var raw = doc.querySelectorAll('.n6owBd.awi2gc, table, [role="heading"], h2, h3, h4, ul, ol, li, [role="list"], [role="listitem"], ' + CODE_CONTAINER_SEL);
+          var out = [];
+          for (var i = 0; i < raw.length; i++) {
+            var el = raw[i];
+            if (isQuestionHeading(el)) continue;
+            if (isCodeLikeNode(el) && !isCodeBlockElement(el)) continue;
+            var nested = false;
+            for (var j = 0; j < out.length; j++) {
+              if (out[j].contains && out[j].contains(el)) {
+                nested = true;
+                break;
+              }
+            }
+            if (nested) continue;
+            out.push(el);
+          }
+          return out;
+        }
+        function assignContentToTurns(turnsArr, contentNodes) {
+          var answers = [];
+          var skipAfterChip = [];
+          for (var ti = 0; ti < turnsArr.length; ti++) {
+            answers[ti] = [];
+            skipAfterChip[ti] = false;
+          }
+          for (var n = 0; n < contentNodes.length; n++) {
+            var node = contentNodes[n];
+            var assigned = -1;
+            for (var t2 = 0; t2 < turnsArr.length; t2++) {
+              if (turnsArr[t2].compareDocumentPosition(node) & Node.DOCUMENT_POSITION_FOLLOWING) {
+                assigned = t2;
+              } else {
+                break;
+              }
+            }
+            if (assigned < 0) continue;
+            if (isForeignQuestionNode(node)) continue;
+            if (isWebSearchChipNode(node)) {
+              skipAfterChip[assigned] = true;
+              continue;
+            }
+            if (skipAfterChip[assigned]) continue;
+            var part = null;
+            if (node.tagName === "TABLE") {
+              var md = tableToMarkdown(node);
+              if (md) part = md;
+            } else if (node.tagName === "UL" || node.tagName === "OL") {
+              var lt = listToText(node);
+              if (lt) part = lt;
+            } else {
+              var ct = answerTextOf(node).trim();
+              if (ct) part = ct;
+            }
+            if (part) answers[assigned].push(part);
+          }
+          return answers;
+        }
+        function readThreadId(doc) {
+          try {
+            var el = doc.querySelector("[data-session-thread-id]");
+            if (el) {
+              var v = el.getAttribute("data-session-thread-id");
+              return v ? v.trim() : "";
+            }
+          } catch (e) {
+          }
+          return "";
+        }
+        function parseGoogleFolwrOpen(htmlText) {
+          var turns = [];
+          var messages = [];
+          if (!htmlText || typeof htmlText !== "string") {
+            return { threadId: "", turns, messages, text: "", count: 0 };
+          }
+          var doc;
+          try {
+            doc = new DOMParser().parseFromString(htmlText, "text/html");
+          } catch (e) {
+            return { threadId: "", turns, messages, text: "", count: 0 };
+          }
+          var threadId = readThreadId(doc);
+          var turnEls = doc.querySelectorAll('[data-scope-id="turn"]');
+          var allAimfl = doc.querySelectorAll('[data-subtree="aimfl"]');
+          var turnsArr = Array.prototype.slice.call(turnEls);
+          var tgQuestions = [];
+          try {
+            var tgRe = /<!--TgQPHd\|[\s\S]*?-->/g;
+            var m;
+            while ((m = tgRe.exec(htmlText)) !== null) {
+              var c = decodeEntities(m[0]);
+              var longRe = /"([^"]{20,})"/g;
+              var lm;
+              var found = null;
+              while ((lm = longRe.exec(c)) !== null) {
+                var cand = lm[1];
+                if (cand.indexOf("\\u0026") !== -1) continue;
+                if (cand.indexOf("OLOoOd") !== -1) continue;
+                if (cand.indexOf("dRog6c") !== -1) continue;
+                if (cand.indexOf("TgQPHd") !== -1) continue;
+                if (!/[а-яёА-ЯЁ]/.test(cand) && cand.indexOf(" ") === -1) continue;
+                found = cand;
+                break;
+              }
+              tgQuestions.push(found);
+            }
+          } catch (e) {
+            swallowSoft(e, "gsa-utils:parseGoogleFolwrOpen-tgqphd");
+          }
+          var contentNodes = gatherAnswerContentNodes(doc);
+          var answers = assignContentToTurns(turnsArr, contentNodes);
+          for (var i = 0; i < turnsArr.length; i++) {
+            var turn = turnsArr[i];
+            var question = null;
+            var h2 = turn.querySelector("h2.iMqumd");
+            if (h2) {
+              var raw = (h2.textContent || "").trim();
+              var qm = raw.match(/^Вы сказали:\s*"([\s\S]*)"$/);
+              question = qm ? qm[1].trim() : raw;
+            }
+            var assistantText = answers[i].length > 0 ? answers[i].join("\n\n") : null;
+            if (!assistantText) {
+              var nestedAimfl = turn.querySelector('[data-subtree="aimfl"]');
+              if (nestedAimfl) {
+                var nat = (nestedAimfl.textContent || "").trim();
+                if (nat) assistantText = nat;
+              }
+            }
+            if (!assistantText && allAimfl[i]) {
+              var at = (allAimfl[i].textContent || "").trim();
+              if (at) assistantText = at;
+            }
+            if (!question && tgQuestions[i]) question = tgQuestions[i];
+            turns.push({
+              id: turn.getAttribute && turn.getAttribute("jsuid") || "idx" + i,
+              userText: question || null,
+              assistantText: assistantText || null
+            });
+          }
+          if (turns.length === 0) {
+            var folifAnswer = null;
+            for (var aa = 0; aa < allAimfl.length; aa++) {
+              var at2 = (allAimfl[aa].textContent || "").trim();
+              if (at2) {
+                folifAnswer = at2;
+                break;
+              }
+            }
+            if (!folifAnswer && contentNodes.length > 0) {
+              var firstNode = contentNodes[0];
+              if (firstNode.tagName === "TABLE") {
+                folifAnswer = tableToMarkdown(firstNode);
+              } else {
+                folifAnswer = answerTextOf(firstNode).trim() || null;
+              }
+            }
+            var folifQuestion = tgQuestions.length > 0 ? tgQuestions[0] : null;
+            if (folifQuestion || folifAnswer) {
+              turns.push({ id: "folif_" + Date.now(), userText: folifQuestion, assistantText: folifAnswer });
+            }
+          }
+          for (var t = 0; t < turns.length; t++) {
+            var t2 = turns[t];
+            if (t2.userText) messages.push({ role: "user", text: stripTags(decodeEntities(t2.userText)) });
+            if (t2.assistantText) messages.push({ role: "assistant", text: sanitizeAssistant(t2.assistantText) });
+          }
+          var text = "";
+          for (var mi = 0; mi < messages.length; mi++) {
+            text += (mi > 0 ? "\n" : "") + messages[mi].text;
+          }
+          return { threadId, turns, messages, text, count: messages.length };
+        }
+        function countTurnContainers(htmlText) {
+          if (!htmlText || typeof htmlText !== "string") return 0;
+          try {
+            var doc = new DOMParser().parseFromString(htmlText, "text/html");
+            return doc.querySelectorAll('[data-scope-id="turn"]').length;
+          } catch (e) {
+            return 0;
+          }
+        }
+        function extractTurnsFromDocument(doc) {
+          if (!doc || typeof doc.querySelectorAll !== "function") return [];
+          var turns = [];
+          try {
+            var turnEls = doc.querySelectorAll('[data-scope-id="turn"]');
+            var allAimfl = doc.querySelectorAll('[data-subtree="aimfl"]');
+            var turnsArr = Array.prototype.slice.call(turnEls);
+            var questions = [];
+            for (var i = 0; i < turnsArr.length; i++) {
+              var h2 = turnsArr[i].querySelector("h2.iMqumd");
+              var q = null;
+              if (h2) {
+                var raw = (h2.textContent || "").trim();
+                var m = raw.match(/^Вы сказали:\s*"([\s\S]*)"$/);
+                q = m ? m[1].trim() : raw;
+              }
+              questions.push(q);
+            }
+            var answers = [];
+            for (var t = 0; t < turnsArr.length; t++) answers[t] = [];
+            var blocks = answerDomNodes(doc);
+            for (var b = 0; b < blocks.length; b++) {
+              var blk = blocks[b];
+              var assigned = -1;
+              for (var t2 = 0; t2 < turnsArr.length; t2++) {
+                if (turnsArr[t2].compareDocumentPosition(blk) & Node.DOCUMENT_POSITION_FOLLOWING) assigned = t2;
+                else break;
+              }
+              if (assigned >= 0 && assigned < turnsArr.length) {
+                var txt = answerTextOf(blk).trim();
+                if (txt) answers[assigned].push(txt);
+              }
+            }
+            for (var k = 0; k < turnsArr.length; k++) {
+              var joined = answers[k].length ? answers[k].join("\n\n") : null;
+              if (!joined && allAimfl[k]) {
+                var at = (allAimfl[k].textContent || "").trim();
+                if (at) joined = at;
+              }
+              turns.push({
+                id: turnsArr[k].getAttribute && turnsArr[k].getAttribute("jsuid") || "idx" + k,
+                userText: questions[k] || null,
+                assistantText: joined || null
+              });
+            }
+          } catch (e) {
+            swallowSoft(e, "gsa-utils:extractTurnsFromDocument");
+          }
+          return turns;
+        }
+        function extractContinuationToken(htmlText) {
+          if (!htmlText || typeof htmlText !== "string") return null;
+          try {
+            var doc = new DOMParser().parseFromString(htmlText, "text/html");
+            var els = doc.querySelectorAll("[data-mstk]");
+            var last = null;
+            for (var i = 0; i < els.length; i++) {
+              var v = els[i].getAttribute("data-mstk");
+              if (v) last = v.trim();
+            }
+            return last;
+          } catch (e) {
+            return null;
+          }
+        }
+        function normalizeTurnKeyPart(s) {
+          return String(s == null ? "" : s).toLowerCase().replace(/\u00a0/g, " ").replace(/[^a-zа-яё0-9]+/g, "");
+        }
+        function isAnswerWrapperTail(tail) {
+          var t = String(tail == null ? "" : tail);
+          var body = t.replace(/^["»”']{0,2}/, "").replace(/^[\s.,:;-]{0,4}/, "");
+          return body.replace(/\s+/g, "").length > 0;
+        }
+        var QUESTION_ASK_RE = /^(?:в\s+)?(?:ответ(?:е)?(?:\s+на\s+вопрос)?|на\s+вопрос|вопрос)\s*:?\s*/i;
+        function wrapperPrefix(text) {
+          var s = String(text == null ? "" : text);
+          var head = s.slice(0, 96);
+          var at = head.indexOf(":");
+          if (at === -1) return null;
+          var after = head.slice(at + 1);
+          var m = /^\s*"/.exec(after);
+          if (!m) return null;
+          return s.slice(0, at + 1 + m[0].length);
+        }
+        function answerWrapperParts(text) {
+          var s = String(text == null ? "" : text);
+          var prefix = wrapperPrefix(s);
+          if (!prefix) return null;
+          var rest = s.slice(prefix.length);
+          var close = rest.indexOf('"');
+          if (close === -1) return null;
+          var tail = rest.slice(close + 1);
+          if (!isAnswerWrapperTail(tail)) return null;
+          var question = rest.slice(0, close).trim();
+          if (!question) return null;
+          var body = tail.replace(/^["»”']{0,2}/, "").replace(/^[\s.,:;-]+/, "");
+          if (!body) return null;
+          return { question, body };
+        }
+        function canonicalAnswerBody(text) {
+          var wrapper = answerWrapperParts(text);
+          if (wrapper) return wrapper.body;
+          var s = String(text == null ? "" : text);
+          try {
+            var q = QUESTION_ASK_RE.exec(s);
+            if (q) {
+              var rest2 = s.slice(q[0].length);
+              var close2 = rest2.indexOf('"?');
+              if (close2 !== -1 && close2 < 200) {
+                var body2 = rest2.slice(close2 + 2).replace(/^[\s.,:;-]+/, "");
+                if (body2) s = body2;
+              }
+            }
+          } catch (e) {
+            return String(text == null ? "" : text);
+          }
+          return s;
+        }
+        function turnIdentityParts(turn) {
+          if (!turn) return { u: "", a: "" };
+          var wrapper = answerWrapperParts(turn.assistantText);
+          var u = normalizeTurnKeyPart(turn.userText);
+          if (!u && wrapper) u = normalizeTurnKeyPart(wrapper.question);
+          var a = normalizeTurnKeyPart(wrapper ? wrapper.body : canonicalAnswerBody(turn.assistantText));
+          return { u, a };
+        }
+        function canonicalTurnKeyOf(turn) {
+          if (!turn) return "";
+          var parts = turnIdentityParts(turn);
+          return parts.u + "||" + parts.a;
+        }
+        function canonicalizeTurnForThread(turn) {
+          if (!turn) return turn;
+          var question = turn.userText == null ? "" : String(turn.userText).trim();
+          if (!question) {
+            var wrapper = answerWrapperParts(turn.assistantText);
+            if (wrapper) question = wrapper.question;
+          }
+          return {
+            id: turn.id,
+            userText: question || null,
+            assistantText: turn.assistantText == null ? null : turn.assistantText
+          };
+        }
+        function isBetterTurn(candidate, current) {
+          if (!current) return true;
+          var la = String(candidate && candidate.assistantText || "").length;
+          var lb = String(current && current.assistantText || "").length;
+          if (la !== lb) return la > lb;
+          return String(candidate && candidate.userText || "").length > String(current && current.userText || "").length;
+        }
+        function turnRecord(t, idFallback) {
+          return {
+            id: t && t.id != null ? t.id : idFallback,
+            userText: t && t.userText || null,
+            assistantText: t && t.assistantText || null
+          };
+        }
+        var PREFIX_MIN_CHARS = 12;
+        var PREFIX_FUZZY_RATIO = 0.8;
+        function bodiesPrefixCompatible(a, b) {
+          var x = String(a == null ? "" : a);
+          var y = String(b == null ? "" : b);
+          if (!x || !y) return false;
+          if (x === y) return true;
+          var n = Math.min(x.length, y.length);
+          if (n < PREFIX_MIN_CHARS) return false;
+          var common = 0;
+          while (common < n && x.charCodeAt(common) === y.charCodeAt(common)) common++;
+          if (common === n) return true;
+          return common / n >= PREFIX_FUZZY_RATIO;
+        }
+        function isFullerTurn(candidate, current) {
+          var la = turnIdentityParts(candidate).a.length;
+          var lb = turnIdentityParts(current).a.length;
+          if (la !== lb) return la > lb;
+          return isBetterTurn(candidate, current);
+        }
+        var PARAGRAPH_PERMUTATION_MIN = 2;
+        function answerBodyParagraphs(turn) {
+          var wrapper = answerWrapperParts(turn && turn.assistantText);
+          var body = wrapper ? wrapper.body : canonicalAnswerBody(turn && turn.assistantText);
+          var lines = String(body == null ? "" : body).split(String.fromCharCode(10));
+          var out = [];
+          var cur = "";
+          for (var i = 0; i < lines.length; i++) {
+            var line = lines[i];
+            if (line.trim() === "") {
+              var p = normalizeTurnKeyPart(cur);
+              if (p) out.push(p);
+              cur = "";
+              continue;
+            }
+            cur = cur ? cur + String.fromCharCode(10) + line : line;
+          }
+          var tail = normalizeTurnKeyPart(cur);
+          if (tail) out.push(tail);
+          return out;
+        }
+        function bodiesParagraphPermutation(aTurn, bTurn) {
+          var pa = answerBodyParagraphs(aTurn);
+          var pb = answerBodyParagraphs(bTurn);
+          if (pa.length < PARAGRAPH_PERMUTATION_MIN || pa.length !== pb.length) return false;
+          pa.sort();
+          pb.sort();
+          for (var i = 0; i < pa.length; i++) {
+            if (pa[i] !== pb[i]) return false;
+          }
+          return true;
+        }
+        function findPrefixCompatibleIndex(turns, turn) {
+          var parts = turnIdentityParts(turn);
+          if (!parts.u || !parts.a) return -1;
+          for (var i = 0; i < turns.length; i++) {
+            var other = turnIdentityParts(turns[i]);
+            if (other.u !== parts.u) continue;
+            if (bodiesPrefixCompatible(other.a, parts.a)) return i;
+            if (other.a.length === parts.a.length && bodiesParagraphPermutation(turns[i], turn)) return i;
+          }
+          return -1;
+        }
+        function reindexTurnKey(byKey, turns, at) {
+          var k;
+          for (k in byKey) {
+            if (byKey[k] === at) delete byKey[k];
+          }
+          var key = canonicalTurnKeyOf(turns[at]);
+          if (key !== "||") byKey[key] = at;
+        }
+        function mergeTurnsById(baseTurns, extraTurns) {
+          baseTurns = Array.isArray(baseTurns) ? baseTurns : [];
+          extraTurns = Array.isArray(extraTurns) ? extraTurns : [];
+          var byId = {};
+          var byKey = {};
+          var out = [];
+          function add(t) {
+            if (!t) return;
+            var id = t.id != null ? String(t.id) : "x" + out.length;
+            var key = canonicalTurnKeyOf(t);
+            var hasId = Object.prototype.hasOwnProperty.call(byId, id);
+            var hasKey = key !== "||" && Object.prototype.hasOwnProperty.call(byKey, key);
+            var at = hasId ? byId[id] : hasKey ? byKey[key] : findPrefixCompatibleIndex(out, t);
+            if (at !== -1) {
+              var richer = hasId || hasKey ? isBetterTurn(t, out[at]) : isFullerTurn(t, out[at]);
+              if (richer) {
+                out[at] = turnRecord(t, out[at].id);
+                reindexTurnKey(byKey, out, at);
+              }
+              return;
+            }
+            byId[id] = out.length;
+            if (key !== "||") byKey[key] = out.length;
+            out.push(turnRecord(t, id));
+          }
+          var i;
+          for (i = 0; i < baseTurns.length; i++) add(baseTurns[i]);
+          for (i = 0; i < extraTurns.length; i++) add(extraTurns[i]);
+          return out;
+        }
+        function mergeTurnsMonotone(baseTurns, extraTurns) {
+          return mergeTurnsById(baseTurns, extraTurns);
+        }
+        function mergeTurnsByKey(baseTurns, extraTurns) {
+          baseTurns = Array.isArray(baseTurns) ? baseTurns : [];
+          extraTurns = Array.isArray(extraTurns) ? extraTurns : [];
+          var byKey = {};
+          var out = [];
+          function add(t) {
+            if (!t) return;
+            var key = canonicalTurnKeyOf(t);
+            if (key === "||") return;
+            var hasKey = Object.prototype.hasOwnProperty.call(byKey, key);
+            var at = hasKey ? byKey[key] : findPrefixCompatibleIndex(out, t);
+            if (at === -1) {
+              byKey[key] = out.length;
+              out.push(turnRecord(t, "x" + out.length));
+              return;
+            }
+            var richer = hasKey ? isBetterTurn(t, out[at]) : isFullerTurn(t, out[at]);
+            if (richer) {
+              out[at] = turnRecord(t, out[at].id);
+              reindexTurnKey(byKey, out, at);
+            }
+          }
+          for (var i = 0; i < baseTurns.length; i++) add(baseTurns[i]);
+          for (var j = 0; j < extraTurns.length; j++) add(extraTurns[j]);
+          return out;
+        }
+        function dedupeTurns(turns) {
+          var list = Array.isArray(turns) ? turns : [];
+          var byKey = {};
+          var out = [];
+          for (var i = 0; i < list.length; i++) {
+            var t = list[i];
+            if (!t) continue;
+            var key = canonicalTurnKeyOf(t);
+            var hasKey = key !== "||" && Object.prototype.hasOwnProperty.call(byKey, key);
+            var at = hasKey ? byKey[key] : findPrefixCompatibleIndex(out, t);
+            if (at === -1) {
+              if (key !== "||") byKey[key] = out.length;
+              out.push(t);
+              continue;
+            }
+            var richer = hasKey ? isBetterTurn(t, out[at]) : isFullerTurn(t, out[at]);
+            if (richer) {
+              out[at] = t;
+              reindexTurnKey(byKey, out, at);
+            }
+          }
+          return out;
+        }
+        function classifyFolwrContinuation(input) {
+          var i = input || {};
+          var ok = i.ok === true;
+          var status = i.status == null ? 0 : i.status;
+          var bodyLength = typeof i.bodyLength === "number" && i.bodyLength >= 0 ? i.bodyLength : 0;
+          var newTurns = typeof i.newTurns === "number" && i.newTurns > 0 ? i.newTurns : 0;
+          var cursor = i.cursor ? String(i.cursor) : null;
+          var sentCursor = i.sentCursor ? String(i.sentCursor) : null;
+          var cursorRepeated = !!(cursor && sentCursor && cursor === sentCursor);
+          var kind;
+          var complete, canContinue;
+          if (!ok) {
+            kind = "http-error";
+            complete = false;
+            canContinue = false;
+          } else if (bodyLength === 0) {
+            kind = "empty-body";
+            complete = true;
+            canContinue = false;
+          } else if (cursorRepeated) {
+            kind = "cursor-repeat";
+            complete = true;
+            canContinue = false;
+          } else if (newTurns > 0) {
+            kind = "new-turns";
+            complete = false;
+            canContinue = true;
+          } else {
+            kind = "no-new-turns";
+            complete = true;
+            canContinue = false;
+          }
+          return {
+            kind,
+            complete,
+            canContinue,
+            status,
+            ok,
+            bodyLength,
+            newTurns,
+            cursor,
+            cursorRepeated,
+            log: "kind=" + kind + " status=" + status + " ok=" + (ok ? 1 : 0) + " len=" + bodyLength + "B \u0445\u043E\u0434\u043E\u0432=+" + newTurns + " \u043A\u0443\u0440\u0441\u043E\u0440=" + (cursor ? "\u0435\u0441\u0442\u044C(" + (cursorRepeated ? "\u043F\u043E\u0432\u0442\u043E\u0440" : "\u043D\u043E\u0432\u044B\u0439") + ")" : "\u043D\u0435\u0442")
+          };
+        }
+        if (typeof window !== "undefined") {
+          window.parseGoogleFolwrOpen = parseGoogleFolwrOpen;
+          window.GoogleFolwrUtils = {
+            countTurnContainers,
+            extractTurnsFromDocument,
+            mergeTurnsByKey,
+            extractContinuationToken,
+            mergeTurnsById,
+            mergeTurnsMonotone,
+            classifyFolwrContinuation,
+            // O-32: каноническая идентичность/форма хода — ОДИН источник правды для сетевого пути,
+            // DOM-добора перехватчика и DOM-пути адаптера (см. блок «O-32» ниже по файлу).
+            canonicalTurnKeyOf,
+            canonicalAnswerBody,
+            canonicalizeTurnForThread,
+            normalizeTurnKeyPart,
+            // O-32 (фикс A/C): префикс-терпимая идентичность хода и дедуп списка перед кэшем.
+            turnIdentityParts,
+            bodiesPrefixCompatible,
+            dedupeTurns,
+            // O-45: общий рендер код-блоков (```lang … ```) и отбор узлов DOM-пути —
+            // переиспользуются адаптером (adapters/google-search-adapter.js) и тестами.
+            renderCodeBlock,
+            answerTextOf,
+            answerDomNodes,
+            isCodeBlockElement
+          };
+        }
+        if (typeof module !== "undefined" && module.exports) {
+          module.exports = {
+            parseGoogleFolwrOpen,
+            countTurnContainers,
+            extractTurnsFromDocument,
+            mergeTurnsByKey,
+            extractContinuationToken,
+            mergeTurnsById,
+            mergeTurnsMonotone,
+            classifyFolwrContinuation,
+            canonicalTurnKeyOf,
+            canonicalAnswerBody,
+            canonicalizeTurnForThread,
+            normalizeTurnKeyPart,
+            turnIdentityParts,
+            bodiesPrefixCompatible,
+            dedupeTurns,
+            renderCodeBlock,
+            answerTextOf,
+            answerDomNodes,
+            isCodeBlockElement
+          };
+        }
+      })();
+    }
+  });
+
+  // ../utils/export-text-builders.js
+  var require_export_text_builders = __commonJS({
+    "../utils/export-text-builders.js"(exports, module) {
+      init_buildReferenceText();
+      (function() {
+        "use strict";
+        function aiCmI18nMessage(key, fallback, substitutions) {
+          try {
+            if (typeof chrome !== "undefined" && chrome.i18n && typeof chrome.i18n.getMessage === "function") {
+              var message = substitutions ? chrome.i18n.getMessage(key, substitutions) : chrome.i18n.getMessage(key);
+              if (message) return message;
+            }
+          } catch (eMessage) {
+          }
+          return fallback;
+        }
+        var REASONING_SECTION_TAG = "[REASONING]";
+        var ANSWER_SECTION_TAG = "[ANSWER]";
+        function reasoningOfMessage(msg) {
+          if (!msg || typeof msg !== "object") return "";
+          var r = msg.reasoning;
+          return typeof r === "string" ? r : "";
+        }
+        function withReasoningSections(text, reasoning) {
+          var t = typeof text === "string" ? text : "";
+          var r = typeof reasoning === "string" ? reasoning : "";
+          if (!r) return t;
+          if (t.indexOf(r) !== -1) return t;
+          return REASONING_SECTION_TAG + "\n" + r + "\n\n" + ANSWER_SECTION_TAG + "\n" + t;
+        }
+        function messageTextWithReasoning(msg) {
+          if (!msg || typeof msg !== "object") return "";
+          return withReasoningSections(msg.text, reasoningOfMessage(msg));
+        }
+        function reasoningOfMessageForExport(msg, useHidden) {
+          var r = reasoningOfMessage(msg);
+          if (r) return r;
+          if (useHidden !== true || !msg || typeof msg !== "object") return "";
+          return typeof msg.hiddenReasoning === "string" ? msg.hiddenReasoning : "";
+        }
+        function markersMessageTextWithReasoning(msg, useHidden) {
+          return withReasoningSections(
+            messageTextForMarkers(msg),
+            reasoningOfMessageForExport(msg, useHidden)
+          );
+        }
+        var TXT_ROLE_MARKER_SITES = ["qwen"];
+        function isTxtRoleMarkerHistory(history) {
+          try {
+            var site = String(history && history.site || "").toLowerCase();
+            return TXT_ROLE_MARKER_SITES.indexOf(site) !== -1;
+          } catch (e) {
+            return false;
+          }
+        }
+        function txtRoleMarker(role) {
+          return role === "user" ? "USER:" : "ASSISTANT:";
+        }
+        function mdRoleMarker(role) {
+          return role === "user" ? "### USER" : "### ASSISTANT";
+        }
+        var CONTAINER_MIN_CONTAINED = 2;
+        var CONTAINER_COVER_MIN = 0.8;
+        function messageTextForMarkers(msg) {
+          if (!msg || typeof msg !== "object") return "";
+          if (typeof msg.text === "string" && msg.text) return msg.text;
+          if (typeof msg.content === "string") return msg.content;
+          return typeof msg.text === "string" ? msg.text : "";
+        }
+        function dropContainerMessages(list) {
+          var src = Array.isArray(list) ? list : [];
+          var texts = [];
+          for (var t = 0; t < src.length; t++) texts.push(messageTextForMarkers(src[t]));
+          var keep = [];
+          for (var c = 0; c < src.length; c++) {
+            var candidate = texts[c];
+            var contained = 0;
+            var covered = 0;
+            var longest = 0;
+            if (candidate) {
+              for (var j = 0; j < texts.length; j++) {
+                var other = texts[j];
+                if (j === c || !other || other.length >= candidate.length) continue;
+                if (candidate.indexOf(other) === -1) continue;
+                contained++;
+                covered += other.length;
+                if (other.length > longest) longest = other.length;
+              }
+            }
+            var isContainer = contained >= CONTAINER_MIN_CONTAINED && covered >= CONTAINER_COVER_MIN * candidate.length && candidate.length >= 2 * longest;
+            if (!isContainer) keep.push(src[c]);
+          }
+          return keep;
+        }
+        function diagTxtRoleStructure(list, totalCount) {
+          if (!diagOn()) return false;
+          try {
+            var kept = Array.isArray(list) ? list.length : -1;
+            var total = typeof totalCount === "number" ? totalCount : kept;
+            var first = Array.isArray(list) && list.length > 0 ? list[0] : null;
+            var text = messageTextForMarkers(first);
+            var kind = "\u043D\u0435\u0442";
+            if (first && typeof first === "object") {
+              if (typeof first.text === "string") kind = "text";
+              else if (typeof first.content === "string") kind = "content";
+            }
+            console.log(DIAG_PREFIX + " txt-roles site=qwen isArray=" + Array.isArray(list) + " msgs=" + total + " kept=" + kept + " dropped-containers=" + (kept >= 0 && total >= kept ? total - kept : 0) + " first.role=" + (first && first.role !== void 0 && first.role !== null ? String(first.role) : "(\u043D\u0435\u0442)") + " first.kind=" + kind + " first.len=" + text.length + " first.head=" + (diagHead(text, 60) || "\u043F\u0443\u0441\u0442\u043E"));
+          } catch (eLogRoles) {
+          }
+          return true;
+        }
+        function renderReferenceText(list) {
+          return buildReferenceText(list);
+        }
+        function renderReferenceTextWithRoleMarkers(list) {
+          var src = Array.isArray(list) ? list : [];
+          var parts = [];
+          for (var i = 0; i < src.length; i++) {
+            var m = src[i] || {};
+            var text = renderReferenceText([{ role: m.role, text: messageTextForMarkers(m) }]);
+            if (text === null) return null;
+            if (!String(text).trim()) continue;
+            parts.push(txtRoleMarker(m.role) + "\n" + text);
+          }
+          return parts.join("\n\n");
+        }
+        function buildTxtFromHistory(history) {
+          var hist = history || {};
+          var site = typeof hist.site === "string" ? hist.site : "";
+          var messages = history && Array.isArray(history.messages) ? history.messages : [];
+          var marked = isTxtRoleMarkerHistory(history);
+          var kept = marked ? dropContainerMessages(messages) : messages;
+          var forTxt = kept.map(function(m) {
+            var text = marked ? markersMessageTextWithReasoning(m, true) : messageTextWithReasoning(m);
+            if (!m || typeof m !== "object" || text === m.text) return m;
+            var copy = {};
+            for (var k in m) {
+              if (Object.prototype.hasOwnProperty.call(m, k)) copy[k] = m[k];
+            }
+            copy.text = text;
+            return copy;
+          });
+          var out;
+          if (marked) {
+            diagTxtRoleStructure(forTxt, messages.length);
+            out = renderReferenceTextWithRoleMarkers(forTxt);
+          } else {
+            out = renderReferenceText(forTxt);
+          }
+          if (site === "gemini" && hist.sourceTier && out) out = hist.sourceTier + "\n\n" + out;
+          return out === null ? "" : out;
+        }
+        function exportTokenSnapshot(history) {
+          var h = history || {};
+          var tokens = typeof h.tokens === "number" ? h.tokens : 0;
+          var limit = typeof h.limit === "number" ? h.limit : 0;
+          var percent = typeof h.percent === "number" ? h.percent : 0;
+          if (limit > 0) {
+            var calc = Math.round(tokens / limit * 1e3) / 10;
+            if (calc !== percent) percent = calc;
+          }
+          return { tokens, limit, percent };
+        }
+        function buildMdFromHistory(history, platform) {
+          var h = history || {};
+          var site = typeof h.site === "string" ? h.site : "";
+          var lines = [];
+          lines.push(aiCmI18nMessage("export_md_title", "# AI Context Monitor \u2014 \u044D\u043A\u0441\u043F\u043E\u0440\u0442 \u0438\u0441\u0442\u043E\u0440\u0438\u0438"));
+          lines.push("");
+          lines.push(aiCmI18nMessage("export_md_platform", "\u041F\u043B\u0430\u0442\u0444\u043E\u0440\u043C\u0430: " + (platform || "AI Chat"), [platform || "AI Chat"]));
+          lines.push(aiCmI18nMessage("export_md_model", "\u041C\u043E\u0434\u0435\u043B\u044C: " + (h.model || "\u2014"), [h.model || "\u2014"]));
+          var exportedAt = (/* @__PURE__ */ new Date()).toISOString();
+          lines.push(aiCmI18nMessage("export_md_date", "\u0414\u0430\u0442\u0430 \u044D\u043A\u0441\u043F\u043E\u0440\u0442\u0430: " + exportedAt, [exportedAt]));
+          var snap = exportTokenSnapshot(h);
+          var tokens = snap.tokens;
+          var limit = snap.limit;
+          var percent = snap.percent;
+          if (tokens === 0 && limit === 0) {
+            lines.push("\u0422\u043E\u043A\u0435\u043D\u044B: \u043D/\u0434 (" + percent + "%)");
+          } else {
+            lines.push(aiCmI18nMessage("export_md_tokens", "\u0422\u043E\u043A\u0435\u043D\u044B: " + tokens + " / " + limit + " (" + percent + "%)", [String(tokens), String(limit), String(percent)]));
+          }
+          lines.push("");
+          if (site === "gemini" && h.sourceTier) {
+            lines.push(h.sourceTier, "");
+          }
+          var mdMarked = isTxtRoleMarkerHistory(h);
+          var messages = Array.isArray(h.messages) ? h.messages : [];
+          if (mdMarked) messages = dropContainerMessages(messages);
+          for (var i = 0; i < messages.length; i++) {
+            var msg = messages[i] || {};
+            if (typeof aiCmDiagLine === "function") {
+              aiCmDiagLine("claude-role-builder", { msgRole: msg.role, mdMarked });
+            }
+            var title = mdMarked ? mdRoleMarker(msg.role) : msg.role === "user" || msg.role === "human" ? aiCmI18nMessage("export_md_role_user", "## \u041F\u043E\u043B\u044C\u0437\u043E\u0432\u0430\u0442\u0435\u043B\u044C") : aiCmI18nMessage("export_md_role_assistant", "## \u0410\u0441\u0441\u0438\u0441\u0442\u0435\u043D\u0442");
+            lines.push(title);
+            lines.push("");
+            lines.push(mdMarked ? markersMessageTextWithReasoning(msg, true) : messageTextWithReasoning(msg));
+            lines.push("");
+          }
+          return lines.join("\n");
+        }
+        function buildJsonFromHistory(history, platform) {
+          var h = history || {};
+          return JSON.stringify({
+            platform: platform || "AI Chat",
+            model: h.model || "",
+            exportedAt: (/* @__PURE__ */ new Date()).toISOString(),
+            tokens: typeof h.tokens === "number" ? h.tokens : 0,
+            limit: typeof h.limit === "number" ? h.limit : 0,
+            percent: typeof h.percent === "number" ? h.percent : 0,
+            // Two-Tier (v89): аддитивное поле метаданных. undefined → JSON.stringify ключ НЕ
+            // добавляет, поэтому у прочих платформ и у Gemini без метки байты прежние.
+            sourceTier: h.sourceTier,
+            messages: Array.isArray(h.messages) ? h.messages : []
+          }, null, 2);
+        }
+        var DIAG_PREFIX = "[AI CM][diag]";
+        function diagOn() {
+          try {
+            if (typeof sessionStorage !== "undefined" && sessionStorage && sessionStorage.getItem("aiCmDebug") === "1") return true;
+          } catch (eSess) {
+          }
+          try {
+            if (typeof window !== "undefined" && window && window.__aiCmDebugLogs === true) return true;
+          } catch (eWin) {
+          }
+          return false;
+        }
+        function diagHead(v, n) {
+          try {
+            var lim = typeof n === "number" && n > 0 ? n : 100;
+            if (v === void 0 || v === null) return "";
+            var s = String(v);
+            if (!s) return "";
+            var flat = s.replace(/\s+/g, " ").trim();
+            if (!flat) return "";
+            return flat.length > lim ? flat.slice(0, lim) + "\u2026" : flat;
+          } catch (eHead) {
+            return "";
+          }
+        }
+        function diagStack() {
+          try {
+            var lines = String(new Error().stack || "").split("\n");
+            var out = [];
+            for (var i = 1; i < lines.length && out.length < 4; i++) {
+              var s = String(lines[i] || "").replace(/\s+/g, " ").trim();
+              if (!s || s.indexOf("diag") !== -1) continue;
+              out.push(s);
+            }
+            return out.join(" <- ");
+          } catch (eStack) {
+            return "";
+          }
+        }
+        function diagDownload(trigger, content, fileName, extra) {
+          try {
+            if (typeof aiCmDiagDownload === "function") return aiCmDiagDownload(trigger, content, fileName, extra);
+          } catch (eGlobal) {
+          }
+          if (!diagOn()) return false;
+          try {
+            var e = extra || {};
+            var url = "";
+            try {
+              url = String(typeof location !== "undefined" && location && location.href || "");
+            } catch (eUrl) {
+            }
+            console.log(DIAG_PREFIX + " download trigger=" + (trigger || "(\u043D\u0435\u0442)") + " file=" + (fileName === void 0 || fileName === null || String(fileName) === "" ? "\u043F\u0443\u0441\u0442\u043E\u0435" : String(fileName)) + " bytes100=" + (diagHead(content, 100) || "\u043F\u0443\u0441\u0442\u043E") + " len=" + (content === void 0 || content === null ? 0 : String(content).length) + " mime=" + (e.mime === void 0 ? "(\u043D\u0435\u0442)" : e.mime) + " url=" + url + " threadId=" + (e.threadId === void 0 || e.threadId === "" ? "(\u043D\u0435\u0442)" : e.threadId) + " site=" + (e.site === void 0 ? "" : e.site) + " reason=" + (e.reason === void 0 ? "" : e.reason) + " src=" + diagStack());
+          } catch (eLog) {
+          }
+          return true;
+        }
+        var XSSI_PREFIX_LEN = 4;
+        function startsWithXssiPrefix(content) {
+          try {
+            if (content === void 0 || content === null) return false;
+            var s = String(content);
+            if (s.length < XSSI_PREFIX_LEN) return false;
+            return s.charCodeAt(0) === 41 && s.charCodeAt(1) === 93 && s.charCodeAt(2) === 125 && s.charCodeAt(3) === 39;
+          } catch (eXssi) {
+            return false;
+          }
+        }
+        function downloadBlockReason(content, fileName) {
+          if (startsWithXssiPrefix(content)) return "xssi-prefix";
+          if (fileName === void 0 || fileName === null || String(fileName).trim() === "") return "empty-name";
+          return null;
+        }
+        function diagDownloadBlocked(trigger, content, fileName, reason, extra) {
+          try {
+            if (typeof aiCmDiagDownloadBlocked === "function") {
+              return aiCmDiagDownloadBlocked(trigger, content, fileName, reason, extra);
+            }
+          } catch (eGlobalBlocked) {
+          }
+          if (!diagOn()) return false;
+          try {
+            var e = extra || {};
+            var url = "";
+            try {
+              url = String(typeof location !== "undefined" && location && location.href || "");
+            } catch (eUrlB) {
+            }
+            console.log(DIAG_PREFIX + " download-blocked reason=" + (reason || "(\u043D\u0435\u0442)") + " trigger=" + (trigger || "(\u043D\u0435\u0442)") + " file=" + (fileName === void 0 || fileName === null || String(fileName) === "" ? "\u043F\u0443\u0441\u0442\u043E\u0435" : String(fileName)) + " bytes100=" + (diagHead(content, 100) || "\u043F\u0443\u0441\u0442\u043E") + " len=" + (content === void 0 || content === null ? 0 : String(content).length) + " mime=" + (e.mime === void 0 ? "(\u043D\u0435\u0442)" : e.mime) + " url=" + url + " threadId=" + (e.threadId === void 0 || e.threadId === "" ? "(\u043D\u0435\u0442)" : e.threadId) + " site=" + (e.site === void 0 ? "" : e.site) + " src=" + diagStack());
+          } catch (eLogBlocked) {
+          }
+          return true;
+        }
+        function downloadBlob(content, fileName, mimeType, trigger, extra) {
+          var ex = extra || {};
+          var blockReason = downloadBlockReason(content, fileName);
+          if (blockReason) {
+            try {
+              diagDownloadBlocked(
+                trigger || "builder-download",
+                content,
+                fileName,
+                blockReason,
+                { mime: mimeType, threadId: ex.threadId, site: ex.site }
+              );
+            } catch (eDiagBlocked) {
+            }
+            return false;
+          }
+          try {
+            diagDownload(
+              trigger || "builder-download",
+              content,
+              fileName,
+              { mime: mimeType, threadId: ex.threadId, site: ex.site, reason: ex.reason }
+            );
+          } catch (eDiag) {
+          }
+          try {
+            var blob = new Blob([content], { type: mimeType });
+            var url = URL.createObjectURL(blob);
+            var a = document.createElement("a");
+            a.href = url;
+            a.download = fileName;
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            setTimeout(function() {
+              URL.revokeObjectURL(url);
+            }, 1e3);
+          } catch (e) {
+            console.warn("[export] \u043D\u0435 \u0443\u0434\u0430\u043B\u043E\u0441\u044C \u0441\u043A\u0430\u0447\u0430\u0442\u044C \u0444\u0430\u0439\u043B:", e);
+          }
+          return true;
+        }
+        var Api = {
+          buildTxtFromHistory,
+          buildMdFromHistory,
+          buildJsonFromHistory,
+          downloadBlob,
+          // O-27 (защитный фикс): причина отказа точки скачивания (null — выдача разрешена) и
+          // сама точка отказа наружу — для пинов тестов и переиспользования вызывающим кодом.
+          aiCmDownloadBlockReason: downloadBlockReason,
+          aiCmDiagDownloadBlocked: diagDownloadBlocked,
+          // O-27/O-32: диагностические хелперы наружу (content.js/export-manager.js зовут их
+          // через window.AiCmExportBuilders, если глобальный utils/debug.js не подключён).
+          aiCmDiagOn: diagOn,
+          aiCmDiagHead: diagHead,
+          aiCmDiagDownload: diagDownload,
+          // O-35: рендер reasoning контрактом DeepSeek — чистая функция наружу (пины тестов
+          // и переиспользование; на боевом пути вызывается только двумя сборщиками выше).
+          aiCmMessageTextWithReasoning: messageTextWithReasoning,
+          aiCmWithReasoningSections: withReasoningSections,
+          // O-37 (C): источник размышления для маркерного пути (reasoning, иначе поле захвата
+          // hiddenReasoning) и композиция «текст сообщения + секции» — чистые функции наружу;
+          // на боевом пути их зовут только buildTxtFromHistory/buildMdFromHistory выше.
+          aiCmReasoningOfMessageForExport: reasoningOfMessageForExport,
+          aiCmMarkersMessageTextWithReasoning: markersMessageTextWithReasoning,
+          // O-36 (D2): маркеры ролей txt-экспорта — чистые предикаты наружу (пины тестов;
+          // на боевом пути вызываются только сборщиком buildTxtFromHistory выше).
+          aiCmTxtRoleMarker: txtRoleMarker,
+          aiCmIsTxtRoleMarkerHistory: isTxtRoleMarkerHistory,
+          aiCmTxtRoleMarkerSites: TXT_ROLE_MARKER_SITES,
+          // O-36 (D2.1): маркер роли md (Qwen Studio), текст сообщения для маркерного пути
+          // (с фолбэком на .content) и контейнер-чистка — чистые функции наружу для пинов
+          // и переиспользования; на боевом пути их зовут только два сборщика выше.
+          aiCmMdRoleMarker: mdRoleMarker,
+          aiCmMessageTextForMarkers: messageTextForMarkers,
+          aiCmDropContainerMessages: dropContainerMessages,
+          aiCmDiagTxtRoleStructure: diagTxtRoleStructure,
+          aiCmContainerRules: { minContained: CONTAINER_MIN_CONTAINED, coverMin: CONTAINER_COVER_MIN }
+        };
+        if (typeof module !== "undefined" && module.exports) module.exports = Api;
+        if (typeof window !== "undefined") window.AiCmExportBuilders = Api;
+      })();
+    }
+  });
+
+  // entry-content.js
+  var require_entry_content = __commonJS({
+    "entry-content.js"(exports, module) {
+      init_buildReferenceText();
+      init_platform();
+      init_debug();
       var CYRILLIC_CHARS_PER_TOKEN = 3.3;
       var Tokenizer = {
         CYRILLIC_CHARS_PER_TOKEN,
@@ -1488,9 +2838,9 @@
             if (role === "unknown") continue;
             messages.push({ role, content });
           }
-          if (diagOn && typeof aiCmDiagLine === "function") {
+          if (diagOn && typeof aiCmDiagLine2 === "function") {
             const stats = this._lastTurnStats;
-            aiCmDiagLine("chatgpt-adapter-turn", {
+            aiCmDiagLine2("chatgpt-adapter-turn", {
               turns: stats.turns,
               users: stats.users,
               assistants: stats.assistants,
@@ -1499,7 +2849,7 @@
               skippedUnknown: stats.skippedUnknown
             });
             if (stats.turns > 0 && stats.assistants === 0) {
-              aiCmDiagLine("chatgpt-roles-miss", {
+              aiCmDiagLine2("chatgpt-roles-miss", {
                 turns: stats.turns,
                 users: stats.users,
                 turnSel: this._turnSelectors.join(", "),
@@ -1577,7 +2927,7 @@
               }
             }
           } catch (e) {
-            swallowSoft(e, "adapter:chatgpt:detectModel");
+            swallowSoft2(e, "adapter:chatgpt:detectModel");
           }
           if (!this._modelDetectLogged) {
             this._modelDetectLogged = true;
@@ -2120,7 +3470,7 @@
               return candidates[i];
             }
           } catch (e) {
-            swallowSoft(e, "adapter:deepseek:firstContentChild");
+            swallowSoft2(e, "adapter:deepseek:firstContentChild");
           }
           return null;
         }
@@ -2247,9 +3597,9 @@
             if (messages.length > 0) {
               debugLog("log", `[DeepSeekAdapter] \u0418\u0437\u0432\u043B\u0435\u0447\u0435\u043D\u043E ${messages.length} \u0441\u043E\u043E\u0431\u0449\u0435\u043D\u0438\u0439, \u0440\u043E\u043B\u0438: ${messages.map((m) => m.role.substring(0, 4)).join(", ")}`);
             }
-            if (o21Stats && typeof aiCmDiagLine === "function") {
+            if (o21Stats && typeof aiCmDiagLine2 === "function") {
               try {
-                aiCmDiagLine("o21-dom-extract", {
+                aiCmDiagLine2("o21-dom-extract", {
                   site: this.siteName || "deepseek",
                   totalFound: o21Stats.totalFound,
                   extracted: o21Stats.extracted,
@@ -2338,7 +3688,7 @@
         }
         try {
           if (typeof __require === "function") {
-            var mod = __require("../utils/google-search-folwr-parser.js");
+            var mod = require_google_search_folwr_parser();
             if (mod && typeof mod.answerTextOf === "function" && typeof mod.answerDomNodes === "function") {
               return mod;
             }
@@ -2353,7 +3703,7 @@
           try {
             return String(util.answerTextOf(el) || "");
           } catch (e) {
-            swallowSoft(e, "adapter:google-search:answerText");
+            swallowSoft2(e, "adapter:google-search:answerText");
           }
         }
         try {
@@ -2376,7 +3726,7 @@
             var nodes = util.answerDomNodes(root);
             if (nodes) return nodes;
           } catch (e) {
-            swallowSoft(e, "adapter:google-search:answerNodes");
+            swallowSoft2(e, "adapter:google-search:answerNodes");
           }
         }
         try {
@@ -2478,7 +3828,7 @@
               }
             }
             try {
-              if (typeof aiCmDiagOn === "function" && aiCmDiagOn() && typeof aiCmDiagLine === "function") {
+              if (typeof aiCmDiagOn === "function" && aiCmDiagOn() && typeof aiCmDiagLine2 === "function") {
                 var codeSels = [
                   ".n6owBd.awi2gc pre",
                   ".n6owBd.awi2gc code",
@@ -2496,10 +3846,10 @@
                 if (codeSig !== this._lastCodeBlockSig) {
                   this._lastCodeBlockSig = codeSig;
                   if (!codeEl) {
-                    aiCmDiagLine("gsa-code-block", { found: 0, via: "(\u043D\u0435\u0442)", blocks: blocks.length, turns: turns.length });
+                    aiCmDiagLine2("gsa-code-block", { found: 0, via: "(\u043D\u0435\u0442)", blocks: blocks.length, turns: turns.length });
                   } else {
                     var codeParent = codeEl.parentElement;
-                    aiCmDiagLine("gsa-code-block", {
+                    aiCmDiagLine2("gsa-code-block", {
                       found: 1,
                       via: codeVia,
                       tag: codeEl.tagName,
@@ -3118,7 +4468,10 @@
           try {
             var hasNodeModule = typeof module !== "undefined" && !!module && typeof __require === "function";
             if (hasNodeModule) {
-              var builders = __require("../utils/export-text-builders.js");
+              var builders = (
+                /** @type {any} */
+                require_export_text_builders()
+              );
               if (builders && typeof builders.aiCmDropContainerMessages === "function") {
                 return builders.aiCmDropContainerMessages;
               }
@@ -3196,7 +4549,7 @@
               if (m) return m[0].toLowerCase();
             }
           } catch (e) {
-            swallowSoft(e, "adapter:qwen:detectModel");
+            swallowSoft2(e, "adapter:qwen:detectModel");
           }
           return null;
         }
@@ -3862,7 +5215,7 @@
             try {
               collectTurnText(turn[3], cands);
             } catch (e) {
-              swallowSoft(e, "gemini-utils:extractCanonicalAnswer-fallback");
+              swallowSoft2(e, "gemini-utils:extractCanonicalAnswer-fallback");
             }
           }
           var cleaned = [];
@@ -3885,7 +5238,7 @@
               for (var i = 0; i < node.length; i++) collectDrStrings(node[i], out, minLen, depth + 1);
             }
           } catch (e) {
-            swallowSoft(e, "gemini-utils:collectDrStrings");
+            swallowSoft2(e, "gemini-utils:collectDrStrings");
           }
         }
         function ctText(s) {
@@ -3918,7 +5271,7 @@
             }
             if (pbest) res.planText = ctText(pbest);
           } catch (e) {
-            swallowSoft(e, "gemini-utils:extractDrTexts");
+            swallowSoft2(e, "gemini-utils:extractDrTexts");
           }
           return res;
         }
@@ -4516,7 +5869,7 @@
               tgQuestions.push(found);
             }
           } catch (e) {
-            swallowSoft(e, "gsa-utils:parseGoogleFolwrOpen-tgqphd");
+            swallowSoft2(e, "gsa-utils:parseGoogleFolwrOpen-tgqphd");
           }
           var contentNodes = gatherAnswerContentNodes(doc);
           var answers = assignContentToTurns(turnsArr, contentNodes);
@@ -4636,7 +5989,7 @@
               });
             }
           } catch (e) {
-            swallowSoft(e, "gsa-utils:extractTurnsFromDocument");
+            swallowSoft2(e, "gsa-utils:extractTurnsFromDocument");
           }
           return turns;
         }
@@ -4768,12 +6121,46 @@
           if (la !== lb) return la > lb;
           return isBetterTurn(candidate, current);
         }
+        var PARAGRAPH_PERMUTATION_MIN = 2;
+        function answerBodyParagraphs(turn) {
+          var wrapper = answerWrapperParts(turn && turn.assistantText);
+          var body = wrapper ? wrapper.body : canonicalAnswerBody(turn && turn.assistantText);
+          var lines = String(body == null ? "" : body).split(String.fromCharCode(10));
+          var out = [];
+          var cur = "";
+          for (var i = 0; i < lines.length; i++) {
+            var line = lines[i];
+            if (line.trim() === "") {
+              var p = normalizeTurnKeyPart(cur);
+              if (p) out.push(p);
+              cur = "";
+              continue;
+            }
+            cur = cur ? cur + String.fromCharCode(10) + line : line;
+          }
+          var tail = normalizeTurnKeyPart(cur);
+          if (tail) out.push(tail);
+          return out;
+        }
+        function bodiesParagraphPermutation(aTurn, bTurn) {
+          var pa = answerBodyParagraphs(aTurn);
+          var pb = answerBodyParagraphs(bTurn);
+          if (pa.length < PARAGRAPH_PERMUTATION_MIN || pa.length !== pb.length) return false;
+          pa.sort();
+          pb.sort();
+          for (var i = 0; i < pa.length; i++) {
+            if (pa[i] !== pb[i]) return false;
+          }
+          return true;
+        }
         function findPrefixCompatibleIndex(turns, turn) {
           var parts = turnIdentityParts(turn);
           if (!parts.u || !parts.a) return -1;
           for (var i = 0; i < turns.length; i++) {
             var other = turnIdentityParts(turns[i]);
-            if (other.u === parts.u && bodiesPrefixCompatible(other.a, parts.a)) return i;
+            if (other.u !== parts.u) continue;
+            if (bodiesPrefixCompatible(other.a, parts.a)) return i;
+            if (other.a.length === parts.a.length && bodiesParagraphPermutation(turns[i], turn)) return i;
           }
           return -1;
         }
@@ -4966,46 +6353,6 @@
       })();
       (function() {
         "use strict";
-        function cleanInline(s) {
-          s = s.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, "$1");
-          s = s.replace(/(\*\*|__)/g, "");
-          s = s.replace(/(?<![*\w])\*([^*\n]+)\*(?![\w*])/g, "$1");
-          s = s.replace(/(?<![\w_])\_([^_\n]+)\_(?![\w_])/g, "$1");
-          s = s.replace(/`/g, "");
-          return s;
-        }
-        function cleanLine(line) {
-          var s = String(line == null ? "" : line);
-          s = s.replace(/^#{1,6}\s+/, "");
-          s = s.replace(/^>\s?/, "");
-          s = s.replace(/^[-*+]\s+/, "");
-          return s;
-        }
-        function cleanText(text) {
-          var lines = String(text).split("\n");
-          var out = [];
-          for (var i = 0; i < lines.length; i++) {
-            var line = lines[i];
-            var trimmed = line.trim();
-            if (/^-{3,}$/.test(trimmed)) continue;
-            out.push(cleanInline(cleanLine(line)));
-          }
-          return out.join("\n");
-        }
-        function buildReferenceText(messages) {
-          var list = Array.isArray(messages) ? messages : [];
-          var parts = [];
-          for (var i = 0; i < list.length; i++) {
-            var msg = list[i] || {};
-            parts.push(cleanText(msg.text == null ? "" : msg.text));
-          }
-          return parts.join("\n\n");
-        }
-        if (typeof module !== "undefined" && module.exports) module.exports = buildReferenceText;
-        if (typeof window !== "undefined") window.buildReferenceText = buildReferenceText;
-      })();
-      (function() {
-        "use strict";
         function aiCmI18nMessage2(key, fallback, substitutions) {
           try {
             if (typeof chrome !== "undefined" && chrome.i18n && typeof chrome.i18n.getMessage === "function") {
@@ -5112,16 +6459,7 @@
           return true;
         }
         function renderReferenceText(list) {
-          if (typeof window !== "undefined" && typeof window.buildReferenceText === "function") {
-            return window.buildReferenceText(list);
-          }
-          if (typeof __require === "function") {
-            try {
-              return __require("./buildReferenceText.js")(list);
-            } catch (e) {
-            }
-          }
-          return null;
+          return buildReferenceText(list);
         }
         function renderReferenceTextWithRoleMarkers(list) {
           var src = Array.isArray(list) ? list : [];
@@ -5200,8 +6538,8 @@
           if (mdMarked) messages = dropContainerMessages(messages);
           for (var i = 0; i < messages.length; i++) {
             var msg = messages[i] || {};
-            if (typeof aiCmDiagLine === "function") {
-              aiCmDiagLine("claude-role-builder", { msgRole: msg.role, mdMarked });
+            if (typeof aiCmDiagLine2 === "function") {
+              aiCmDiagLine2("claude-role-builder", { msgRole: msg.role, mdMarked });
             }
             var title = mdMarked ? mdRoleMarker(msg.role) : msg.role === "user" || msg.role === "human" ? aiCmI18nMessage2("export_md_role_user", "## \u041F\u043E\u043B\u044C\u0437\u043E\u0432\u0430\u0442\u0435\u043B\u044C") : aiCmI18nMessage2("export_md_role_assistant", "## \u0410\u0441\u0441\u0438\u0441\u0442\u0435\u043D\u0442");
             lines.push(title);
@@ -5267,7 +6605,7 @@
         }
         function diagDownload(trigger, content, fileName, extra) {
           try {
-            if (typeof aiCmDiagDownload === "function") return aiCmDiagDownload(trigger, content, fileName, extra);
+            if (typeof aiCmDiagDownload2 === "function") return aiCmDiagDownload2(trigger, content, fileName, extra);
           } catch (eGlobal) {
           }
           if (!diagOn()) return false;
@@ -5301,8 +6639,8 @@
         }
         function diagDownloadBlocked(trigger, content, fileName, reason, extra) {
           try {
-            if (typeof aiCmDiagDownloadBlocked === "function") {
-              return aiCmDiagDownloadBlocked(trigger, content, fileName, reason, extra);
+            if (typeof aiCmDiagDownloadBlocked2 === "function") {
+              return aiCmDiagDownloadBlocked2(trigger, content, fileName, reason, extra);
             }
           } catch (eGlobalBlocked) {
           }
@@ -5658,8 +6996,8 @@
               var text = typeof m.text === "string" ? m.text : typeof m.content === "string" ? m.content : "";
               if (!text) continue;
               var norm = { role: m.role === "user" || m.role === "human" ? "user" : "assistant", text };
-              if (typeof aiCmDiagLine === "function") {
-                aiCmDiagLine("claude-role-normalize", { inputRole: m.role, outputRole: norm.role });
+              if (typeof aiCmDiagLine2 === "function") {
+                aiCmDiagLine2("claude-role-normalize", { inputRole: m.role, outputRole: norm.role });
               }
               if (typeof m.hiddenReasoning === "string" && m.hiddenReasoning) norm.hiddenReasoning = m.hiddenReasoning;
               out.push(norm);
@@ -6184,8 +7522,8 @@
         var BDS_BOM = "\uFEFF";
         function bdsDiagLine(tag, fields) {
           try {
-            if (typeof aiCmDiagLine !== "function") return false;
-            return aiCmDiagLine(tag, fields) !== false;
+            if (typeof aiCmDiagLine2 !== "function") return false;
+            return aiCmDiagLine2(tag, fields) !== false;
           } catch (eDiag) {
             return false;
           }
@@ -6251,7 +7589,7 @@
           var lines = s.split("\n");
           var drop = {};
           var forms = [];
-          var diagRows = typeof aiCmDiagLine === "function" ? [] : null;
+          var diagRows = typeof aiCmDiagLine2 === "function" ? [] : null;
           var firstLine = bdsFirstContentLine(lines);
           var lastLine = bdsLastContentLine(lines);
           for (var k = 0; k < lines.length; k++) {
@@ -6466,8 +7804,8 @@
         var REASONING_SECTION_PAIR_RE = /^\s*\[REASONING\]\r?\n([\s\S]*?)\r?\n\r?\n\[ANSWER\]\r?\n([\s\S]*)$/;
         function diagTag(tag, fields) {
           try {
-            if (typeof aiCmDiagLine !== "function") return false;
-            return aiCmDiagLine(tag, fields) !== false;
+            if (typeof aiCmDiagLine2 !== "function") return false;
+            return aiCmDiagLine2(tag, fields) !== false;
           } catch (eDiag) {
             return false;
           }
@@ -7865,7 +9203,7 @@
             try {
               aiCmSetPopupOverrides(d && d.selectedModel, d && d.customLimit);
             } catch (eA) {
-              swallowSoft(eA, "widget:loadPopupOverrides-callback");
+              swallowSoft2(eA, "widget:loadPopupOverrides-callback");
             }
           });
         } catch (e) {
@@ -7900,7 +9238,7 @@
           try {
             chrome.storage.sync.set({ [safePctKey()]: safePct });
           } catch (e) {
-            swallowSoft(e, "widget:snapCurrentPct");
+            swallowSoft2(e, "widget:snapCurrentPct");
           }
         }
         updatePanel();
@@ -7917,7 +9255,7 @@
           try {
             chrome.storage.sync.set({ [safePctKey()]: safePct });
           } catch (e) {
-            swallowSoft(e, "widget:setSafePctFromInput");
+            swallowSoft2(e, "widget:setSafePctFromInput");
           }
         }
         updatePanel();
@@ -7929,7 +9267,7 @@
           try {
             chrome.storage.sync.set({ [safePctKey()]: null });
           } catch (e) {
-            swallowSoft(e, "widget:resetSafePct");
+            swallowSoft2(e, "widget:resetSafePct");
           }
         }
         updatePanel();
@@ -7981,24 +9319,24 @@
               try {
                 chrome.storage.sync.set({ [pair.own]: migrated });
               } catch (eMigrateSet) {
-                swallowSoft(eMigrateSet, "widget:aiCmMigrateSafePct-set");
+                swallowSoft2(eMigrateSet, "widget:aiCmMigrateSafePct-set");
               }
               finish(migrated);
             } catch (eMigrateApply) {
-              swallowSoft(eMigrateApply, "widget:aiCmMigrateSafePct-apply");
+              swallowSoft2(eMigrateApply, "widget:aiCmMigrateSafePct-apply");
               finish(null);
             }
           });
           return true;
         } catch (eMigrate) {
-          swallowSoft(eMigrate, "widget:aiCmMigrateSafePct");
+          swallowSoft2(eMigrate, "widget:aiCmMigrateSafePct");
           finish(null);
           return true;
         }
       }
       function resetConversationState() {
-        if (typeof aiCmDiagLine === "function") {
-          aiCmDiagLine("gsa-state", {
+        if (typeof aiCmDiagLine2 === "function") {
+          aiCmDiagLine2("gsa-state", {
             point: "resetConversationState",
             verdict: "reset",
             reason: "caller-see-src",
@@ -8118,8 +9456,8 @@
           }
           if (pt) pt.textContent = "\u2014";
           try {
-            if (typeof aiCmDiagLine === "function" && typeof currentAdapter !== "undefined" && currentAdapter && currentAdapter.siteName === "qwen") {
-              aiCmDiagLine("qwen-badge", {
+            if (typeof aiCmDiagLine2 === "function" && typeof currentAdapter !== "undefined" && currentAdapter && currentAdapter.siteName === "qwen") {
+              aiCmDiagLine2("qwen-badge", {
                 ts: Date.now(),
                 event: "placeholder",
                 reason: "reset-conversation",
@@ -8154,7 +9492,7 @@
             chrome.storage.local.remove(["aiCmState", "aiCmState:" + window.location.hostname]);
           }
         } catch (eResetState14) {
-          swallowSoft(eResetState14, "widget:resetConversationState-localRemove");
+          swallowSoft2(eResetState14, "widget:resetConversationState-localRemove");
         }
         try {
           if (typeof aiCmRestartWidgetSafeBottomWatch === "function") aiCmRestartWidgetSafeBottomWatch();
@@ -8517,7 +9855,7 @@
             aiCmRepaintRing();
           });
         } catch (eRingGet) {
-          swallowSoft(eRingGet, "widget:loadRingThresholds");
+          swallowSoft2(eRingGet, "widget:loadRingThresholds");
         }
         try {
           var selfRing = aiCmLoadRingThresholds;
@@ -8629,8 +9967,8 @@
         } catch (eA11yW) {
         }
         try {
-          if (aiCmStalePlaceholder && typeof aiCmDiagLine === "function" && typeof currentAdapter !== "undefined" && currentAdapter && currentAdapter.siteName === "qwen") {
-            aiCmDiagLine("qwen-badge", {
+          if (aiCmStalePlaceholder && typeof aiCmDiagLine2 === "function" && typeof currentAdapter !== "undefined" && currentAdapter && currentAdapter.siteName === "qwen") {
+            aiCmDiagLine2("qwen-badge", {
               ts: Date.now(),
               event: "placeholder",
               reason: "stale",
@@ -8779,8 +10117,8 @@
             for (var p = 0; p < messages.length; p++) {
               var mp = messages[p] || {};
               var msg = { role: mp.role === "user" || mp.role === "human" ? "user" : "assistant", text: typeof mp.text === "string" ? mp.text : "" };
-              if (typeof aiCmDiagLine === "function" && site === "claude") {
-                aiCmDiagLine("claude-role-dedupe", { site, mpRole: mp.role, normalizedRole: msg.role });
+              if (typeof aiCmDiagLine2 === "function" && site === "claude") {
+                aiCmDiagLine2("claude-role-dedupe", { site, mpRole: mp.role, normalizedRole: msg.role });
               }
               if (typeof mp.reasoning === "string" && mp.reasoning) msg.reasoning = mp.reasoning;
               keep.push(msg);
@@ -8894,7 +10232,7 @@
           try {
             if (cb) cb(info || {});
           } catch (eCb) {
-            swallowSoft(eCb, "base-handler:netSync-finish-callback");
+            swallowSoft2(eCb, "base-handler:netSync-finish-callback");
           }
         }
         try {
@@ -9023,7 +10361,7 @@
           try {
             if (cb) cb({ ok: true, drained: true, reason: "idle-or-absent", pending: 0, waitedMs: 0 });
           } catch (eCb0) {
-            swallowSoft(eCb0, "base-handler:filesDrain-idle-cb");
+            swallowSoft2(eCb0, "base-handler:filesDrain-idle-cb");
           }
           return;
         }
@@ -9054,7 +10392,7 @@
           try {
             if (cb) cb(info || {});
           } catch (eCb) {
-            swallowSoft(eCb, "base-handler:filesDrain-finish-callback");
+            swallowSoft2(eCb, "base-handler:filesDrain-finish-callback");
           }
         }
         try {
@@ -9080,7 +10418,7 @@
           try {
             if (cb) cb();
           } catch (eCb) {
-            swallowSoft(eCb, "base-handler:filesThenNet-callback");
+            swallowSoft2(eCb, "base-handler:filesThenNet-callback");
           }
         };
         aiCmExportFilesDrainThen(convId, function() {
@@ -9285,9 +10623,9 @@
       }
       function aiCmEmitEntryDiag(branch, inMsgs, outMsgs, effectiveOn) {
         try {
-          if (typeof aiCmDiagLine !== "function") return false;
+          if (typeof aiCmDiagLine2 !== "function") return false;
           var hiddenOn = effectiveOn === void 0 ? aiCmIncludeHiddenInExport === true : effectiveOn === true;
-          return aiCmDiagLine("o40-emit-entry", {
+          return aiCmDiagLine2("o40-emit-entry", {
             hidden: hiddenOn ? "on" : "off",
             branch,
             msgsIn: Array.isArray(inMsgs) ? inMsgs.length : 0,
@@ -9349,7 +10687,7 @@
           if (!P || typeof P.applyReasoningExportFields !== "function") return messages;
           P.applyReasoningExportFields(messages, aiCmReasoningExportSite());
         } catch (ePrep) {
-          swallowSoft(ePrep, "export:aiCmPrepareReasoningForExport");
+          swallowSoft2(ePrep, "export:aiCmPrepareReasoningForExport");
         }
         return messages;
       }
@@ -9359,10 +10697,10 @@
         var prepareReasoning = typeof aiCmPrepareReasoningForExport === "function" ? aiCmPrepareReasoningForExport : null;
         var source = P && typeof P.pickExportSource === "function" ? P.pickExportSource(baseSeen === true, texts.length > 0) : baseSeen && texts.length > 0 ? "network" : "adapter";
         try {
-          if (typeof aiCmDiagLine === "function" && typeof aiCmDiagOn === "function" && aiCmDiagOn() && typeof currentAdapter !== "undefined" && currentAdapter && currentAdapter.siteName === "deepseek") {
+          if (typeof aiCmDiagLine2 === "function" && typeof aiCmDiagOn === "function" && aiCmDiagOn() && typeof currentAdapter !== "undefined" && currentAdapter && currentAdapter.siteName === "deepseek") {
             var o21DomMsgs = typeof currentAdapter.extractMessages === "function" ? currentAdapter.extractMessages().length : 0;
             var o21Reason = baseSeen === true ? texts.length > 0 ? "baseSeen+networkTexts" : "baseSeen-no-networkTexts" : "no-baseSeen";
-            aiCmDiagLine("o21-source-select", {
+            aiCmDiagLine2("o21-source-select", {
               site: currentAdapter.siteName,
               domMsgs: o21DomMsgs,
               netMsgs: texts.length,
@@ -9379,8 +10717,8 @@
               var dm = lastDetailMessages[i] || {};
               var r = dm.role || "";
               var msg = { role: r === "user" || r === "human" ? "user" : "assistant", text: sanitizeGeminiText(texts[i]) };
-              if (typeof aiCmDiagLine === "function" && typeof currentAdapter !== "undefined" && currentAdapter && currentAdapter.siteName === "claude") {
-                aiCmDiagLine("claude-role-network", { r, normalizedRole: msg.role });
+              if (typeof aiCmDiagLine2 === "function" && typeof currentAdapter !== "undefined" && currentAdapter && currentAdapter.siteName === "claude") {
+                aiCmDiagLine2("claude-role-network", { r, normalizedRole: msg.role });
               }
               if (typeof dm.reasoning === "string" && dm.reasoning) msg.reasoning = dm.reasoning;
               out.push(msg);
@@ -9414,8 +10752,8 @@
               }
             }
             var norm = P && typeof P.normalizeExportMessages === "function" ? P.normalizeExportMessages(raw) : [];
-            if (typeof aiCmDiagLine === "function" && typeof currentAdapter !== "undefined" && currentAdapter && currentAdapter.siteName === "claude") {
-              aiCmDiagLine("claude-role-adapter", {
+            if (typeof aiCmDiagLine2 === "function" && typeof currentAdapter !== "undefined" && currentAdapter && currentAdapter.siteName === "claude") {
+              aiCmDiagLine2("claude-role-adapter", {
                 rawRole: hasRoles ? raw[k].role : void 0,
                 normalizedRole: norm.length > 0 ? norm[0].role : void 0,
                 hasRoles
@@ -9524,7 +10862,7 @@
               autoExportPctBySite[site] = !isNaN(n) && n >= 1 && n <= 100 ? n : void 0;
               debugLog("log", "[AI CM][auto-export] per-site load " + key + "=" + (autoExportPctBySite[site] === void 0 ? "\u043D\u0435\u0442 (\u0433\u043B\u043E\u0431\u0430\u043B\u044C\u043D\u044B\u0439 \u0444\u043E\u043B\u0431\u044D\u043A)" : autoExportPctBySite[site]));
             } catch (eParsePs) {
-              swallowSoft(eParsePs, "export:loadAutoExportPerSitePct");
+              swallowSoft2(eParsePs, "export:loadAutoExportPerSitePct");
             }
           });
         } catch (e) {
@@ -9570,12 +10908,12 @@
             try {
               aiCmTryLateAutoExport(cid);
             } catch (eTick) {
-              swallowSoft(eTick, "export:late-retry-tick");
+              swallowSoft2(eTick, "export:late-retry-tick");
             }
           }, AI_CM_LATE_RETRY_MS);
           return true;
         } catch (eSch) {
-          swallowSoft(eSch, "export:scheduleLateRetry");
+          swallowSoft2(eSch, "export:scheduleLateRetry");
           return false;
         }
       }
@@ -9597,7 +10935,7 @@
             maybeAutoExport(autoExportLastPct);
           }
         } catch (e) {
-          swallowSoft(e, "export:aiCmTryLateAutoExport");
+          swallowSoft2(e, "export:aiCmTryLateAutoExport");
         }
       }
       function detectTrimStateFallback(prevProbe, snapshot) {
@@ -9725,7 +11063,7 @@
           msgs = aiCmUnionFileMessages(cidSnap, msgs, baseComplete !== true);
           return msgs;
         } catch (eSnap) {
-          swallowSoft(eSnap, "export:currentBaseSnapshot");
+          swallowSoft2(eSnap, "export:currentBaseSnapshot");
           return null;
         }
       }
@@ -9782,8 +11120,8 @@
           aiCmPendingHistWrite = null;
           debugLog("log", "[AI CM][export] deferred flushed reason=" + reason + " convId=" + p.convId);
           try {
-            if (typeof aiCmDiagLine === "function") {
-              aiCmDiagLine("o22-deferred-flush", {
+            if (typeof aiCmDiagLine2 === "function") {
+              aiCmDiagLine2("o22-deferred-flush", {
                 ts: Date.now(),
                 convId: p.convId || "(none)",
                 histKey: (typeof baseCount === "number" ? baseCount : 0) + "|" + (typeof baseText === "string" && baseText ? baseText.length : 0),
@@ -9802,10 +11140,10 @@
       }
       function aiCmScheduleDeferredHistWrite(cid) {
         try {
-          let fireDeferredTimeout2 = function() {
+          let fireDeferredTimeout = function() {
             if (aiCmPendingHistWrite !== p) return;
             if (document.visibilityState !== "visible") {
-              p.timer = setTimeout(fireDeferredTimeout2, 6e4);
+              p.timer = setTimeout(fireDeferredTimeout, 6e4);
               debugLog("log", "[AI CM][export] deferred-wait-visible convId=" + cid + " (\u0432\u043A\u043B\u0430\u0434\u043A\u0430 \u0441\u043A\u0440\u044B\u0442\u0430 \u2014 \u0442\u0430\u0439\u043C\u0430\u0443\u0442 \u043F\u0435\u0440\u0435\u043D\u0435\u0441\u0451\u043D, \u044D\u043A\u0441\u043F\u043E\u0440\u0442 \u043A\u0430\u043A \u0435\u0441\u0442\u044C \u043E\u0442\u043B\u043E\u0436\u0435\u043D)");
               return;
             }
@@ -9826,8 +11164,8 @@
               debugLog("log", "[AI CM][export] as-is baseComplete=0 \u2192 isLowConfidenceBase=true convId=" + cid);
             }
             try {
-              if (typeof aiCmDiagLine === "function") {
-                aiCmDiagLine("o50-timeout-download", {
+              if (typeof aiCmDiagLine2 === "function") {
+                aiCmDiagLine2("o50-timeout-download", {
                   ts: Date.now(),
                   convId: cid,
                   path: "deferred-timeout-60s",
@@ -9848,11 +11186,10 @@
               debugLog("log", "[AI CM][export] silent-catch aiCmScheduleDeferredHistWrite(fireDeferredTimeout/export): " + (eW && eW.message || eW));
             }
           };
-          var fireDeferredTimeout = fireDeferredTimeout2;
           aiCmCancelDeferredHistWrite();
           debugLog("log", "[AI CM][export] deferred until base-complete convId=" + cid + " loader=" + !!aiCmLoaderRunningByConv[cid] + " baseComplete=" + baseComplete);
           var p = { convId: cid, timer: null };
-          p.timer = setTimeout(fireDeferredTimeout2, 6e4);
+          p.timer = setTimeout(fireDeferredTimeout, 6e4);
           aiCmPendingHistWrite = p;
         } catch (e) {
           debugLog("log", "[AI CM][export] silent-catch aiCmScheduleDeferredHistWrite: " + (e && e.message || e));
@@ -10109,7 +11446,7 @@
               if (!cid || cid !== aiCmAutoExportConvId()) return;
               maybeAutoExport(percentage);
             } catch (eR) {
-              swallowSoft(eR, "export:aiCmDeferAutoExportOnLiveStream-timer");
+              swallowSoft2(eR, "export:aiCmDeferAutoExportOnLiveStream-timer");
             }
           }, AI_CM_DS_STREAM_DEFER_MS);
           return true;
@@ -10120,9 +11457,9 @@
       var aiCmAutoExportSkipReasonState = { reason: "" };
       function aiCmAutoExportBasePendingLog(cid, percentage) {
         try {
-          if (typeof aiCmDiagLine !== "function") return;
+          if (typeof aiCmDiagLine2 !== "function") return;
           var site = typeof currentAdapter !== "undefined" && currentAdapter && currentAdapter.siteName || "";
-          aiCmDiagLine("auto-export", {
+          aiCmDiagLine2("auto-export", {
             point: "maybeAutoExport",
             verdict: "skip",
             reason: "base-pending",
@@ -10137,7 +11474,7 @@
       }
       function aiCmAutoExportDecisionDiag(percentage, verdictSkip, reason) {
         try {
-          if (typeof aiCmDiagLine !== "function") return false;
+          if (typeof aiCmDiagLine2 !== "function") return false;
           var site = typeof currentAdapter !== "undefined" && currentAdapter && currentAdapter.siteName || "";
           var memMsgs = typeof lastBaseTexts !== "undefined" && Array.isArray(lastBaseTexts) ? lastBaseTexts.length : 0;
           var memTextLen = typeof baseText === "string" ? baseText.length : 0;
@@ -10154,7 +11491,7 @@
           } catch (eSrc) {
             fileSource = void 0;
           }
-          aiCmDiagLine("auto-export-decision", {
+          aiCmDiagLine2("auto-export-decision", {
             ts: Date.now(),
             point: "maybeAutoExport",
             site,
@@ -10266,7 +11603,7 @@
                     if (pkHys) delete sessionFiredCache[pkHys];
                   }
                 } catch (eO3hys) {
-                  swallowSoft(eO3hys, "export:maybeAutoExport-latch-hysteresis");
+                  swallowSoft2(eO3hys, "export:maybeAutoExport-latch-hysteresis");
                 }
               }
               if (verdict.reason === "base-pending") {
@@ -10351,7 +11688,7 @@
                   if (pkHys2) delete sessionFiredCache[pkHys2];
                 }
               } catch (eO3hys2) {
-                swallowSoft(eO3hys2, "export:maybeAutoExport-latch-below-threshold");
+                swallowSoft2(eO3hys2, "export:maybeAutoExport-latch-below-threshold");
               }
             }
             return;
@@ -10409,7 +11746,7 @@
       }
       function doAutoExportDownload(cid, percentage, reason, netSynced) {
         try {
-          let aiCmWriteAutoExportFile2 = function(fileMsgs, histSource, histConvId, histSite) {
+          let aiCmWriteAutoExportFile = function(fileMsgs, histSource, histConvId, histSite) {
             try {
               if (histSource === "storage-host" && !histConvId && cid || histConvId && cid && String(histConvId) !== String(cid) || histSite && siteNameD && String(histSite) !== String(siteNameD)) {
                 debugLog("log", "[AI CM][auto-export] abort reason=history-source-mismatch histConvId=" + histConvId + " site=" + histSite);
@@ -10457,7 +11794,7 @@
                       aiCmAutoExportFiredOnce[siteOnce + "|" + cid] = 1;
                     }
                   } catch (eOnce) {
-                    swallowSoft(eOnce, "export:aiCmWriteAutoExportFile-once");
+                    swallowSoft2(eOnce, "export:aiCmWriteAutoExportFile-once");
                   }
                   try {
                     var siteO3 = currentAdapter && currentAdapter.siteName || "";
@@ -10467,7 +11804,7 @@
                       sessionFiredCache[pkO3] = 1;
                     }
                   } catch (eO3write) {
-                    swallowSoft(eO3write, "export:aiCmWriteAutoExportFile-fired-latch");
+                    swallowSoft2(eO3write, "export:aiCmWriteAutoExportFile-fired-latch");
                   }
                 } else {
                   autoExportFired[cid] = 1;
@@ -10477,7 +11814,7 @@
                       aiCmAutoExportFiredOnce[siteOnceFb + "|" + cid] = 1;
                     }
                   } catch (eOnceFb) {
-                    swallowSoft(eOnceFb, "export:aiCmWriteAutoExportFile-once-fallback");
+                    swallowSoft2(eOnceFb, "export:aiCmWriteAutoExportFile-once-fallback");
                   }
                 }
               }
@@ -10504,7 +11841,7 @@
                   reason: reason || ""
                 }) }));
               } catch (eFiredEvt) {
-                swallowSoft(eFiredEvt, "export:auto-export-fired-event");
+                swallowSoft2(eFiredEvt, "export:auto-export-fired-event");
               }
               try {
                 if (typeof aiCmAutoExportTrustedBaseDiag === "function") {
@@ -10519,7 +11856,6 @@
               debugLog("error", "[AI CM][auto-export] error:", eInner);
             }
           };
-          var aiCmWriteAutoExportFile = aiCmWriteAutoExportFile2;
           if (typeof aiCmDeferAutoExportOnLiveStream === "function" && aiCmDeferAutoExportOnLiveStream(cid, percentage)) return;
           var filesApiD = typeof window !== "undefined" && window.AiCmBaseHandler ? window.AiCmBaseHandler : null;
           var filesDrainSiteD = filesApiD && typeof filesApiD.aiCmFilesDrainSite === "function" ? filesApiD.aiCmFilesDrainSite() === true : false;
@@ -10564,12 +11900,11 @@
           } else if (P && typeof P.buildExportFileName === "function") {
             file = P.buildExportFileName(siteNameD, cid, reason, lowConfD, fmt, namesUsedD);
           } else {
-            let ap2Fb2 = function(n) {
+            let ap2Fb = function(n) {
               return (n < 10 ? "0" : "") + n;
             };
-            var ap2Fb = ap2Fb2;
             var dFb = /* @__PURE__ */ new Date();
-            file = "chat-" + String(cid).slice(0, 8) + "-" + dFb.getFullYear() + "-" + ap2Fb2(dFb.getMonth() + 1) + "-" + ap2Fb2(dFb.getDate()) + "_" + ap2Fb2(dFb.getHours()) + "-" + ap2Fb2(dFb.getMinutes()) + (reason === "pre-trim" ? "-pretrim" : "") + "." + fmt;
+            file = "chat-" + String(cid).slice(0, 8) + "-" + dFb.getFullYear() + "-" + ap2Fb(dFb.getMonth() + 1) + "-" + ap2Fb(dFb.getDate()) + "_" + ap2Fb(dFb.getHours()) + "-" + ap2Fb(dFb.getMinutes()) + (reason === "pre-trim" ? "-pretrim" : "") + "." + fmt;
           }
           var msgs = buildHistoryMessages();
           if (baseSeen === true && lastBaseTexts.length === 0) {
@@ -10613,7 +11948,7 @@
                 debugLog("log", "[AI CM][auto-export] skip reason=empty-history convId=" + cid + " histSource=storage-host");
                 return;
               }
-              aiCmWriteAutoExportFile2(rec.messages, "storage-host", rec.convId || "", rec.site || "");
+              aiCmWriteAutoExportFile(rec.messages, "storage-host", rec.convId || "", rec.site || "");
             };
             try {
               if (hostKeyFb && typeof chrome !== "undefined" && chrome && chrome.storage && chrome.storage.local && typeof chrome.storage.local.get === "function") {
@@ -10633,7 +11968,7 @@
             }
             return;
           }
-          aiCmWriteAutoExportFile2(msgs, "memory", histConvIdMem, histSiteMem);
+          aiCmWriteAutoExportFile(msgs, "memory", histConvIdMem, histSiteMem);
         } catch (e) {
           debugLog("error", "[AI CM][auto-export] error:", e);
         }
@@ -10702,7 +12037,7 @@
           if (typeof sessionStorage === "undefined" || !sessionStorage) return false;
           return sessionStorage.getItem("aiCmAutoExportFired_" + String(cid)) === "1";
         } catch (e) {
-          swallowSoft(e, "export:autoexport-fired-storage-read");
+          swallowSoft2(e, "export:autoexport-fired-storage-read");
           return false;
         }
       }
@@ -10715,7 +12050,7 @@
           sessionStorage.setItem("aiCmAutoExportFired_" + String(cid), "1");
           return true;
         } catch (e) {
-          swallowSoft(e, "export:autoexport-fired-storage-write");
+          swallowSoft2(e, "export:autoexport-fired-storage-write");
           return false;
         }
       }
@@ -10924,8 +12259,8 @@
         try {
           var newCid = getCurrentConvId() || "";
           try {
-            if (typeof aiCmDiagLine === "function") {
-              aiCmDiagLine("o22-conv-changed", {
+            if (typeof aiCmDiagLine2 === "function") {
+              aiCmDiagLine2("o22-conv-changed", {
                 ts: Date.now(),
                 convId: newCid || "(none)",
                 prev: aiCmLastSeenConvId || "(none)",
@@ -10937,8 +12272,8 @@
           } catch (eO22a) {
           }
           try {
-            if (typeof aiCmDiagLine === "function" && currentAdapter && currentAdapter.siteName === "qwen") {
-              aiCmDiagLine("qwen-spa", {
+            if (typeof aiCmDiagLine2 === "function" && currentAdapter && currentAdapter.siteName === "qwen") {
+              aiCmDiagLine2("qwen-spa", {
                 ts: Date.now(),
                 event: "conv-changed-recv",
                 convId: newCid || "(none)",
@@ -10963,7 +12298,7 @@
             aiCmLastSeenConvId = newCid;
           }
         } catch (eSpa) {
-          swallowSoft(eSpa, "content:conversation-changed-outer");
+          swallowSoft2(eSpa, "content:conversation-changed-outer");
         }
         aiCmGsaDiagState("conv-changed", "reset", "conversation-id-change", {
           convId: String(getCurrentConvId() || ""),
@@ -10973,9 +12308,9 @@
         aiCmAdapterBaseCount = 0;
         if (typeof aiCmIsAistudioHost === "function" && typeof aiCmAistudioHistoryCacheRestore === "function" && aiCmIsAistudioHost()) aiCmAistudioHistoryCacheRestore();
         try {
-          if (typeof aiCmDiagLine === "function" && currentAdapter && currentAdapter.siteName === "qwen") {
+          if (typeof aiCmDiagLine2 === "function" && currentAdapter && currentAdapter.siteName === "qwen") {
             aiCmQwenSpaResetAt = Date.now();
-            aiCmDiagLine("qwen-spa", {
+            aiCmDiagLine2("qwen-spa", {
               ts: aiCmQwenSpaResetAt,
               event: "reset-done",
               reason: "conversation-id-change",
@@ -10988,8 +12323,8 @@
         } catch (eQspaR) {
         }
         try {
-          if (typeof aiCmDiagLine === "function" && currentAdapter && currentAdapter.siteName === "qwen") {
-            aiCmDiagLine("qwen-spa", {
+          if (typeof aiCmDiagLine2 === "function" && currentAdapter && currentAdapter.siteName === "qwen") {
+            aiCmDiagLine2("qwen-spa", {
               ts: Date.now(),
               event: "reshoot",
               convId: String(getCurrentConvId() || "") || "(none)",
@@ -11026,7 +12361,7 @@
             debugLog("log", "[content-trace] badge-unfreeze: \u0432\u0438\u0434\u0436\u0435\u0442 \u043E\u0431\u043D\u043E\u0432\u043B\u0451\u043D pct=" + d.percentage);
           }
         } catch (e) {
-          swallowSoft(e, "content:loader-freeze");
+          swallowSoft2(e, "content:loader-freeze");
         }
       });
       window.addEventListener("ai-cm-dom-emit-request", function() {
@@ -11046,7 +12381,7 @@
           processAndSend();
           debugLog("log", "[AI CM][realtime] dom-emit pct=" + lastPercentage + " tokens=" + maxTokenCount);
         } catch (eDe) {
-          swallowSoft(eDe, "content:dom-emit-request");
+          swallowSoft2(eDe, "content:dom-emit-request");
         }
       });
       function aiCmDomThreadId() {
@@ -11070,7 +12405,7 @@
           if (document.querySelector('[data-scope-id="turn"]')) return true;
           if (document.querySelector('[data-subtree="aimfl"]')) return true;
         } catch (e) {
-          swallowSoft(e, "content:aiCmGsaChatPageMarker");
+          swallowSoft2(e, "content:aiCmGsaChatPageMarker");
         }
         return false;
       }
@@ -11099,7 +12434,7 @@
               if (Object.prototype.hasOwnProperty.call(extra, k)) f[k] = extra[k];
             }
           }
-          if (typeof aiCmDiagLine === "function") aiCmDiagLine("gsa-state", f);
+          if (typeof aiCmDiagLine2 === "function") aiCmDiagLine2("gsa-state", f);
           return true;
         } catch (eDiagState) {
           return false;
@@ -11140,7 +12475,7 @@
             result = TK.countTokens(t) + attach;
             tkOk = true;
           } catch (eTk) {
-            swallowSoft(eTk, "content:aiCmEstimateTokensTilde");
+            swallowSoft2(eTk, "content:aiCmEstimateTokensTilde");
           }
         }
         if (!tkOk) {
@@ -11151,7 +12486,7 @@
           try {
             var cyrDiag = (t.match(/[а-яёА-ЯЁ]/g) || []).length;
             var cyrillicPct = t.length ? (cyrDiag / t.length * 100).toFixed(1) : "0.0";
-            aiCmDiagLine("o23-cyrillic-share", {
+            aiCmDiagLine2("o23-cyrillic-share", {
               textLen: t.length,
               cyrillicPct,
               attachTokens: attach,
@@ -11169,7 +12504,7 @@
           try {
             return Tokenizer.estimateDialogTokens(text, msgs) + attach;
           } catch (eCanon) {
-            swallowSoft(eCanon, "content:canonical-tokens");
+            swallowSoft2(eCanon, "content:canonical-tokens");
           }
         }
         return aiCmEstimateTokensTilde(text, attach) + msgs * 4;
@@ -11200,7 +12535,7 @@
               window.__aiCmNetModelSlug = md.slug;
             }
           } catch (eSlugAis) {
-            swallowSoft(eSlugAis, "content:aistudio-model-slug");
+            swallowSoft2(eSlugAis, "content:aistudio-model-slug");
           }
         }
       });
@@ -11226,17 +12561,17 @@
             try {
               maybeAutoExport(pct);
             } catch (eFire) {
-              swallowSoft(eFire, "content:autoexport-debounce");
+              swallowSoft2(eFire, "content:autoexport-debounce");
             }
           }, AI_CM_AUTOEXPORT_DEBOUNCE_MS);
         } catch (eSched) {
-          swallowSoft(eSched, "content:autoexport-schedule");
+          swallowSoft2(eSched, "content:autoexport-schedule");
         }
       }
       window.addEventListener("ai-cm-full-history", function(ev) {
         try {
-          if (typeof aiCmDiagLine === "function") {
-            aiCmDiagLine("o22-listener-entry", { ts: Date.now() });
+          if (typeof aiCmDiagLine2 === "function") {
+            aiCmDiagLine2("o22-listener-entry", { ts: Date.now() });
           }
         } catch (eO22L1) {
         }
@@ -11249,8 +12584,8 @@
         } catch (eEmit1) {
         }
         try {
-          if (typeof aiCmDiagLine === "function") {
-            aiCmDiagLine("o22-svc-emit", {
+          if (typeof aiCmDiagLine2 === "function") {
+            aiCmDiagLine2("o22-svc-emit", {
               ts: Date.now(),
               convId: ev && ev.detail && ev.detail.convId || (typeof getCurrentConvId === "function" ? getCurrentConvId() || "" : "") || "(none)",
               histKey: (typeof baseCount === "number" ? baseCount : 0) + "|" + (typeof baseText === "string" && baseText ? baseText.length : 0),
@@ -11274,8 +12609,8 @@
         var tokenTilde = aiCmCanonicalTokens(detail.text, detail.attachTokens, detail.count || 0);
         debugLog("log", "[AI CM][trace] badge-recv convId=" + (detail.convId || "-") + " msgs=" + (detail.count || 0) + " tokens~" + tokenTilde);
         try {
-          if (typeof aiCmDiagLine === "function") {
-            aiCmDiagLine("o22-badge-recv", {
+          if (typeof aiCmDiagLine2 === "function") {
+            aiCmDiagLine2("o22-badge-recv", {
               ts: Date.now(),
               convId: detail.convId || "(none)",
               msgs: detail.count || 0,
@@ -11342,8 +12677,8 @@
         lastBaseIds = ids;
         lastBaseTexts = texts;
         try {
-          if ((currentAdapter && currentAdapter.siteName) === "google_search" && typeof aiCmDiagLine === "function") {
-            aiCmDiagLine("gsa-base-accept", {
+          if ((currentAdapter && currentAdapter.siteName) === "google_search" && typeof aiCmDiagLine2 === "function") {
+            aiCmDiagLine2("gsa-base-accept", {
               point: "content-emit",
               verdict: texts.length > 0 ? "accept" : "accept-empty",
               msgs: texts.length,
@@ -11423,7 +12758,7 @@
         try {
           geminiDetectTrim(detail);
         } catch (eTrim) {
-          swallowSoft(eTrim, "content:full-history-trim");
+          swallowSoft2(eTrim, "content:full-history-trim");
         }
         if (!isInitialized) {
           tryInit();
@@ -11467,12 +12802,12 @@
               try {
                 aiCmFlushDeferredHistWrite(cid79, "base-complete");
               } catch (eF79) {
-                swallowSoft(eF79, "content:full-history-flush-deferred");
+                swallowSoft2(eF79, "content:full-history-flush-deferred");
               }
               try {
                 aiCmResyncMetricsAfterFlush(cid79, "base-complete");
               } catch (eRs79) {
-                swallowSoft(eRs79, "content:metrics-resync-flush");
+                swallowSoft2(eRs79, "content:metrics-resync-flush");
               }
               var freshPct79 = typeof lastPercentage === "number" && lastPercentage >= 0 ? lastPercentage : autoExportLastPct;
               if (aiCmLateCheckByConv[cid79]) {
@@ -11483,12 +12818,12 @@
               }
             }
           } catch (e79) {
-            swallowSoft(e79, "content:full-history-complete-transition");
+            swallowSoft2(e79, "content:full-history-complete-transition");
           }
         }
         try {
-          if (typeof aiCmDiagLine === "function") {
-            aiCmDiagLine("o22-call725", {
+          if (typeof aiCmDiagLine2 === "function") {
+            aiCmDiagLine2("o22-call725", {
               ts: Date.now(),
               src: typeof aiCmDiagStack === "function" ? aiCmDiagStack(2) : ""
             });
@@ -11580,7 +12915,7 @@
       }
       function aiCmQwenInitDiag(event, fields) {
         try {
-          if (typeof aiCmDiagLine !== "function") return false;
+          if (typeof aiCmDiagLine2 !== "function") return false;
           if (typeof currentAdapter === "undefined" || !currentAdapter) return false;
           if (currentAdapter.siteName !== "qwen") return false;
           var f = {
@@ -11593,7 +12928,7 @@
               if (Object.prototype.hasOwnProperty.call(fields, k)) f[k] = fields[k];
             }
           }
-          return aiCmDiagLine("qwen-init", f);
+          return aiCmDiagLine2("qwen-init", f);
         } catch (eQid) {
           return false;
         }
@@ -11918,8 +13253,8 @@
             }
             const sig = aiCmDomTextSig();
             if (sig === aiCmLastDomEmitSig && aiCmSiteConvFired()) {
-              if (typeof aiCmDiagLine === "function") {
-                aiCmDiagLine("o24-dom-emit-guard", {
+              if (typeof aiCmDiagLine2 === "function") {
+                aiCmDiagLine2("o24-dom-emit-guard", {
                   verdict: "skip-sig-unchanged",
                   sig,
                   convId: sigConvId || "(none)",
@@ -12119,7 +13454,7 @@
                 });
                 console.log("[byok-cache] \u0442\u043E\u0447\u043D\u043E\u0435 \u0437\u043D\u0430\u0447\u0435\u043D\u0438\u0435 \u0441\u043E\u0445\u0440\u0430\u043D\u0435\u043D\u043E \u0432 \u0445\u0440\u0430\u043D\u0438\u043B\u0438\u0449\u0435: " + response.totalTokens);
               } catch (e) {
-                swallowSoft(e, "content:requestExactTokens");
+                swallowSoft2(e, "content:requestExactTokens");
               }
             }
             processAndSend();
@@ -12181,7 +13516,7 @@
             if (isInitialized) processAndSend();
           });
         } catch (eByokInv) {
-          swallowSoft(eByokInv, "content:aiCmByokKeyInvalidate");
+          swallowSoft2(eByokInv, "content:aiCmByokKeyInvalidate");
         }
       }
       function loadByokCache() {
@@ -12264,7 +13599,7 @@
               }
               aiCmUpdateSourceIndicator();
             } catch (eInner) {
-              swallowSoft(eInner, "content:aiCmLoadArchiveTier");
+              swallowSoft2(eInner, "content:aiCmLoadArchiveTier");
             }
           });
         } catch (eL) {
@@ -12307,8 +13642,8 @@
       var aiCmBadgeHoldTimer = null;
       function aiCmBadgeHoldDiag(reason) {
         try {
-          if (typeof aiCmDiagLine !== "function") return;
-          aiCmDiagLine("badge-hold", {
+          if (typeof aiCmDiagLine2 !== "function") return;
+          aiCmDiagLine2("badge-hold", {
             point: "badge-hold",
             reason,
             site: currentAdapter && currentAdapter.siteName || "",
@@ -12330,7 +13665,7 @@
             try {
               aiCmRevealWidget();
             } catch (eRevO1) {
-              swallowSoft(eRevO1, "content:aiCmBadgeHoldRelease");
+              swallowSoft2(eRevO1, "content:aiCmBadgeHoldRelease");
             }
             processAndSend();
           }
@@ -12440,8 +13775,8 @@
           var sameCount = msgs.length === prevCount;
           var canSkip = sameCount && newKey === lastHistoryWroteKey && rawUnchanged;
           try {
-            if (typeof aiCmDiagLine === "function") {
-              aiCmDiagLine("o22-metrics-resync", {
+            if (typeof aiCmDiagLine2 === "function") {
+              aiCmDiagLine2("o22-metrics-resync", {
                 ts: Date.now(),
                 convId: cid,
                 reason: reason || "(none)",
@@ -12455,7 +13790,7 @@
               });
             }
           } catch (eRsD) {
-            swallowSoft(eRsD, "content:metrics-resync-diag");
+            swallowSoft2(eRsD, "content:metrics-resync-diag");
           }
           if (canSkip) {
             debugLog("log", "[AI CM][export] metrics-resync skip reason=same convId=" + cid + " histKey=" + newKey);
@@ -12471,7 +13806,7 @@
           processAndSend();
           return true;
         } catch (eRs) {
-          swallowSoft(eRs, "content:metrics-resync");
+          swallowSoft2(eRs, "content:metrics-resync");
           return false;
         }
       }
@@ -12480,7 +13815,7 @@
         try {
           aiCmGsaResetStaleStateOnChatlessDoc();
         } catch (eO27c) {
-          swallowSoft(eO27c, "content:processAndSend-gsa-stale-reset");
+          swallowSoft2(eO27c, "content:processAndSend-gsa-stale-reset");
         }
         var aiCmDomListS1 = null;
         try {
@@ -12499,7 +13834,7 @@
           try {
             aiCmAistudioDomCacheSave(aiCmDomListS1);
           } catch (eDomS1) {
-            swallowSoft(eDomS1, "content:processAndSend-aistudio-dom-cache");
+            swallowSoft2(eDomS1, "content:processAndSend-aistudio-dom-cache");
           }
         }
         try {
@@ -12509,7 +13844,7 @@
             aiCmLoadArchiveTier(cidArc, "page-load");
           }
         } catch (eArcInit) {
-          swallowSoft(eArcInit, "content:processAndSend-archive-init");
+          swallowSoft2(eArcInit, "content:processAndSend-archive-init");
         }
         if (!restoredTapeLoaded) {
           restoredTapeLoaded = true;
@@ -12587,7 +13922,7 @@
                       maybeAutoExport(autoExportLastPct);
                     }
                   } catch (eT79) {
-                    swallowSoft(eT79, "content:processAndSend-tape-restore");
+                    swallowSoft2(eT79, "content:processAndSend-tape-restore");
                   }
                   if (!cacheRefreshPlanned[convId]) {
                     cacheRefreshPlanned[convId] = true;
@@ -12693,9 +14028,9 @@
           try {
             var metricSrc = baseComplete ? "base-complete" : lastBounded ? "base-floor+dom-tail" : "base-floor";
             var metricSig = [metricSrc, baseCount, fullText ? fullText.length : 0, tokenEstimate, baseSeen ? 1 : 0].join("|");
-            if (typeof aiCmDiagLine === "function" && metricSig !== lastMetricSig) {
+            if (typeof aiCmDiagLine2 === "function" && metricSig !== lastMetricSig) {
               lastMetricSig = metricSig;
-              aiCmDiagLine("gsa-metric-src", {
+              aiCmDiagLine2("gsa-metric-src", {
                 site: svc,
                 src: metricSrc,
                 note: !baseComplete && baseCount > 0 ? "incomplete-canonical-floor" : "",
@@ -12759,8 +14094,8 @@
             };
           }
           try {
-            if (typeof aiCmDiagLine === "function" && currentAdapter && currentAdapter.siteName === "qwen") {
-              aiCmDiagLine("qwen-badge", {
+            if (typeof aiCmDiagLine2 === "function" && currentAdapter && currentAdapter.siteName === "qwen") {
+              aiCmDiagLine2("qwen-badge", {
                 ts: Date.now(),
                 event: "badge-update",
                 reason: badgeSuppressActive ? "spa-suppress" : aiCmLoaderFreeze ? "loader-freeze" : "draw",
@@ -12828,7 +14163,7 @@
               statePatch["aiCmState:" + window.location.hostname] = stateSnapshot;
               chrome.storage.local.set(statePatch);
             } catch (e) {
-              swallowSoft(e, "content:processAndSend-state-write");
+              swallowSoft2(e, "content:processAndSend-state-write");
             }
           }
           var emitConvA = lastEmitConvId || "";
@@ -12836,8 +14171,8 @@
           if (isExtensionValid() && baseSeen && lastBaseTexts.length > 0 && !(emitConvA && currentConvB && emitConvA !== currentConvB)) {
             var histKey = baseCount + "|" + (baseText ? baseText.length : 0);
             try {
-              if (typeof aiCmDiagLine === "function") {
-                aiCmDiagLine("o22-histkey-dedup", {
+              if (typeof aiCmDiagLine2 === "function") {
+                aiCmDiagLine2("o22-histkey-dedup", {
                   ts: Date.now(),
                   convId: emitConvA || currentConvB || "(none)",
                   histKey,
@@ -12854,8 +14189,8 @@
               lastHistoryWroteKey = histKey;
               debugLog("log", "[AI CM][trace] history-write source=network convId=" + (emitConvA || "-") + " msgs=" + baseCount);
               try {
-                if (typeof aiCmDiagLine === "function" && currentAdapter && currentAdapter.siteName === "qwen") {
-                  aiCmDiagLine("qwen-adapter", {
+                if (typeof aiCmDiagLine2 === "function" && currentAdapter && currentAdapter.siteName === "qwen") {
+                  aiCmDiagLine2("qwen-adapter", {
                     ts: Date.now(),
                     source: "network",
                     msgs: baseCount,
@@ -12911,7 +14246,7 @@
                   chrome.storage.local.set(histPatch);
                 }
               } catch (e) {
-                swallowSoft(e, "content:processAndSend-history-write");
+                swallowSoft2(e, "content:processAndSend-history-write");
               }
             }
           }
@@ -12928,14 +14263,14 @@
                 if (typeof aiCmScheduleAutoExport === "function") aiCmScheduleAutoExport(percentage);
                 debugLog("log", "[AI CM][trace] history-write source=adapter site=" + (currentAdapter.siteName || "") + " convId=" + cidS24 + " msgs=" + msgsS24.length);
                 try {
-                  if (typeof aiCmDiagLine === "function" && currentAdapter && currentAdapter.siteName === "qwen") {
+                  if (typeof aiCmDiagLine2 === "function" && currentAdapter && currentAdapter.siteName === "qwen") {
                     var qUsers = 0;
                     var qAssist = 0;
                     for (var qr = 0; qr < msgsS24.length; qr++) {
                       if (msgsS24[qr] && msgsS24[qr].role === "user") qUsers++;
                       else qAssist++;
                     }
-                    aiCmDiagLine("qwen-adapter", {
+                    aiCmDiagLine2("qwen-adapter", {
                       ts: Date.now(),
                       source: "adapter",
                       msgs: msgsS24.length,
@@ -12968,7 +14303,7 @@
               }
             }
           } catch (eS24) {
-            swallowSoft(eS24, "content:processAndSend-history-write-adapter");
+            swallowSoft2(eS24, "content:processAndSend-history-write-adapter");
           }
           if (isExtensionValid()) {
             chrome.runtime.sendMessage({
@@ -12999,7 +14334,7 @@
             processAndSend();
           }
         } catch (eVis77) {
-          swallowSoft(eVis77, "content:visibilitychange-refresh");
+          swallowSoft2(eVis77, "content:visibilitychange-refresh");
         }
       });
       var aiCmProactiveEnabled = true;
@@ -13060,7 +14395,7 @@
       }
       function aiCmAutoExportTrustedBaseDiag(trigger, cid, percentage) {
         try {
-          if (typeof aiCmDiagLine !== "function") return false;
+          if (typeof aiCmDiagLine2 !== "function") return false;
           if (!aiCmAutoExportTrustedBase()) return false;
           var diagSite = currentAdapter && currentAdapter.siteName || "";
           var diagNetReady = 0;
@@ -13070,7 +14405,7 @@
           } catch (eAtbNet) {
             diagNetReady = 0;
           }
-          aiCmDiagLine("auto-export", {
+          aiCmDiagLine2("auto-export", {
             point: "maybeAutoExport",
             verdict: "fire",
             trigger,
@@ -13105,7 +14440,7 @@
             try {
               aiCmFlushLiveStreamForExport(curCidExp);
             } catch (eFlushExp) {
-              swallowSoft(eFlushExp, "content:aiCmAutoExportTrustedBaseDiag-flush");
+              swallowSoft2(eFlushExp, "content:aiCmAutoExportTrustedBaseDiag-flush");
             }
             var pctExp = typeof lastPercentage === "number" && lastPercentage >= 0 ? lastPercentage : 0;
             try {
@@ -13422,7 +14757,7 @@
               }
             }
           } catch (ePerSite) {
-            swallowSoft(ePerSite, "content:storage-onchanged-per-site");
+            swallowSoft2(ePerSite, "content:storage-onchanged-per-site");
           }
           if (changes.ai_cm_exact_token_count || changes.ai_cm_gemini_api_key) {
             loadByokSettings();
@@ -13468,7 +14803,7 @@
           }
           return true;
         } catch (eNrReset) {
-          swallowSoft(eNrReset, "content:aistudio-net-ready-reset");
+          swallowSoft2(eNrReset, "content:aistudio-net-ready-reset");
           return false;
         }
       }
@@ -13476,7 +14811,7 @@
         try {
           return String(window.location && window.location.hostname || "").indexOf("aistudio.google.com") !== -1;
         } catch (eAih) {
-          swallowSoft(eAih, "content:aistudio-net-host");
+          swallowSoft2(eAih, "content:aistudio-net-host");
           return false;
         }
       }
@@ -13537,7 +14872,7 @@
           aiCmAistudioNativeValue = found;
           return found;
         } catch (eNat) {
-          swallowSoft(eNat, "content:aistudio-native-tokens");
+          swallowSoft2(eNat, "content:aistudio-native-tokens");
           return 0;
         }
       }
@@ -13556,7 +14891,7 @@
             box = box.parentElement;
           }
         } catch (eNatProbe) {
-          swallowSoft(eNatProbe, "content:aistudio-native-probe");
+          swallowSoft2(eNatProbe, "content:aistudio-native-probe");
         }
         return 0;
       }
@@ -13569,7 +14904,7 @@
         try {
           return typeof sessionStorage !== "undefined" ? sessionStorage : null;
         } catch (eSs) {
-          swallowSoft(eSs, "content:aistudio-cache-storage");
+          swallowSoft2(eSs, "content:aistudio-cache-storage");
           return null;
         }
       }
@@ -13619,7 +14954,7 @@
           aiCmAistudioPeakCount = aiCmNetMsgsAistudio.msgs.length;
           return true;
         } catch (eSave) {
-          swallowSoft(eSave, "content:aistudio-cache-save");
+          swallowSoft2(eSave, "content:aistudio-cache-save");
           return false;
         }
       }
@@ -13661,7 +14996,7 @@
             cached: true
           });
         } catch (eRestore) {
-          swallowSoft(eRestore, "content:aistudio-cache-restore");
+          swallowSoft2(eRestore, "content:aistudio-cache-restore");
           return false;
         }
       }
@@ -13681,7 +15016,7 @@
           window.__aiCmNetModelSlug = "";
           return true;
         } catch (eClear) {
-          swallowSoft(eClear, "content:aistudio-cache-clear");
+          swallowSoft2(eClear, "content:aistudio-cache-clear");
           return false;
         }
       }
@@ -13718,7 +15053,7 @@
           debugLog("log", "[AI CM][aistudio-cache] dom-peak key=" + key + " msgs=" + msgs.length);
           return true;
         } catch (eDomSave) {
-          swallowSoft(eDomSave, "content:aistudio-dom-cache-save");
+          swallowSoft2(eDomSave, "content:aistudio-dom-cache-save");
           return false;
         }
       }
@@ -13791,7 +15126,7 @@
           var changed = aiCmIngestAistudioNet(detail);
           if (changed && detail.kind === "history") aiCmAistudioHistoryCacheSave();
         } catch (eNet) {
-          swallowSoft(eNet, "content:aistudio-net");
+          swallowSoft2(eNet, "content:aistudio-net");
         }
       });
       aiCmAistudioHistoryCacheRestore();

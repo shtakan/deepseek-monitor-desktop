@@ -58,7 +58,7 @@ if (typeof window.__aiCmSetDebugLogs === 'undefined') {
   window.chrome.runtime.id = 'pake-ai-context-monitor';
   window.chrome.runtime.getURL = window.chrome.runtime.getURL || function(path) { return path; };
   window.chrome.runtime.getManifest = window.chrome.runtime.getManifest || function() {
-    return { version: '2.0.40', manifest_version: 3, name: 'AI Context Monitor' };
+    return { version: '2.0.41', manifest_version: 3, name: 'AI Context Monitor' };
   };
   window.chrome.runtime.onMessage = onMessageStub;
   window.chrome.runtime.onInstalled = createEventStub();
@@ -6290,6 +6290,14 @@ if (typeof module !== 'undefined' && module.exports) {
     if (typeof require !== "undefined") return require.apply(this, arguments);
     throw Error('Dynamic require of "' + x + '" is not supported');
   });
+  var __esm = (fn, res, err) => function __init() {
+    if (err) throw err[0];
+    try {
+      return fn && (res = (0, fn[__getOwnPropNames(fn)[0]])(fn = 0)), res;
+    } catch (e) {
+      throw err = [e], e;
+    }
+  };
   var __commonJS = (cb, mod) => function __require2() {
     try {
       return mod || (0, cb[__getOwnPropNames(cb)[0]])((mod = { exports: {} }).exports, mod), mod.exports;
@@ -6298,261 +6306,1603 @@ if (typeof module !== 'undefined' && module.exports) {
     }
   };
 
-  // entry-content.js
-  var require_entry_content = __commonJS({
-    "entry-content.js"(exports, module) {
-      function aiCmIsFirefox() {
-        try {
-          var api = typeof browser !== "undefined" && browser && browser.runtime ? browser : typeof chrome !== "undefined" && chrome && chrome.runtime ? chrome : null;
-          if (!api) return false;
-          if (api.runtime && typeof api.runtime.getURL === "function") {
-            return String(api.runtime.getURL("")).indexOf("moz-extension://") === 0;
-          }
-          if (typeof api.getURL === "function") {
-            return String(api.getURL("")).indexOf("moz-extension://") === 0;
-          }
-          return false;
-        } catch (e) {
-          return false;
-        }
+  // ../utils/buildReferenceText.js
+  function cleanInline(s) {
+    s = s.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, "$1");
+    s = s.replace(/(\*\*|__)/g, "");
+    s = s.replace(/(?<![*\w])\*([^*\n]+)\*(?![\w*])/g, "$1");
+    s = s.replace(/(?<![\w_])\_([^_\n]+)\_(?![\w_])/g, "$1");
+    s = s.replace(/`/g, "");
+    return s;
+  }
+  function cleanLine(line) {
+    var s = String(line == null ? "" : line);
+    s = s.replace(/^#{1,6}\s+/, "");
+    s = s.replace(/^>\s?/, "");
+    s = s.replace(/^[-*+]\s+/, "");
+    return s;
+  }
+  function cleanText(text) {
+    var lines = String(text).split("\n");
+    var out = [];
+    for (var i = 0; i < lines.length; i++) {
+      var line = lines[i];
+      var trimmed = line.trim();
+      if (/^-{3,}$/.test(trimmed)) continue;
+      out.push(cleanInline(cleanLine(line)));
+    }
+    return out.join("\n");
+  }
+  function buildReferenceText(messages) {
+    var list = Array.isArray(messages) ? messages : [];
+    var parts = [];
+    for (var i = 0; i < list.length; i++) {
+      var msg = list[i] || {};
+      parts.push(cleanText(msg.text == null ? "" : msg.text));
+    }
+    return parts.join("\n\n");
+  }
+  var init_buildReferenceText = __esm({
+    "../utils/buildReferenceText.js"() {
+    }
+  });
+
+  // ../utils/platform.js
+  function aiCmIsFirefox() {
+    try {
+      var api = typeof browser !== "undefined" && browser && browser.runtime ? browser : typeof chrome !== "undefined" && chrome && chrome.runtime ? chrome : null;
+      if (!api) return false;
+      if (api.runtime && typeof api.runtime.getURL === "function") {
+        return String(api.runtime.getURL("")).indexOf("moz-extension://") === 0;
       }
-      if (typeof module !== "undefined" && module.exports) {
-        module.exports = { aiCmIsFirefox };
+      if (typeof api.getURL === "function") {
+        return String(api.getURL("")).indexOf("moz-extension://") === 0;
       }
-      var DEBUG = false;
-      function __aiCmSetDebugLogs(v) {
-        DEBUG = !!v;
-        try {
-          if (typeof window !== "undefined") window.__aiCmDebugLogs = !!v;
-        } catch (e) {
-        }
+      return false;
+    } catch (e) {
+      return false;
+    }
+  }
+  var init_platform = __esm({
+    "../utils/platform.js"() {
+    }
+  });
+
+  // ../utils/debug.js
+  function __aiCmSetDebugLogs(v) {
+    DEBUG = !!v;
+    try {
+      if (typeof window !== "undefined") window.__aiCmDebugLogs = !!v;
+    } catch (e) {
+    }
+  }
+  function __aiCmStringifyArg(a) {
+    if (typeof a === "string") return a;
+    try {
+      var s = JSON.stringify(a);
+      if (s === void 0) return String(a);
+      if (s.length > 500) s = s.slice(0, 500) + "\u2026";
+      return s;
+    } catch (e) {
+      return String(a);
+    }
+  }
+  function __aiCmPushLogRing(line) {
+    try {
+      __aiCmLogRing.push(line);
+      if (__aiCmLogRing.length > __aiCmLogRingMax) __aiCmLogRing.shift();
+    } catch (e) {
+    }
+  }
+  function __aiCmGetLogRing() {
+    try {
+      return __aiCmLogRing.slice();
+    } catch (e) {
+      return [];
+    }
+  }
+  function debugLog(level) {
+    var args = Array.prototype.slice.call(arguments, 1);
+    try {
+      var line = args.map(__aiCmStringifyArg).join(" ");
+      __aiCmPushLogRing(line);
+    } catch (e) {
+    }
+    if (level === "error" || level === "warn") {
+      (console[level] || console.log).apply(console, args);
+      return;
+    }
+    var enabled = DEBUG;
+    try {
+      if (typeof window !== "undefined" && window.__aiCmDebugLogs === true) enabled = true;
+    } catch (e) {
+    }
+    if (enabled) {
+      (console[level] || console.log).apply(console, args);
+    }
+  }
+  function swallow(error, tag) {
+    try {
+      if (typeof debugLog !== "function") return;
+      debugLog("error", "[swallow][" + (tag || "unlabeled") + "]", error);
+    } catch (eSwallow) {
+    }
+  }
+  function aiCmDiagOn() {
+    try {
+      if (typeof sessionStorage !== "undefined" && sessionStorage && sessionStorage.getItem("aiCmDebug") === "1") return true;
+    } catch (eSess) {
+    }
+    try {
+      if (typeof window !== "undefined" && window && window.__aiCmDebugLogs === true) return true;
+    } catch (eWin) {
+    }
+    return false;
+  }
+  function aiCmDiagDocKind() {
+    var href = "";
+    var host = "";
+    try {
+      href = String(typeof location !== "undefined" && location && location.href || "");
+    } catch (eHref) {
+    }
+    try {
+      host = String(typeof location !== "undefined" && location && location.hostname || "");
+    } catch (eHost) {
+    }
+    var isGoogle = host === "google.com" || host === "www.google.com";
+    try {
+      if (href.indexOf("/sorry/") !== -1) return "captcha";
+      if (isGoogle && (document.querySelector("#captcha-form") || document.querySelector('form[action*="sorry"]') || document.querySelector('iframe[src*="recaptcha"]'))) return "captcha";
+    } catch (eCap) {
+    }
+    try {
+      var tid = "";
+      var el = document.querySelector("[data-session-thread-id]");
+      if (el) tid = String(el.getAttribute("data-session-thread-id") || "").trim();
+      if (tid) return "chat";
+      if (document.querySelector('[data-scope-id="turn"]') || document.querySelector('[data-subtree="aimfl"]')) return "chat";
+    } catch (eChat) {
+    }
+    if (isGoogle) return "search";
+    return "chat";
+  }
+  function aiCmDiagHead(v, n) {
+    try {
+      var lim = typeof n === "number" && n > 0 ? n : 100;
+      if (v === void 0 || v === null) return "(\u043F\u0443\u0441\u0442\u043E)";
+      var s = String(v);
+      if (!s) return "(\u043F\u0443\u0441\u0442\u043E)";
+      var flat = s.replace(/\s+/g, " ").trim();
+      if (!flat) return "(\u043F\u0443\u0441\u0442\u043E/\u043F\u0440\u043E\u0431\u0435\u043B\u044B)";
+      return flat.length > lim ? flat.slice(0, lim) + "\u2026" : flat;
+    } catch (eHead) {
+      return "(\u043E\u0448\u0438\u0431\u043A\u0430)";
+    }
+  }
+  function aiCmDiagStack(skip) {
+    try {
+      var st = String(new Error().stack || "");
+      if (!st) return "";
+      var lines = st.split("\n");
+      var out = [];
+      var from = 1 + (typeof skip === "number" && skip >= 0 ? skip : 0);
+      for (var i = from; i < lines.length && out.length < 4; i++) {
+        var s = String(lines[i] || "").replace(/\s+/g, " ").trim();
+        if (!s || s.indexOf("aiCmDiag") !== -1) continue;
+        out.push(s);
       }
-      var __aiCmLogRing = [];
-      var __aiCmLogRingMax = 200;
-      function __aiCmStringifyArg(a) {
-        if (typeof a === "string") return a;
-        try {
-          var s = JSON.stringify(a);
-          if (s === void 0) return String(a);
-          if (s.length > 500) s = s.slice(0, 500) + "\u2026";
-          return s;
-        } catch (e) {
-          return String(a);
-        }
+      return out.join(" <- ");
+    } catch (eStack) {
+      return "";
+    }
+  }
+  function aiCmDiagLine2(tag, fields) {
+    if (!aiCmDiagOn()) return false;
+    try {
+      var parts = [];
+      var f = fields || {};
+      for (var k in f) {
+        if (!Object.prototype.hasOwnProperty.call(f, k)) continue;
+        var v = f[k];
+        parts.push(k + "=" + (v === void 0 || v === null ? "(\u043D\u0435\u0442)" : String(v)));
       }
-      function __aiCmPushLogRing(line) {
-        try {
-          __aiCmLogRing.push(line);
-          if (__aiCmLogRing.length > __aiCmLogRingMax) __aiCmLogRing.shift();
-        } catch (e) {
-        }
-      }
-      function __aiCmGetLogRing() {
-        try {
-          return __aiCmLogRing.slice();
-        } catch (e) {
-          return [];
-        }
-      }
-      function debugLog(level) {
-        var args = Array.prototype.slice.call(arguments, 1);
-        try {
-          var line = args.map(__aiCmStringifyArg).join(" ");
-          __aiCmPushLogRing(line);
-        } catch (e) {
-        }
-        if (level === "error" || level === "warn") {
-          (console[level] || console.log).apply(console, args);
-          return;
-        }
-        var enabled = DEBUG;
-        try {
-          if (typeof window !== "undefined" && window.__aiCmDebugLogs === true) enabled = true;
-        } catch (e) {
-        }
-        if (enabled) {
-          (console[level] || console.log).apply(console, args);
-        }
-      }
-      function swallow(error, tag) {
-        try {
-          if (typeof debugLog !== "function") return;
-          debugLog("error", "[swallow][" + (tag || "unlabeled") + "]", error);
-        } catch (eSwallow) {
-        }
-      }
-      function aiCmDiagOn() {
-        try {
-          if (typeof sessionStorage !== "undefined" && sessionStorage && sessionStorage.getItem("aiCmDebug") === "1") return true;
-        } catch (eSess) {
-        }
-        try {
-          if (typeof window !== "undefined" && window && window.__aiCmDebugLogs === true) return true;
-        } catch (eWin) {
-        }
-        return false;
-      }
-      function aiCmDiagDocKind() {
-        var href = "";
-        var host = "";
-        try {
-          href = String(typeof location !== "undefined" && location && location.href || "");
-        } catch (eHref) {
-        }
-        try {
-          host = String(typeof location !== "undefined" && location && location.hostname || "");
-        } catch (eHost) {
-        }
-        var isGoogle = host === "google.com" || host === "www.google.com";
-        try {
-          if (href.indexOf("/sorry/") !== -1) return "captcha";
-          if (isGoogle && (document.querySelector("#captcha-form") || document.querySelector('form[action*="sorry"]') || document.querySelector('iframe[src*="recaptcha"]'))) return "captcha";
-        } catch (eCap) {
-        }
-        try {
-          var tid = "";
-          var el = document.querySelector("[data-session-thread-id]");
-          if (el) tid = String(el.getAttribute("data-session-thread-id") || "").trim();
-          if (tid) return "chat";
-          if (document.querySelector('[data-scope-id="turn"]') || document.querySelector('[data-subtree="aimfl"]')) return "chat";
-        } catch (eChat) {
-        }
-        if (isGoogle) return "search";
-        return "chat";
-      }
-      function aiCmDiagHead(v, n) {
-        try {
-          var lim = typeof n === "number" && n > 0 ? n : 100;
-          if (v === void 0 || v === null) return "(\u043F\u0443\u0441\u0442\u043E)";
-          var s = String(v);
-          if (!s) return "(\u043F\u0443\u0441\u0442\u043E)";
-          var flat = s.replace(/\s+/g, " ").trim();
-          if (!flat) return "(\u043F\u0443\u0441\u0442\u043E/\u043F\u0440\u043E\u0431\u0435\u043B\u044B)";
-          return flat.length > lim ? flat.slice(0, lim) + "\u2026" : flat;
-        } catch (eHead) {
-          return "(\u043E\u0448\u0438\u0431\u043A\u0430)";
-        }
-      }
-      function aiCmDiagStack(skip) {
-        try {
-          var st = String(new Error().stack || "");
-          if (!st) return "";
-          var lines = st.split("\n");
-          var out = [];
-          var from = 1 + (typeof skip === "number" && skip >= 0 ? skip : 0);
-          for (var i = from; i < lines.length && out.length < 4; i++) {
-            var s = String(lines[i] || "").replace(/\s+/g, " ").trim();
-            if (!s || s.indexOf("aiCmDiag") !== -1) continue;
-            out.push(s);
-          }
-          return out.join(" <- ");
-        } catch (eStack) {
-          return "";
-        }
-      }
-      function aiCmDiagLine(tag, fields) {
-        if (!aiCmDiagOn()) return false;
-        try {
-          var parts = [];
-          var f = fields || {};
-          for (var k in f) {
-            if (!Object.prototype.hasOwnProperty.call(f, k)) continue;
-            var v = f[k];
-            parts.push(k + "=" + (v === void 0 || v === null ? "(\u043D\u0435\u0442)" : String(v)));
-          }
-          console.log("[AI CM][diag] " + tag + " " + parts.join(" "));
-        } catch (eLine) {
-        }
-        return true;
-      }
-      function aiCmDiagDownload(trigger, content, fileName, extra) {
-        if (!aiCmDiagOn()) return false;
-        var e = extra || {};
-        var url = "";
-        try {
-          url = String(typeof location !== "undefined" && location && location.href || "");
-        } catch (eUrl) {
-        }
-        return aiCmDiagLine("download", {
-          trigger: trigger || "(\u043D\u0435\u0442)",
-          file: fileName === void 0 || fileName === null || String(fileName) === "" ? "\u043F\u0443\u0441\u0442\u043E\u0435" : String(fileName),
-          bytes100: aiCmDiagHead(content, 100),
-          len: content === void 0 || content === null ? 0 : String(content).length,
-          mime: e.mime,
-          url,
-          threadId: e.threadId,
-          site: e.site,
-          reason: e.reason,
-          src: aiCmDiagStack(1)
-        });
-      }
-      function aiCmDiagDownloadBlocked(trigger, content, fileName, reason, extra) {
-        if (!aiCmDiagOn()) return false;
-        var e = extra || {};
-        var url = "";
-        try {
-          url = String(typeof location !== "undefined" && location && location.href || "");
-        } catch (eUrlB) {
-        }
-        return aiCmDiagLine("download-blocked", {
-          reason: reason || "(\u043D\u0435\u0442)",
-          trigger: trigger || "(\u043D\u0435\u0442)",
-          file: fileName === void 0 || fileName === null || String(fileName) === "" ? "\u043F\u0443\u0441\u0442\u043E\u0435" : String(fileName),
-          bytes100: aiCmDiagHead(content, 100),
-          len: content === void 0 || content === null ? 0 : String(content).length,
-          mime: e.mime,
-          url,
-          threadId: e.threadId,
-          site: e.site,
-          src: aiCmDiagStack(1)
-        });
-      }
+      console.log("[AI CM][diag] " + tag + " " + parts.join(" "));
+    } catch (eLine) {
+    }
+    return true;
+  }
+  function aiCmDiagDownload2(trigger, content, fileName, extra) {
+    if (!aiCmDiagOn()) return false;
+    var e = extra || {};
+    var url = "";
+    try {
+      url = String(typeof location !== "undefined" && location && location.href || "");
+    } catch (eUrl) {
+    }
+    return aiCmDiagLine2("download", {
+      trigger: trigger || "(\u043D\u0435\u0442)",
+      file: fileName === void 0 || fileName === null || String(fileName) === "" ? "\u043F\u0443\u0441\u0442\u043E\u0435" : String(fileName),
+      bytes100: aiCmDiagHead(content, 100),
+      len: content === void 0 || content === null ? 0 : String(content).length,
+      mime: e.mime,
+      url,
+      threadId: e.threadId,
+      site: e.site,
+      reason: e.reason,
+      src: aiCmDiagStack(1)
+    });
+  }
+  function aiCmDiagDownloadBlocked2(trigger, content, fileName, reason, extra) {
+    if (!aiCmDiagOn()) return false;
+    var e = extra || {};
+    var url = "";
+    try {
+      url = String(typeof location !== "undefined" && location && location.href || "");
+    } catch (eUrlB) {
+    }
+    return aiCmDiagLine2("download-blocked", {
+      reason: reason || "(\u043D\u0435\u0442)",
+      trigger: trigger || "(\u043D\u0435\u0442)",
+      file: fileName === void 0 || fileName === null || String(fileName) === "" ? "\u043F\u0443\u0441\u0442\u043E\u0435" : String(fileName),
+      bytes100: aiCmDiagHead(content, 100),
+      len: content === void 0 || content === null ? 0 : String(content).length,
+      mime: e.mime,
+      url,
+      threadId: e.threadId,
+      site: e.site,
+      src: aiCmDiagStack(1)
+    });
+  }
+  function swallowSoft2(error, tag) {
+    var label = tag || "unlabeled";
+    var msg = "";
+    try {
+      msg = error && error.message ? String(error.message) : String(error);
+    } catch (eSoftMsg) {
+      msg = "(\u043D\u0435\u0447\u0438\u0442\u0430\u0435\u043C\u0430\u044F \u043E\u0448\u0438\u0431\u043A\u0430)";
+    }
+    try {
+      if (typeof __aiCmPushLogRing === "function") __aiCmPushLogRing("[swallow-soft][" + label + "] " + msg);
+    } catch (eSoftRing) {
+      return void 0;
+    }
+    try {
+      if (typeof aiCmDiagLine2 !== "function") return;
+      aiCmDiagLine2("swallow-soft", { tag: label, err: error });
+    } catch (eSoftDiag) {
+      return void 0;
+    }
+  }
+  function aiCmDiagWarn(tag, message, detail) {
+    var label = tag || "unlabeled";
+    var text = message === void 0 || message === null ? "" : String(message);
+    try {
+      var tail = "";
+      if (detail !== void 0) tail = " " + (typeof __aiCmStringifyArg === "function" ? __aiCmStringifyArg(detail) : String(detail));
+      if (typeof __aiCmPushLogRing === "function") __aiCmPushLogRing("[ai-cm-warn][" + label + "] " + text + tail);
+    } catch (eWarnRing) {
+      return void 0;
+    }
+    try {
+      if (typeof aiCmDiagOn !== "function" || !aiCmDiagOn()) return;
+      console.log("[AI CM][warn][" + label + "] " + text, detail);
+    } catch (eWarnPrint) {
+      return void 0;
+    }
+  }
+  var DEBUG, __aiCmLogRing, __aiCmLogRingMax;
+  var init_debug = __esm({
+    "../utils/debug.js"() {
+      DEBUG = false;
+      __aiCmLogRing = [];
+      __aiCmLogRingMax = 200;
       try {
         if (typeof window !== "undefined") window.__aiCmSwallow = swallow;
       } catch (eSwallowExport) {
       }
-      function swallowSoft(error, tag) {
-        var label = tag || "unlabeled";
-        var msg = "";
-        try {
-          msg = error && error.message ? String(error.message) : String(error);
-        } catch (eSoftMsg) {
-          msg = "(\u043D\u0435\u0447\u0438\u0442\u0430\u0435\u043C\u0430\u044F \u043E\u0448\u0438\u0431\u043A\u0430)";
-        }
-        try {
-          if (typeof __aiCmPushLogRing === "function") __aiCmPushLogRing("[swallow-soft][" + label + "] " + msg);
-        } catch (eSoftRing) {
-          return void 0;
-        }
-        try {
-          if (typeof aiCmDiagLine !== "function") return;
-          aiCmDiagLine("swallow-soft", { tag: label, err: error });
-        } catch (eSoftDiag) {
-          return void 0;
-        }
-      }
-      function aiCmDiagWarn(tag, message, detail) {
-        var label = tag || "unlabeled";
-        var text = message === void 0 || message === null ? "" : String(message);
-        try {
-          var tail = "";
-          if (detail !== void 0) tail = " " + (typeof __aiCmStringifyArg === "function" ? __aiCmStringifyArg(detail) : String(detail));
-          if (typeof __aiCmPushLogRing === "function") __aiCmPushLogRing("[ai-cm-warn][" + label + "] " + text + tail);
-        } catch (eWarnRing) {
-          return void 0;
-        }
-        try {
-          if (typeof aiCmDiagOn !== "function" || !aiCmDiagOn()) return;
-          console.log("[AI CM][warn][" + label + "] " + text, detail);
-        } catch (eWarnPrint) {
-          return void 0;
-        }
-      }
       try {
-        if (typeof window !== "undefined") window.__aiCmSwallowSoft = swallowSoft;
+        if (typeof window !== "undefined") window.__aiCmSwallowSoft = swallowSoft2;
       } catch (eSoftExport) {
         __aiCmPushLogRing("[swallow-soft-export] " + eSoftExport);
       }
+    }
+  });
+
+  // ../utils/google-search-folwr-parser.js
+  var require_google_search_folwr_parser = __commonJS({
+    "../utils/google-search-folwr-parser.js"(exports, module) {
+      (function() {
+        function decodeEntities(s) {
+          if (!s) return "";
+          var out = String(s);
+          out = out.replace(new RegExp("&quot;", "g"), '"');
+          out = out.replace(new RegExp("&amp;", "g"), "&");
+          out = out.replace(new RegExp("&#39;", "g"), "'");
+          out = out.replace(new RegExp("&lt;", "g"), "<");
+          out = out.replace(new RegExp("&gt;", "g"), ">");
+          out = out.replace(new RegExp("&nbsp;", "g"), " ");
+          out = out.replace(/&#(\d+);/g, function(m, d) {
+            try {
+              return String.fromCharCode(parseInt(d, 10));
+            } catch (e) {
+              return m;
+            }
+          });
+          return out;
+        }
+        var FENCE_RE = /(`{3,})[\s\S]*?\1/g;
+        function mapOutsideFences(s, fn) {
+          var str = String(s == null ? "" : s);
+          var out = "";
+          var last = 0;
+          var m;
+          FENCE_RE.lastIndex = 0;
+          while ((m = FENCE_RE.exec(str)) !== null) {
+            out += fn(str.slice(last, m.index)) + m[0];
+            last = m.index + m[0].length;
+          }
+          return out + fn(str.slice(last));
+        }
+        function stripTagsSeg(seg) {
+          return String(seg).replace(/<script[\s\S]*?<\/script>/gi, " ").replace(/<style[\s\S]*?<\/style>/gi, " ").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ");
+        }
+        function stripTags(html) {
+          if (!html) return "";
+          return mapOutsideFences(html, stripTagsSeg).replace(/^\s+/, "").replace(/\s+$/, "");
+        }
+        function sanitizeAssistantSeg(seg) {
+          return String(seg).replace(/<script[\s\S]*?<\/script>/gi, " ").replace(/<style[\s\S]*?<\/style>/gi, " ").replace(/<[^>]+>/g, " ").replace(/[ \t\f\v]+/g, " ").split("\n").map(function(ln) {
+            return ln.trim();
+          }).join("\n").replace(/\n{3,}/g, "\n\n");
+        }
+        function sanitizeAssistant(s) {
+          if (!s) return "";
+          return mapOutsideFences(s, sanitizeAssistantSeg).replace(/^\s+/, "").replace(/\s+$/, "");
+        }
+        function tableCellText(cellEl) {
+          var clone = cellEl.cloneNode(true);
+          clone.querySelectorAll("script, style, button, svg").forEach(function(el) {
+            el.remove();
+          });
+          return stripTags(decodeEntities(clone.innerHTML)).trim();
+        }
+        function tableToMarkdown(tableEl) {
+          var rows = tableEl.querySelectorAll("tr");
+          var lines = [];
+          for (var r = 0; r < rows.length; r++) {
+            var cells = rows[r].querySelectorAll("th, td");
+            var cellTexts = [];
+            for (var c = 0; c < cells.length; c++) {
+              cellTexts.push(tableCellText(cells[c]));
+            }
+            if (cellTexts.length === 0) continue;
+            lines.push("| " + cellTexts.join(" | ") + " |");
+          }
+          return lines.join("\n");
+        }
+        function isQuestionHeading(el) {
+          return el.tagName === "H2" && el.className && String(el.className).indexOf("iMqumd") !== -1;
+        }
+        var CODE_CONTAINER_SEL = 'pre, code, [class*="code-block"], [class*="codeBlock"], [class*="codeblock"]';
+        var CODE_LANG_RE = /^[A-Za-z][A-Za-z0-9+#._-]{0,19}$/;
+        function classOf(el) {
+          try {
+            return String(el && el.className || "");
+          } catch (e) {
+            return "";
+          }
+        }
+        function isCodeLikeNode(el) {
+          if (!el || !el.tagName) return false;
+          var tag = String(el.tagName).toUpperCase();
+          return tag === "PRE" || tag === "CODE" || /code-?block/i.test(classOf(el));
+        }
+        function codeTextOf(el) {
+          if (!el || typeof el.cloneNode !== "function") return "";
+          var clone;
+          try {
+            clone = el.cloneNode(true);
+          } catch (e) {
+            return "";
+          }
+          try {
+            var junk = clone.querySelectorAll("script, style, button, svg");
+            for (var i = 0; i < junk.length; i++) {
+              if (junk[i].parentNode) junk[i].parentNode.removeChild(junk[i]);
+            }
+            var brs = clone.querySelectorAll("br");
+            var doc = clone.ownerDocument || (typeof document !== "undefined" ? document : null);
+            for (var b = 0; b < brs.length; b++) {
+              if (brs[b].parentNode && doc && doc.createTextNode) {
+                brs[b].parentNode.replaceChild(doc.createTextNode("\n"), brs[b]);
+              }
+            }
+          } catch (e2) {
+          }
+          var txt = "";
+          try {
+            txt = String(clone.textContent || "");
+          } catch (e3) {
+            txt = "";
+          }
+          if (txt.indexOf("\n") === -1 && clone.children && clone.children.length > 1) {
+            var allBlock = true;
+            for (var k = 0; k < clone.children.length; k++) {
+              if (!/^(DIV|P|LI|TR|SECTION|ARTICLE|FIGURE|BLOCKQUOTE|H[1-6])$/.test(String(clone.children[k].tagName || "").toUpperCase())) {
+                allBlock = false;
+                break;
+              }
+            }
+            if (allBlock) {
+              var lines = [];
+              for (var k2 = 0; k2 < clone.children.length; k2++) {
+                lines.push(String(clone.children[k2].textContent || ""));
+              }
+              var joined = lines.join("\n");
+              if (joined.replace(/\s+/g, "")) txt = joined;
+            }
+          }
+          return txt.replace(/[ \t]+$/gm, "").replace(/^\n+/, "").replace(/\s+$/, "");
+        }
+        function codeBodyElement(el) {
+          try {
+            var inner = el.querySelectorAll ? el.querySelectorAll("pre, code") : null;
+            if (inner && inner.length) return inner[inner.length - 1];
+          } catch (e) {
+          }
+          return el;
+        }
+        function detectCodeLang(el, langHint) {
+          if (langHint != null && CODE_LANG_RE.test(String(langHint).trim())) return String(langHint).trim();
+          var attrNames = ["code-lang", "data-lang", "data-code-lang"];
+          try {
+            for (var a = 0; a < attrNames.length; a++) {
+              var v = el && el.getAttribute ? el.getAttribute(attrNames[a]) : null;
+              if (v && CODE_LANG_RE.test(String(v).trim())) return String(v).trim();
+            }
+          } catch (e) {
+          }
+          var m = classOf(el).match(/(?:^|[\s_-])(?:language|lang)[-_]([A-Za-z][A-Za-z0-9+#._-]{0,19})/);
+          if (m && CODE_LANG_RE.test(m[1])) return m[1];
+          var cur = el;
+          for (var up = 0; cur && up < 4; up++) {
+            var prev = cur.previousSibling;
+            for (var hops = 0; prev && hops < 3; hops++) {
+              var t = "";
+              try {
+                t = String(prev.textContent || "").trim();
+              } catch (e2) {
+                t = "";
+              }
+              if (t) {
+                if (CODE_LANG_RE.test(t)) return t;
+                break;
+              }
+              prev = prev.previousSibling;
+            }
+            cur = cur.parentNode;
+          }
+          return "";
+        }
+        function isCodeBlockElement(el) {
+          if (!el || !el.tagName) return false;
+          var tag = String(el.tagName).toUpperCase();
+          if (/code-?block/i.test(classOf(el))) return true;
+          if (tag === "PRE") return true;
+          if (tag !== "CODE") return false;
+          if (/(?:^|[\s_-])(?:language|lang)[-_]/.test(classOf(el))) return true;
+          return codeTextOf(el).indexOf("\n") !== -1;
+        }
+        function renderCodeBlock(node, langHint) {
+          if (!node) return "";
+          var body = codeBodyElement(node);
+          var text = codeTextOf(body);
+          if (!text) text = codeTextOf(node);
+          if (!text) return "";
+          var lang = detectCodeLang(node, langHint) || detectCodeLang(body, langHint);
+          var fence = "```";
+          while (text.indexOf(fence) !== -1) fence += "`";
+          return fence + lang + "\n" + text + "\n" + fence;
+        }
+        function answerTextOf(node) {
+          if (!node) return "";
+          if (isCodeBlockElement(node)) return renderCodeBlock(node);
+          if (typeof node.cloneNode !== "function") return "";
+          var clone;
+          try {
+            clone = node.cloneNode(true);
+          } catch (e) {
+            return "";
+          }
+          try {
+            var junk = clone.querySelectorAll("script, style, button, svg");
+            for (var i = 0; i < junk.length; i++) {
+              if (junk[i].parentNode) junk[i].parentNode.removeChild(junk[i]);
+            }
+            var found = clone.querySelectorAll ? clone.querySelectorAll(CODE_CONTAINER_SEL) : [];
+            var outer = [];
+            for (var f = 0; f < found.length; f++) {
+              if (!isCodeBlockElement(found[f])) continue;
+              var nested = false;
+              for (var o = 0; o < outer.length; o++) {
+                if (outer[o].contains && outer[o].contains(found[f])) {
+                  nested = true;
+                  break;
+                }
+              }
+              if (!nested) outer.push(found[f]);
+            }
+            var doc = clone.ownerDocument || (typeof document !== "undefined" ? document : null);
+            for (var c = outer.length - 1; c >= 0; c--) {
+              var fenced = renderCodeBlock(outer[c]);
+              if (!fenced || !outer[c].parentNode || !doc || !doc.createTextNode) continue;
+              outer[c].parentNode.replaceChild(doc.createTextNode("\n" + fenced + "\n"), outer[c]);
+            }
+          } catch (e2) {
+          }
+          var txt = "";
+          try {
+            txt = String(clone.textContent || "");
+          } catch (e3) {
+            txt = "";
+          }
+          return txt.trim();
+        }
+        function answerDomNodes(root) {
+          var doc = root || (typeof document !== "undefined" ? document : null);
+          if (!doc || typeof doc.querySelectorAll !== "function") return [];
+          var nodes = doc.querySelectorAll(".n6owBd.awi2gc, " + CODE_CONTAINER_SEL);
+          var out = [];
+          for (var i = 0; i < nodes.length; i++) {
+            var el = nodes[i];
+            if (isCodeLikeNode(el) && !isCodeBlockElement(el)) continue;
+            var nested = false;
+            for (var j = 0; j < out.length; j++) {
+              if (out[j].contains && out[j].contains(el)) {
+                nested = true;
+                break;
+              }
+            }
+            if (nested) continue;
+            out.push(el);
+          }
+          return out;
+        }
+        var WEB_SEARCH_CHIP_RE = /(?:Самые популярные результаты веб-поиска по этой теме|People also search|Related searches|Похожие запросы|Связанные запросы)/i;
+        var FOREIGN_QUESTION_RE = /^Вы сказали:\s*"/;
+        function nodeText(node) {
+          try {
+            return (node.textContent || "").trim();
+          } catch (e) {
+            return "";
+          }
+        }
+        function isWebSearchChipNode(node) {
+          return WEB_SEARCH_CHIP_RE.test(nodeText(node));
+        }
+        function isForeignQuestionNode(node) {
+          return FOREIGN_QUESTION_RE.test(nodeText(node));
+        }
+        function listItemToMarkdown(liEl) {
+          var clone = liEl.cloneNode(true);
+          clone.querySelectorAll("script, style, button, svg").forEach(function(el) {
+            el.remove();
+          });
+          var label = null;
+          var b = clone.querySelector("strong, b");
+          if (b) {
+            label = (b.textContent || "").replace(/\s+/g, " ").trim();
+            b.remove();
+          }
+          var rest = stripTags(decodeEntities(clone.innerHTML)).trim();
+          if (label) {
+            return "- **" + label + "**" + (rest ? ": " + rest : "");
+          }
+          return rest ? "- " + rest : "";
+        }
+        function listToText(listEl) {
+          var items = listEl.querySelectorAll("li");
+          var lines = [];
+          for (var r = 0; r < items.length; r++) {
+            var t = listItemToMarkdown(items[r]);
+            if (t) lines.push(t);
+          }
+          return lines.join("\n");
+        }
+        function gatherAnswerContentNodes(doc) {
+          var raw = doc.querySelectorAll('.n6owBd.awi2gc, table, [role="heading"], h2, h3, h4, ul, ol, li, [role="list"], [role="listitem"], ' + CODE_CONTAINER_SEL);
+          var out = [];
+          for (var i = 0; i < raw.length; i++) {
+            var el = raw[i];
+            if (isQuestionHeading(el)) continue;
+            if (isCodeLikeNode(el) && !isCodeBlockElement(el)) continue;
+            var nested = false;
+            for (var j = 0; j < out.length; j++) {
+              if (out[j].contains && out[j].contains(el)) {
+                nested = true;
+                break;
+              }
+            }
+            if (nested) continue;
+            out.push(el);
+          }
+          return out;
+        }
+        function assignContentToTurns(turnsArr, contentNodes) {
+          var answers = [];
+          var skipAfterChip = [];
+          for (var ti = 0; ti < turnsArr.length; ti++) {
+            answers[ti] = [];
+            skipAfterChip[ti] = false;
+          }
+          for (var n = 0; n < contentNodes.length; n++) {
+            var node = contentNodes[n];
+            var assigned = -1;
+            for (var t2 = 0; t2 < turnsArr.length; t2++) {
+              if (turnsArr[t2].compareDocumentPosition(node) & Node.DOCUMENT_POSITION_FOLLOWING) {
+                assigned = t2;
+              } else {
+                break;
+              }
+            }
+            if (assigned < 0) continue;
+            if (isForeignQuestionNode(node)) continue;
+            if (isWebSearchChipNode(node)) {
+              skipAfterChip[assigned] = true;
+              continue;
+            }
+            if (skipAfterChip[assigned]) continue;
+            var part = null;
+            if (node.tagName === "TABLE") {
+              var md = tableToMarkdown(node);
+              if (md) part = md;
+            } else if (node.tagName === "UL" || node.tagName === "OL") {
+              var lt = listToText(node);
+              if (lt) part = lt;
+            } else {
+              var ct = answerTextOf(node).trim();
+              if (ct) part = ct;
+            }
+            if (part) answers[assigned].push(part);
+          }
+          return answers;
+        }
+        function readThreadId(doc) {
+          try {
+            var el = doc.querySelector("[data-session-thread-id]");
+            if (el) {
+              var v = el.getAttribute("data-session-thread-id");
+              return v ? v.trim() : "";
+            }
+          } catch (e) {
+          }
+          return "";
+        }
+        function parseGoogleFolwrOpen(htmlText) {
+          var turns = [];
+          var messages = [];
+          if (!htmlText || typeof htmlText !== "string") {
+            return { threadId: "", turns, messages, text: "", count: 0 };
+          }
+          var doc;
+          try {
+            doc = new DOMParser().parseFromString(htmlText, "text/html");
+          } catch (e) {
+            return { threadId: "", turns, messages, text: "", count: 0 };
+          }
+          var threadId = readThreadId(doc);
+          var turnEls = doc.querySelectorAll('[data-scope-id="turn"]');
+          var allAimfl = doc.querySelectorAll('[data-subtree="aimfl"]');
+          var turnsArr = Array.prototype.slice.call(turnEls);
+          var tgQuestions = [];
+          try {
+            var tgRe = /<!--TgQPHd\|[\s\S]*?-->/g;
+            var m;
+            while ((m = tgRe.exec(htmlText)) !== null) {
+              var c = decodeEntities(m[0]);
+              var longRe = /"([^"]{20,})"/g;
+              var lm;
+              var found = null;
+              while ((lm = longRe.exec(c)) !== null) {
+                var cand = lm[1];
+                if (cand.indexOf("\\u0026") !== -1) continue;
+                if (cand.indexOf("OLOoOd") !== -1) continue;
+                if (cand.indexOf("dRog6c") !== -1) continue;
+                if (cand.indexOf("TgQPHd") !== -1) continue;
+                if (!/[а-яёА-ЯЁ]/.test(cand) && cand.indexOf(" ") === -1) continue;
+                found = cand;
+                break;
+              }
+              tgQuestions.push(found);
+            }
+          } catch (e) {
+            swallowSoft(e, "gsa-utils:parseGoogleFolwrOpen-tgqphd");
+          }
+          var contentNodes = gatherAnswerContentNodes(doc);
+          var answers = assignContentToTurns(turnsArr, contentNodes);
+          for (var i = 0; i < turnsArr.length; i++) {
+            var turn = turnsArr[i];
+            var question = null;
+            var h2 = turn.querySelector("h2.iMqumd");
+            if (h2) {
+              var raw = (h2.textContent || "").trim();
+              var qm = raw.match(/^Вы сказали:\s*"([\s\S]*)"$/);
+              question = qm ? qm[1].trim() : raw;
+            }
+            var assistantText = answers[i].length > 0 ? answers[i].join("\n\n") : null;
+            if (!assistantText) {
+              var nestedAimfl = turn.querySelector('[data-subtree="aimfl"]');
+              if (nestedAimfl) {
+                var nat = (nestedAimfl.textContent || "").trim();
+                if (nat) assistantText = nat;
+              }
+            }
+            if (!assistantText && allAimfl[i]) {
+              var at = (allAimfl[i].textContent || "").trim();
+              if (at) assistantText = at;
+            }
+            if (!question && tgQuestions[i]) question = tgQuestions[i];
+            turns.push({
+              id: turn.getAttribute && turn.getAttribute("jsuid") || "idx" + i,
+              userText: question || null,
+              assistantText: assistantText || null
+            });
+          }
+          if (turns.length === 0) {
+            var folifAnswer = null;
+            for (var aa = 0; aa < allAimfl.length; aa++) {
+              var at2 = (allAimfl[aa].textContent || "").trim();
+              if (at2) {
+                folifAnswer = at2;
+                break;
+              }
+            }
+            if (!folifAnswer && contentNodes.length > 0) {
+              var firstNode = contentNodes[0];
+              if (firstNode.tagName === "TABLE") {
+                folifAnswer = tableToMarkdown(firstNode);
+              } else {
+                folifAnswer = answerTextOf(firstNode).trim() || null;
+              }
+            }
+            var folifQuestion = tgQuestions.length > 0 ? tgQuestions[0] : null;
+            if (folifQuestion || folifAnswer) {
+              turns.push({ id: "folif_" + Date.now(), userText: folifQuestion, assistantText: folifAnswer });
+            }
+          }
+          for (var t = 0; t < turns.length; t++) {
+            var t2 = turns[t];
+            if (t2.userText) messages.push({ role: "user", text: stripTags(decodeEntities(t2.userText)) });
+            if (t2.assistantText) messages.push({ role: "assistant", text: sanitizeAssistant(t2.assistantText) });
+          }
+          var text = "";
+          for (var mi = 0; mi < messages.length; mi++) {
+            text += (mi > 0 ? "\n" : "") + messages[mi].text;
+          }
+          return { threadId, turns, messages, text, count: messages.length };
+        }
+        function countTurnContainers(htmlText) {
+          if (!htmlText || typeof htmlText !== "string") return 0;
+          try {
+            var doc = new DOMParser().parseFromString(htmlText, "text/html");
+            return doc.querySelectorAll('[data-scope-id="turn"]').length;
+          } catch (e) {
+            return 0;
+          }
+        }
+        function extractTurnsFromDocument(doc) {
+          if (!doc || typeof doc.querySelectorAll !== "function") return [];
+          var turns = [];
+          try {
+            var turnEls = doc.querySelectorAll('[data-scope-id="turn"]');
+            var allAimfl = doc.querySelectorAll('[data-subtree="aimfl"]');
+            var turnsArr = Array.prototype.slice.call(turnEls);
+            var questions = [];
+            for (var i = 0; i < turnsArr.length; i++) {
+              var h2 = turnsArr[i].querySelector("h2.iMqumd");
+              var q = null;
+              if (h2) {
+                var raw = (h2.textContent || "").trim();
+                var m = raw.match(/^Вы сказали:\s*"([\s\S]*)"$/);
+                q = m ? m[1].trim() : raw;
+              }
+              questions.push(q);
+            }
+            var answers = [];
+            for (var t = 0; t < turnsArr.length; t++) answers[t] = [];
+            var blocks = answerDomNodes(doc);
+            for (var b = 0; b < blocks.length; b++) {
+              var blk = blocks[b];
+              var assigned = -1;
+              for (var t2 = 0; t2 < turnsArr.length; t2++) {
+                if (turnsArr[t2].compareDocumentPosition(blk) & Node.DOCUMENT_POSITION_FOLLOWING) assigned = t2;
+                else break;
+              }
+              if (assigned >= 0 && assigned < turnsArr.length) {
+                var txt = answerTextOf(blk).trim();
+                if (txt) answers[assigned].push(txt);
+              }
+            }
+            for (var k = 0; k < turnsArr.length; k++) {
+              var joined = answers[k].length ? answers[k].join("\n\n") : null;
+              if (!joined && allAimfl[k]) {
+                var at = (allAimfl[k].textContent || "").trim();
+                if (at) joined = at;
+              }
+              turns.push({
+                id: turnsArr[k].getAttribute && turnsArr[k].getAttribute("jsuid") || "idx" + k,
+                userText: questions[k] || null,
+                assistantText: joined || null
+              });
+            }
+          } catch (e) {
+            swallowSoft(e, "gsa-utils:extractTurnsFromDocument");
+          }
+          return turns;
+        }
+        function extractContinuationToken(htmlText) {
+          if (!htmlText || typeof htmlText !== "string") return null;
+          try {
+            var doc = new DOMParser().parseFromString(htmlText, "text/html");
+            var els = doc.querySelectorAll("[data-mstk]");
+            var last = null;
+            for (var i = 0; i < els.length; i++) {
+              var v = els[i].getAttribute("data-mstk");
+              if (v) last = v.trim();
+            }
+            return last;
+          } catch (e) {
+            return null;
+          }
+        }
+        function normalizeTurnKeyPart(s) {
+          return String(s == null ? "" : s).toLowerCase().replace(/\u00a0/g, " ").replace(/[^a-zа-яё0-9]+/g, "");
+        }
+        function isAnswerWrapperTail(tail) {
+          var t = String(tail == null ? "" : tail);
+          var body = t.replace(/^["»”']{0,2}/, "").replace(/^[\s.,:;-]{0,4}/, "");
+          return body.replace(/\s+/g, "").length > 0;
+        }
+        var QUESTION_ASK_RE = /^(?:в\s+)?(?:ответ(?:е)?(?:\s+на\s+вопрос)?|на\s+вопрос|вопрос)\s*:?\s*/i;
+        function wrapperPrefix(text) {
+          var s = String(text == null ? "" : text);
+          var head = s.slice(0, 96);
+          var at = head.indexOf(":");
+          if (at === -1) return null;
+          var after = head.slice(at + 1);
+          var m = /^\s*"/.exec(after);
+          if (!m) return null;
+          return s.slice(0, at + 1 + m[0].length);
+        }
+        function answerWrapperParts(text) {
+          var s = String(text == null ? "" : text);
+          var prefix = wrapperPrefix(s);
+          if (!prefix) return null;
+          var rest = s.slice(prefix.length);
+          var close = rest.indexOf('"');
+          if (close === -1) return null;
+          var tail = rest.slice(close + 1);
+          if (!isAnswerWrapperTail(tail)) return null;
+          var question = rest.slice(0, close).trim();
+          if (!question) return null;
+          var body = tail.replace(/^["»”']{0,2}/, "").replace(/^[\s.,:;-]+/, "");
+          if (!body) return null;
+          return { question, body };
+        }
+        function canonicalAnswerBody(text) {
+          var wrapper = answerWrapperParts(text);
+          if (wrapper) return wrapper.body;
+          var s = String(text == null ? "" : text);
+          try {
+            var q = QUESTION_ASK_RE.exec(s);
+            if (q) {
+              var rest2 = s.slice(q[0].length);
+              var close2 = rest2.indexOf('"?');
+              if (close2 !== -1 && close2 < 200) {
+                var body2 = rest2.slice(close2 + 2).replace(/^[\s.,:;-]+/, "");
+                if (body2) s = body2;
+              }
+            }
+          } catch (e) {
+            return String(text == null ? "" : text);
+          }
+          return s;
+        }
+        function turnIdentityParts(turn) {
+          if (!turn) return { u: "", a: "" };
+          var wrapper = answerWrapperParts(turn.assistantText);
+          var u = normalizeTurnKeyPart(turn.userText);
+          if (!u && wrapper) u = normalizeTurnKeyPart(wrapper.question);
+          var a = normalizeTurnKeyPart(wrapper ? wrapper.body : canonicalAnswerBody(turn.assistantText));
+          return { u, a };
+        }
+        function canonicalTurnKeyOf(turn) {
+          if (!turn) return "";
+          var parts = turnIdentityParts(turn);
+          return parts.u + "||" + parts.a;
+        }
+        function canonicalizeTurnForThread(turn) {
+          if (!turn) return turn;
+          var question = turn.userText == null ? "" : String(turn.userText).trim();
+          if (!question) {
+            var wrapper = answerWrapperParts(turn.assistantText);
+            if (wrapper) question = wrapper.question;
+          }
+          return {
+            id: turn.id,
+            userText: question || null,
+            assistantText: turn.assistantText == null ? null : turn.assistantText
+          };
+        }
+        function isBetterTurn(candidate, current) {
+          if (!current) return true;
+          var la = String(candidate && candidate.assistantText || "").length;
+          var lb = String(current && current.assistantText || "").length;
+          if (la !== lb) return la > lb;
+          return String(candidate && candidate.userText || "").length > String(current && current.userText || "").length;
+        }
+        function turnRecord(t, idFallback) {
+          return {
+            id: t && t.id != null ? t.id : idFallback,
+            userText: t && t.userText || null,
+            assistantText: t && t.assistantText || null
+          };
+        }
+        var PREFIX_MIN_CHARS = 12;
+        var PREFIX_FUZZY_RATIO = 0.8;
+        function bodiesPrefixCompatible(a, b) {
+          var x = String(a == null ? "" : a);
+          var y = String(b == null ? "" : b);
+          if (!x || !y) return false;
+          if (x === y) return true;
+          var n = Math.min(x.length, y.length);
+          if (n < PREFIX_MIN_CHARS) return false;
+          var common = 0;
+          while (common < n && x.charCodeAt(common) === y.charCodeAt(common)) common++;
+          if (common === n) return true;
+          return common / n >= PREFIX_FUZZY_RATIO;
+        }
+        function isFullerTurn(candidate, current) {
+          var la = turnIdentityParts(candidate).a.length;
+          var lb = turnIdentityParts(current).a.length;
+          if (la !== lb) return la > lb;
+          return isBetterTurn(candidate, current);
+        }
+        var PARAGRAPH_PERMUTATION_MIN = 2;
+        function answerBodyParagraphs(turn) {
+          var wrapper = answerWrapperParts(turn && turn.assistantText);
+          var body = wrapper ? wrapper.body : canonicalAnswerBody(turn && turn.assistantText);
+          var lines = String(body == null ? "" : body).split(String.fromCharCode(10));
+          var out = [];
+          var cur = "";
+          for (var i = 0; i < lines.length; i++) {
+            var line = lines[i];
+            if (line.trim() === "") {
+              var p = normalizeTurnKeyPart(cur);
+              if (p) out.push(p);
+              cur = "";
+              continue;
+            }
+            cur = cur ? cur + String.fromCharCode(10) + line : line;
+          }
+          var tail = normalizeTurnKeyPart(cur);
+          if (tail) out.push(tail);
+          return out;
+        }
+        function bodiesParagraphPermutation(aTurn, bTurn) {
+          var pa = answerBodyParagraphs(aTurn);
+          var pb = answerBodyParagraphs(bTurn);
+          if (pa.length < PARAGRAPH_PERMUTATION_MIN || pa.length !== pb.length) return false;
+          pa.sort();
+          pb.sort();
+          for (var i = 0; i < pa.length; i++) {
+            if (pa[i] !== pb[i]) return false;
+          }
+          return true;
+        }
+        function findPrefixCompatibleIndex(turns, turn) {
+          var parts = turnIdentityParts(turn);
+          if (!parts.u || !parts.a) return -1;
+          for (var i = 0; i < turns.length; i++) {
+            var other = turnIdentityParts(turns[i]);
+            if (other.u !== parts.u) continue;
+            if (bodiesPrefixCompatible(other.a, parts.a)) return i;
+            if (other.a.length === parts.a.length && bodiesParagraphPermutation(turns[i], turn)) return i;
+          }
+          return -1;
+        }
+        function reindexTurnKey(byKey, turns, at) {
+          var k;
+          for (k in byKey) {
+            if (byKey[k] === at) delete byKey[k];
+          }
+          var key = canonicalTurnKeyOf(turns[at]);
+          if (key !== "||") byKey[key] = at;
+        }
+        function mergeTurnsById(baseTurns, extraTurns) {
+          baseTurns = Array.isArray(baseTurns) ? baseTurns : [];
+          extraTurns = Array.isArray(extraTurns) ? extraTurns : [];
+          var byId = {};
+          var byKey = {};
+          var out = [];
+          function add(t) {
+            if (!t) return;
+            var id = t.id != null ? String(t.id) : "x" + out.length;
+            var key = canonicalTurnKeyOf(t);
+            var hasId = Object.prototype.hasOwnProperty.call(byId, id);
+            var hasKey = key !== "||" && Object.prototype.hasOwnProperty.call(byKey, key);
+            var at = hasId ? byId[id] : hasKey ? byKey[key] : findPrefixCompatibleIndex(out, t);
+            if (at !== -1) {
+              var richer = hasId || hasKey ? isBetterTurn(t, out[at]) : isFullerTurn(t, out[at]);
+              if (richer) {
+                out[at] = turnRecord(t, out[at].id);
+                reindexTurnKey(byKey, out, at);
+              }
+              return;
+            }
+            byId[id] = out.length;
+            if (key !== "||") byKey[key] = out.length;
+            out.push(turnRecord(t, id));
+          }
+          var i;
+          for (i = 0; i < baseTurns.length; i++) add(baseTurns[i]);
+          for (i = 0; i < extraTurns.length; i++) add(extraTurns[i]);
+          return out;
+        }
+        function mergeTurnsMonotone(baseTurns, extraTurns) {
+          return mergeTurnsById(baseTurns, extraTurns);
+        }
+        function mergeTurnsByKey(baseTurns, extraTurns) {
+          baseTurns = Array.isArray(baseTurns) ? baseTurns : [];
+          extraTurns = Array.isArray(extraTurns) ? extraTurns : [];
+          var byKey = {};
+          var out = [];
+          function add(t) {
+            if (!t) return;
+            var key = canonicalTurnKeyOf(t);
+            if (key === "||") return;
+            var hasKey = Object.prototype.hasOwnProperty.call(byKey, key);
+            var at = hasKey ? byKey[key] : findPrefixCompatibleIndex(out, t);
+            if (at === -1) {
+              byKey[key] = out.length;
+              out.push(turnRecord(t, "x" + out.length));
+              return;
+            }
+            var richer = hasKey ? isBetterTurn(t, out[at]) : isFullerTurn(t, out[at]);
+            if (richer) {
+              out[at] = turnRecord(t, out[at].id);
+              reindexTurnKey(byKey, out, at);
+            }
+          }
+          for (var i = 0; i < baseTurns.length; i++) add(baseTurns[i]);
+          for (var j = 0; j < extraTurns.length; j++) add(extraTurns[j]);
+          return out;
+        }
+        function dedupeTurns(turns) {
+          var list = Array.isArray(turns) ? turns : [];
+          var byKey = {};
+          var out = [];
+          for (var i = 0; i < list.length; i++) {
+            var t = list[i];
+            if (!t) continue;
+            var key = canonicalTurnKeyOf(t);
+            var hasKey = key !== "||" && Object.prototype.hasOwnProperty.call(byKey, key);
+            var at = hasKey ? byKey[key] : findPrefixCompatibleIndex(out, t);
+            if (at === -1) {
+              if (key !== "||") byKey[key] = out.length;
+              out.push(t);
+              continue;
+            }
+            var richer = hasKey ? isBetterTurn(t, out[at]) : isFullerTurn(t, out[at]);
+            if (richer) {
+              out[at] = t;
+              reindexTurnKey(byKey, out, at);
+            }
+          }
+          return out;
+        }
+        function classifyFolwrContinuation(input) {
+          var i = input || {};
+          var ok = i.ok === true;
+          var status = i.status == null ? 0 : i.status;
+          var bodyLength = typeof i.bodyLength === "number" && i.bodyLength >= 0 ? i.bodyLength : 0;
+          var newTurns = typeof i.newTurns === "number" && i.newTurns > 0 ? i.newTurns : 0;
+          var cursor = i.cursor ? String(i.cursor) : null;
+          var sentCursor = i.sentCursor ? String(i.sentCursor) : null;
+          var cursorRepeated = !!(cursor && sentCursor && cursor === sentCursor);
+          var kind;
+          var complete, canContinue;
+          if (!ok) {
+            kind = "http-error";
+            complete = false;
+            canContinue = false;
+          } else if (bodyLength === 0) {
+            kind = "empty-body";
+            complete = true;
+            canContinue = false;
+          } else if (cursorRepeated) {
+            kind = "cursor-repeat";
+            complete = true;
+            canContinue = false;
+          } else if (newTurns > 0) {
+            kind = "new-turns";
+            complete = false;
+            canContinue = true;
+          } else {
+            kind = "no-new-turns";
+            complete = true;
+            canContinue = false;
+          }
+          return {
+            kind,
+            complete,
+            canContinue,
+            status,
+            ok,
+            bodyLength,
+            newTurns,
+            cursor,
+            cursorRepeated,
+            log: "kind=" + kind + " status=" + status + " ok=" + (ok ? 1 : 0) + " len=" + bodyLength + "B \u0445\u043E\u0434\u043E\u0432=+" + newTurns + " \u043A\u0443\u0440\u0441\u043E\u0440=" + (cursor ? "\u0435\u0441\u0442\u044C(" + (cursorRepeated ? "\u043F\u043E\u0432\u0442\u043E\u0440" : "\u043D\u043E\u0432\u044B\u0439") + ")" : "\u043D\u0435\u0442")
+          };
+        }
+        if (typeof window !== "undefined") {
+          window.parseGoogleFolwrOpen = parseGoogleFolwrOpen;
+          window.GoogleFolwrUtils = {
+            countTurnContainers,
+            extractTurnsFromDocument,
+            mergeTurnsByKey,
+            extractContinuationToken,
+            mergeTurnsById,
+            mergeTurnsMonotone,
+            classifyFolwrContinuation,
+            // O-32: каноническая идентичность/форма хода — ОДИН источник правды для сетевого пути,
+            // DOM-добора перехватчика и DOM-пути адаптера (см. блок «O-32» ниже по файлу).
+            canonicalTurnKeyOf,
+            canonicalAnswerBody,
+            canonicalizeTurnForThread,
+            normalizeTurnKeyPart,
+            // O-32 (фикс A/C): префикс-терпимая идентичность хода и дедуп списка перед кэшем.
+            turnIdentityParts,
+            bodiesPrefixCompatible,
+            dedupeTurns,
+            // O-45: общий рендер код-блоков (```lang … ```) и отбор узлов DOM-пути —
+            // переиспользуются адаптером (adapters/google-search-adapter.js) и тестами.
+            renderCodeBlock,
+            answerTextOf,
+            answerDomNodes,
+            isCodeBlockElement
+          };
+        }
+        if (typeof module !== "undefined" && module.exports) {
+          module.exports = {
+            parseGoogleFolwrOpen,
+            countTurnContainers,
+            extractTurnsFromDocument,
+            mergeTurnsByKey,
+            extractContinuationToken,
+            mergeTurnsById,
+            mergeTurnsMonotone,
+            classifyFolwrContinuation,
+            canonicalTurnKeyOf,
+            canonicalAnswerBody,
+            canonicalizeTurnForThread,
+            normalizeTurnKeyPart,
+            turnIdentityParts,
+            bodiesPrefixCompatible,
+            dedupeTurns,
+            renderCodeBlock,
+            answerTextOf,
+            answerDomNodes,
+            isCodeBlockElement
+          };
+        }
+      })();
+    }
+  });
+
+  // ../utils/export-text-builders.js
+  var require_export_text_builders = __commonJS({
+    "../utils/export-text-builders.js"(exports, module) {
+      init_buildReferenceText();
+      (function() {
+        "use strict";
+        function aiCmI18nMessage(key, fallback, substitutions) {
+          try {
+            if (typeof chrome !== "undefined" && chrome.i18n && typeof chrome.i18n.getMessage === "function") {
+              var message = substitutions ? chrome.i18n.getMessage(key, substitutions) : chrome.i18n.getMessage(key);
+              if (message) return message;
+            }
+          } catch (eMessage) {
+          }
+          return fallback;
+        }
+        var REASONING_SECTION_TAG = "[REASONING]";
+        var ANSWER_SECTION_TAG = "[ANSWER]";
+        function reasoningOfMessage(msg) {
+          if (!msg || typeof msg !== "object") return "";
+          var r = msg.reasoning;
+          return typeof r === "string" ? r : "";
+        }
+        function withReasoningSections(text, reasoning) {
+          var t = typeof text === "string" ? text : "";
+          var r = typeof reasoning === "string" ? reasoning : "";
+          if (!r) return t;
+          if (t.indexOf(r) !== -1) return t;
+          return REASONING_SECTION_TAG + "\n" + r + "\n\n" + ANSWER_SECTION_TAG + "\n" + t;
+        }
+        function messageTextWithReasoning(msg) {
+          if (!msg || typeof msg !== "object") return "";
+          return withReasoningSections(msg.text, reasoningOfMessage(msg));
+        }
+        function reasoningOfMessageForExport(msg, useHidden) {
+          var r = reasoningOfMessage(msg);
+          if (r) return r;
+          if (useHidden !== true || !msg || typeof msg !== "object") return "";
+          return typeof msg.hiddenReasoning === "string" ? msg.hiddenReasoning : "";
+        }
+        function markersMessageTextWithReasoning(msg, useHidden) {
+          return withReasoningSections(
+            messageTextForMarkers(msg),
+            reasoningOfMessageForExport(msg, useHidden)
+          );
+        }
+        var TXT_ROLE_MARKER_SITES = ["qwen"];
+        function isTxtRoleMarkerHistory(history) {
+          try {
+            var site = String(history && history.site || "").toLowerCase();
+            return TXT_ROLE_MARKER_SITES.indexOf(site) !== -1;
+          } catch (e) {
+            return false;
+          }
+        }
+        function txtRoleMarker(role) {
+          return role === "user" ? "USER:" : "ASSISTANT:";
+        }
+        function mdRoleMarker(role) {
+          return role === "user" ? "### USER" : "### ASSISTANT";
+        }
+        var CONTAINER_MIN_CONTAINED = 2;
+        var CONTAINER_COVER_MIN = 0.8;
+        function messageTextForMarkers(msg) {
+          if (!msg || typeof msg !== "object") return "";
+          if (typeof msg.text === "string" && msg.text) return msg.text;
+          if (typeof msg.content === "string") return msg.content;
+          return typeof msg.text === "string" ? msg.text : "";
+        }
+        function dropContainerMessages(list) {
+          var src = Array.isArray(list) ? list : [];
+          var texts = [];
+          for (var t = 0; t < src.length; t++) texts.push(messageTextForMarkers(src[t]));
+          var keep = [];
+          for (var c = 0; c < src.length; c++) {
+            var candidate = texts[c];
+            var contained = 0;
+            var covered = 0;
+            var longest = 0;
+            if (candidate) {
+              for (var j = 0; j < texts.length; j++) {
+                var other = texts[j];
+                if (j === c || !other || other.length >= candidate.length) continue;
+                if (candidate.indexOf(other) === -1) continue;
+                contained++;
+                covered += other.length;
+                if (other.length > longest) longest = other.length;
+              }
+            }
+            var isContainer = contained >= CONTAINER_MIN_CONTAINED && covered >= CONTAINER_COVER_MIN * candidate.length && candidate.length >= 2 * longest;
+            if (!isContainer) keep.push(src[c]);
+          }
+          return keep;
+        }
+        function diagTxtRoleStructure(list, totalCount) {
+          if (!diagOn()) return false;
+          try {
+            var kept = Array.isArray(list) ? list.length : -1;
+            var total = typeof totalCount === "number" ? totalCount : kept;
+            var first = Array.isArray(list) && list.length > 0 ? list[0] : null;
+            var text = messageTextForMarkers(first);
+            var kind = "\u043D\u0435\u0442";
+            if (first && typeof first === "object") {
+              if (typeof first.text === "string") kind = "text";
+              else if (typeof first.content === "string") kind = "content";
+            }
+            console.log(DIAG_PREFIX + " txt-roles site=qwen isArray=" + Array.isArray(list) + " msgs=" + total + " kept=" + kept + " dropped-containers=" + (kept >= 0 && total >= kept ? total - kept : 0) + " first.role=" + (first && first.role !== void 0 && first.role !== null ? String(first.role) : "(\u043D\u0435\u0442)") + " first.kind=" + kind + " first.len=" + text.length + " first.head=" + (diagHead(text, 60) || "\u043F\u0443\u0441\u0442\u043E"));
+          } catch (eLogRoles) {
+          }
+          return true;
+        }
+        function renderReferenceText(list) {
+          return buildReferenceText(list);
+        }
+        function renderReferenceTextWithRoleMarkers(list) {
+          var src = Array.isArray(list) ? list : [];
+          var parts = [];
+          for (var i = 0; i < src.length; i++) {
+            var m = src[i] || {};
+            var text = renderReferenceText([{ role: m.role, text: messageTextForMarkers(m) }]);
+            if (text === null) return null;
+            if (!String(text).trim()) continue;
+            parts.push(txtRoleMarker(m.role) + "\n" + text);
+          }
+          return parts.join("\n\n");
+        }
+        function buildTxtFromHistory(history) {
+          var hist = history || {};
+          var site = typeof hist.site === "string" ? hist.site : "";
+          var messages = history && Array.isArray(history.messages) ? history.messages : [];
+          var marked = isTxtRoleMarkerHistory(history);
+          var kept = marked ? dropContainerMessages(messages) : messages;
+          var forTxt = kept.map(function(m) {
+            var text = marked ? markersMessageTextWithReasoning(m, true) : messageTextWithReasoning(m);
+            if (!m || typeof m !== "object" || text === m.text) return m;
+            var copy = {};
+            for (var k in m) {
+              if (Object.prototype.hasOwnProperty.call(m, k)) copy[k] = m[k];
+            }
+            copy.text = text;
+            return copy;
+          });
+          var out;
+          if (marked) {
+            diagTxtRoleStructure(forTxt, messages.length);
+            out = renderReferenceTextWithRoleMarkers(forTxt);
+          } else {
+            out = renderReferenceText(forTxt);
+          }
+          if (site === "gemini" && hist.sourceTier && out) out = hist.sourceTier + "\n\n" + out;
+          return out === null ? "" : out;
+        }
+        function exportTokenSnapshot(history) {
+          var h = history || {};
+          var tokens = typeof h.tokens === "number" ? h.tokens : 0;
+          var limit = typeof h.limit === "number" ? h.limit : 0;
+          var percent = typeof h.percent === "number" ? h.percent : 0;
+          if (limit > 0) {
+            var calc = Math.round(tokens / limit * 1e3) / 10;
+            if (calc !== percent) percent = calc;
+          }
+          return { tokens, limit, percent };
+        }
+        function buildMdFromHistory(history, platform) {
+          var h = history || {};
+          var site = typeof h.site === "string" ? h.site : "";
+          var lines = [];
+          lines.push(aiCmI18nMessage("export_md_title", "# AI Context Monitor \u2014 \u044D\u043A\u0441\u043F\u043E\u0440\u0442 \u0438\u0441\u0442\u043E\u0440\u0438\u0438"));
+          lines.push("");
+          lines.push(aiCmI18nMessage("export_md_platform", "\u041F\u043B\u0430\u0442\u0444\u043E\u0440\u043C\u0430: " + (platform || "AI Chat"), [platform || "AI Chat"]));
+          lines.push(aiCmI18nMessage("export_md_model", "\u041C\u043E\u0434\u0435\u043B\u044C: " + (h.model || "\u2014"), [h.model || "\u2014"]));
+          var exportedAt = (/* @__PURE__ */ new Date()).toISOString();
+          lines.push(aiCmI18nMessage("export_md_date", "\u0414\u0430\u0442\u0430 \u044D\u043A\u0441\u043F\u043E\u0440\u0442\u0430: " + exportedAt, [exportedAt]));
+          var snap = exportTokenSnapshot(h);
+          var tokens = snap.tokens;
+          var limit = snap.limit;
+          var percent = snap.percent;
+          if (tokens === 0 && limit === 0) {
+            lines.push("\u0422\u043E\u043A\u0435\u043D\u044B: \u043D/\u0434 (" + percent + "%)");
+          } else {
+            lines.push(aiCmI18nMessage("export_md_tokens", "\u0422\u043E\u043A\u0435\u043D\u044B: " + tokens + " / " + limit + " (" + percent + "%)", [String(tokens), String(limit), String(percent)]));
+          }
+          lines.push("");
+          if (site === "gemini" && h.sourceTier) {
+            lines.push(h.sourceTier, "");
+          }
+          var mdMarked = isTxtRoleMarkerHistory(h);
+          var messages = Array.isArray(h.messages) ? h.messages : [];
+          if (mdMarked) messages = dropContainerMessages(messages);
+          for (var i = 0; i < messages.length; i++) {
+            var msg = messages[i] || {};
+            if (typeof aiCmDiagLine === "function") {
+              aiCmDiagLine("claude-role-builder", { msgRole: msg.role, mdMarked });
+            }
+            var title = mdMarked ? mdRoleMarker(msg.role) : msg.role === "user" || msg.role === "human" ? aiCmI18nMessage("export_md_role_user", "## \u041F\u043E\u043B\u044C\u0437\u043E\u0432\u0430\u0442\u0435\u043B\u044C") : aiCmI18nMessage("export_md_role_assistant", "## \u0410\u0441\u0441\u0438\u0441\u0442\u0435\u043D\u0442");
+            lines.push(title);
+            lines.push("");
+            lines.push(mdMarked ? markersMessageTextWithReasoning(msg, true) : messageTextWithReasoning(msg));
+            lines.push("");
+          }
+          return lines.join("\n");
+        }
+        function buildJsonFromHistory(history, platform) {
+          var h = history || {};
+          return JSON.stringify({
+            platform: platform || "AI Chat",
+            model: h.model || "",
+            exportedAt: (/* @__PURE__ */ new Date()).toISOString(),
+            tokens: typeof h.tokens === "number" ? h.tokens : 0,
+            limit: typeof h.limit === "number" ? h.limit : 0,
+            percent: typeof h.percent === "number" ? h.percent : 0,
+            // Two-Tier (v89): аддитивное поле метаданных. undefined → JSON.stringify ключ НЕ
+            // добавляет, поэтому у прочих платформ и у Gemini без метки байты прежние.
+            sourceTier: h.sourceTier,
+            messages: Array.isArray(h.messages) ? h.messages : []
+          }, null, 2);
+        }
+        var DIAG_PREFIX = "[AI CM][diag]";
+        function diagOn() {
+          try {
+            if (typeof sessionStorage !== "undefined" && sessionStorage && sessionStorage.getItem("aiCmDebug") === "1") return true;
+          } catch (eSess) {
+          }
+          try {
+            if (typeof window !== "undefined" && window && window.__aiCmDebugLogs === true) return true;
+          } catch (eWin) {
+          }
+          return false;
+        }
+        function diagHead(v, n) {
+          try {
+            var lim = typeof n === "number" && n > 0 ? n : 100;
+            if (v === void 0 || v === null) return "";
+            var s = String(v);
+            if (!s) return "";
+            var flat = s.replace(/\s+/g, " ").trim();
+            if (!flat) return "";
+            return flat.length > lim ? flat.slice(0, lim) + "\u2026" : flat;
+          } catch (eHead) {
+            return "";
+          }
+        }
+        function diagStack() {
+          try {
+            var lines = String(new Error().stack || "").split("\n");
+            var out = [];
+            for (var i = 1; i < lines.length && out.length < 4; i++) {
+              var s = String(lines[i] || "").replace(/\s+/g, " ").trim();
+              if (!s || s.indexOf("diag") !== -1) continue;
+              out.push(s);
+            }
+            return out.join(" <- ");
+          } catch (eStack) {
+            return "";
+          }
+        }
+        function diagDownload(trigger, content, fileName, extra) {
+          try {
+            if (typeof aiCmDiagDownload === "function") return aiCmDiagDownload(trigger, content, fileName, extra);
+          } catch (eGlobal) {
+          }
+          if (!diagOn()) return false;
+          try {
+            var e = extra || {};
+            var url = "";
+            try {
+              url = String(typeof location !== "undefined" && location && location.href || "");
+            } catch (eUrl) {
+            }
+            console.log(DIAG_PREFIX + " download trigger=" + (trigger || "(\u043D\u0435\u0442)") + " file=" + (fileName === void 0 || fileName === null || String(fileName) === "" ? "\u043F\u0443\u0441\u0442\u043E\u0435" : String(fileName)) + " bytes100=" + (diagHead(content, 100) || "\u043F\u0443\u0441\u0442\u043E") + " len=" + (content === void 0 || content === null ? 0 : String(content).length) + " mime=" + (e.mime === void 0 ? "(\u043D\u0435\u0442)" : e.mime) + " url=" + url + " threadId=" + (e.threadId === void 0 || e.threadId === "" ? "(\u043D\u0435\u0442)" : e.threadId) + " site=" + (e.site === void 0 ? "" : e.site) + " reason=" + (e.reason === void 0 ? "" : e.reason) + " src=" + diagStack());
+          } catch (eLog) {
+          }
+          return true;
+        }
+        var XSSI_PREFIX_LEN = 4;
+        function startsWithXssiPrefix(content) {
+          try {
+            if (content === void 0 || content === null) return false;
+            var s = String(content);
+            if (s.length < XSSI_PREFIX_LEN) return false;
+            return s.charCodeAt(0) === 41 && s.charCodeAt(1) === 93 && s.charCodeAt(2) === 125 && s.charCodeAt(3) === 39;
+          } catch (eXssi) {
+            return false;
+          }
+        }
+        function downloadBlockReason(content, fileName) {
+          if (startsWithXssiPrefix(content)) return "xssi-prefix";
+          if (fileName === void 0 || fileName === null || String(fileName).trim() === "") return "empty-name";
+          return null;
+        }
+        function diagDownloadBlocked(trigger, content, fileName, reason, extra) {
+          try {
+            if (typeof aiCmDiagDownloadBlocked === "function") {
+              return aiCmDiagDownloadBlocked(trigger, content, fileName, reason, extra);
+            }
+          } catch (eGlobalBlocked) {
+          }
+          if (!diagOn()) return false;
+          try {
+            var e = extra || {};
+            var url = "";
+            try {
+              url = String(typeof location !== "undefined" && location && location.href || "");
+            } catch (eUrlB) {
+            }
+            console.log(DIAG_PREFIX + " download-blocked reason=" + (reason || "(\u043D\u0435\u0442)") + " trigger=" + (trigger || "(\u043D\u0435\u0442)") + " file=" + (fileName === void 0 || fileName === null || String(fileName) === "" ? "\u043F\u0443\u0441\u0442\u043E\u0435" : String(fileName)) + " bytes100=" + (diagHead(content, 100) || "\u043F\u0443\u0441\u0442\u043E") + " len=" + (content === void 0 || content === null ? 0 : String(content).length) + " mime=" + (e.mime === void 0 ? "(\u043D\u0435\u0442)" : e.mime) + " url=" + url + " threadId=" + (e.threadId === void 0 || e.threadId === "" ? "(\u043D\u0435\u0442)" : e.threadId) + " site=" + (e.site === void 0 ? "" : e.site) + " src=" + diagStack());
+          } catch (eLogBlocked) {
+          }
+          return true;
+        }
+        function downloadBlob(content, fileName, mimeType, trigger, extra) {
+          var ex = extra || {};
+          var blockReason = downloadBlockReason(content, fileName);
+          if (blockReason) {
+            try {
+              diagDownloadBlocked(
+                trigger || "builder-download",
+                content,
+                fileName,
+                blockReason,
+                { mime: mimeType, threadId: ex.threadId, site: ex.site }
+              );
+            } catch (eDiagBlocked) {
+            }
+            return false;
+          }
+          try {
+            diagDownload(
+              trigger || "builder-download",
+              content,
+              fileName,
+              { mime: mimeType, threadId: ex.threadId, site: ex.site, reason: ex.reason }
+            );
+          } catch (eDiag) {
+          }
+          try {
+            var blob = new Blob([content], { type: mimeType });
+            var url = URL.createObjectURL(blob);
+            var a = document.createElement("a");
+            a.href = url;
+            a.download = fileName;
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            setTimeout(function() {
+              URL.revokeObjectURL(url);
+            }, 1e3);
+          } catch (e) {
+            console.warn("[export] \u043D\u0435 \u0443\u0434\u0430\u043B\u043E\u0441\u044C \u0441\u043A\u0430\u0447\u0430\u0442\u044C \u0444\u0430\u0439\u043B:", e);
+          }
+          return true;
+        }
+        var Api = {
+          buildTxtFromHistory,
+          buildMdFromHistory,
+          buildJsonFromHistory,
+          downloadBlob,
+          // O-27 (защитный фикс): причина отказа точки скачивания (null — выдача разрешена) и
+          // сама точка отказа наружу — для пинов тестов и переиспользования вызывающим кодом.
+          aiCmDownloadBlockReason: downloadBlockReason,
+          aiCmDiagDownloadBlocked: diagDownloadBlocked,
+          // O-27/O-32: диагностические хелперы наружу (content.js/export-manager.js зовут их
+          // через window.AiCmExportBuilders, если глобальный utils/debug.js не подключён).
+          aiCmDiagOn: diagOn,
+          aiCmDiagHead: diagHead,
+          aiCmDiagDownload: diagDownload,
+          // O-35: рендер reasoning контрактом DeepSeek — чистая функция наружу (пины тестов
+          // и переиспользование; на боевом пути вызывается только двумя сборщиками выше).
+          aiCmMessageTextWithReasoning: messageTextWithReasoning,
+          aiCmWithReasoningSections: withReasoningSections,
+          // O-37 (C): источник размышления для маркерного пути (reasoning, иначе поле захвата
+          // hiddenReasoning) и композиция «текст сообщения + секции» — чистые функции наружу;
+          // на боевом пути их зовут только buildTxtFromHistory/buildMdFromHistory выше.
+          aiCmReasoningOfMessageForExport: reasoningOfMessageForExport,
+          aiCmMarkersMessageTextWithReasoning: markersMessageTextWithReasoning,
+          // O-36 (D2): маркеры ролей txt-экспорта — чистые предикаты наружу (пины тестов;
+          // на боевом пути вызываются только сборщиком buildTxtFromHistory выше).
+          aiCmTxtRoleMarker: txtRoleMarker,
+          aiCmIsTxtRoleMarkerHistory: isTxtRoleMarkerHistory,
+          aiCmTxtRoleMarkerSites: TXT_ROLE_MARKER_SITES,
+          // O-36 (D2.1): маркер роли md (Qwen Studio), текст сообщения для маркерного пути
+          // (с фолбэком на .content) и контейнер-чистка — чистые функции наружу для пинов
+          // и переиспользования; на боевом пути их зовут только два сборщика выше.
+          aiCmMdRoleMarker: mdRoleMarker,
+          aiCmMessageTextForMarkers: messageTextForMarkers,
+          aiCmDropContainerMessages: dropContainerMessages,
+          aiCmDiagTxtRoleStructure: diagTxtRoleStructure,
+          aiCmContainerRules: { minContained: CONTAINER_MIN_CONTAINED, coverMin: CONTAINER_COVER_MIN }
+        };
+        if (typeof module !== "undefined" && module.exports) module.exports = Api;
+        if (typeof window !== "undefined") window.AiCmExportBuilders = Api;
+      })();
+    }
+  });
+
+  // entry-content.js
+  var require_entry_content = __commonJS({
+    "entry-content.js"(exports, module) {
+      init_buildReferenceText();
+      init_platform();
+      init_debug();
       var CYRILLIC_CHARS_PER_TOKEN = 3.3;
       var Tokenizer = {
         CYRILLIC_CHARS_PER_TOKEN,
@@ -7772,9 +9122,9 @@ if (typeof module !== 'undefined' && module.exports) {
             if (role === "unknown") continue;
             messages.push({ role, content });
           }
-          if (diagOn && typeof aiCmDiagLine === "function") {
+          if (diagOn && typeof aiCmDiagLine2 === "function") {
             const stats = this._lastTurnStats;
-            aiCmDiagLine("chatgpt-adapter-turn", {
+            aiCmDiagLine2("chatgpt-adapter-turn", {
               turns: stats.turns,
               users: stats.users,
               assistants: stats.assistants,
@@ -7783,7 +9133,7 @@ if (typeof module !== 'undefined' && module.exports) {
               skippedUnknown: stats.skippedUnknown
             });
             if (stats.turns > 0 && stats.assistants === 0) {
-              aiCmDiagLine("chatgpt-roles-miss", {
+              aiCmDiagLine2("chatgpt-roles-miss", {
                 turns: stats.turns,
                 users: stats.users,
                 turnSel: this._turnSelectors.join(", "),
@@ -7861,7 +9211,7 @@ if (typeof module !== 'undefined' && module.exports) {
               }
             }
           } catch (e) {
-            swallowSoft(e, "adapter:chatgpt:detectModel");
+            swallowSoft2(e, "adapter:chatgpt:detectModel");
           }
           if (!this._modelDetectLogged) {
             this._modelDetectLogged = true;
@@ -8404,7 +9754,7 @@ if (typeof module !== 'undefined' && module.exports) {
               return candidates[i];
             }
           } catch (e) {
-            swallowSoft(e, "adapter:deepseek:firstContentChild");
+            swallowSoft2(e, "adapter:deepseek:firstContentChild");
           }
           return null;
         }
@@ -8531,9 +9881,9 @@ if (typeof module !== 'undefined' && module.exports) {
             if (messages.length > 0) {
               debugLog("log", `[DeepSeekAdapter] \u0418\u0437\u0432\u043B\u0435\u0447\u0435\u043D\u043E ${messages.length} \u0441\u043E\u043E\u0431\u0449\u0435\u043D\u0438\u0439, \u0440\u043E\u043B\u0438: ${messages.map((m) => m.role.substring(0, 4)).join(", ")}`);
             }
-            if (o21Stats && typeof aiCmDiagLine === "function") {
+            if (o21Stats && typeof aiCmDiagLine2 === "function") {
               try {
-                aiCmDiagLine("o21-dom-extract", {
+                aiCmDiagLine2("o21-dom-extract", {
                   site: this.siteName || "deepseek",
                   totalFound: o21Stats.totalFound,
                   extracted: o21Stats.extracted,
@@ -8622,7 +9972,7 @@ if (typeof module !== 'undefined' && module.exports) {
         }
         try {
           if (typeof __require === "function") {
-            var mod = __require("../utils/google-search-folwr-parser.js");
+            var mod = require_google_search_folwr_parser();
             if (mod && typeof mod.answerTextOf === "function" && typeof mod.answerDomNodes === "function") {
               return mod;
             }
@@ -8637,7 +9987,7 @@ if (typeof module !== 'undefined' && module.exports) {
           try {
             return String(util.answerTextOf(el) || "");
           } catch (e) {
-            swallowSoft(e, "adapter:google-search:answerText");
+            swallowSoft2(e, "adapter:google-search:answerText");
           }
         }
         try {
@@ -8660,7 +10010,7 @@ if (typeof module !== 'undefined' && module.exports) {
             var nodes = util.answerDomNodes(root);
             if (nodes) return nodes;
           } catch (e) {
-            swallowSoft(e, "adapter:google-search:answerNodes");
+            swallowSoft2(e, "adapter:google-search:answerNodes");
           }
         }
         try {
@@ -8762,7 +10112,7 @@ if (typeof module !== 'undefined' && module.exports) {
               }
             }
             try {
-              if (typeof aiCmDiagOn === "function" && aiCmDiagOn() && typeof aiCmDiagLine === "function") {
+              if (typeof aiCmDiagOn === "function" && aiCmDiagOn() && typeof aiCmDiagLine2 === "function") {
                 var codeSels = [
                   ".n6owBd.awi2gc pre",
                   ".n6owBd.awi2gc code",
@@ -8780,10 +10130,10 @@ if (typeof module !== 'undefined' && module.exports) {
                 if (codeSig !== this._lastCodeBlockSig) {
                   this._lastCodeBlockSig = codeSig;
                   if (!codeEl) {
-                    aiCmDiagLine("gsa-code-block", { found: 0, via: "(\u043D\u0435\u0442)", blocks: blocks.length, turns: turns.length });
+                    aiCmDiagLine2("gsa-code-block", { found: 0, via: "(\u043D\u0435\u0442)", blocks: blocks.length, turns: turns.length });
                   } else {
                     var codeParent = codeEl.parentElement;
-                    aiCmDiagLine("gsa-code-block", {
+                    aiCmDiagLine2("gsa-code-block", {
                       found: 1,
                       via: codeVia,
                       tag: codeEl.tagName,
@@ -9402,7 +10752,10 @@ if (typeof module !== 'undefined' && module.exports) {
           try {
             var hasNodeModule = typeof module !== "undefined" && !!module && typeof __require === "function";
             if (hasNodeModule) {
-              var builders = __require("../utils/export-text-builders.js");
+              var builders = (
+                /** @type {any} */
+                require_export_text_builders()
+              );
               if (builders && typeof builders.aiCmDropContainerMessages === "function") {
                 return builders.aiCmDropContainerMessages;
               }
@@ -9480,7 +10833,7 @@ if (typeof module !== 'undefined' && module.exports) {
               if (m) return m[0].toLowerCase();
             }
           } catch (e) {
-            swallowSoft(e, "adapter:qwen:detectModel");
+            swallowSoft2(e, "adapter:qwen:detectModel");
           }
           return null;
         }
@@ -10146,7 +11499,7 @@ if (typeof module !== 'undefined' && module.exports) {
             try {
               collectTurnText(turn[3], cands);
             } catch (e) {
-              swallowSoft(e, "gemini-utils:extractCanonicalAnswer-fallback");
+              swallowSoft2(e, "gemini-utils:extractCanonicalAnswer-fallback");
             }
           }
           var cleaned = [];
@@ -10169,7 +11522,7 @@ if (typeof module !== 'undefined' && module.exports) {
               for (var i = 0; i < node.length; i++) collectDrStrings(node[i], out, minLen, depth + 1);
             }
           } catch (e) {
-            swallowSoft(e, "gemini-utils:collectDrStrings");
+            swallowSoft2(e, "gemini-utils:collectDrStrings");
           }
         }
         function ctText(s) {
@@ -10202,7 +11555,7 @@ if (typeof module !== 'undefined' && module.exports) {
             }
             if (pbest) res.planText = ctText(pbest);
           } catch (e) {
-            swallowSoft(e, "gemini-utils:extractDrTexts");
+            swallowSoft2(e, "gemini-utils:extractDrTexts");
           }
           return res;
         }
@@ -10800,7 +12153,7 @@ if (typeof module !== 'undefined' && module.exports) {
               tgQuestions.push(found);
             }
           } catch (e) {
-            swallowSoft(e, "gsa-utils:parseGoogleFolwrOpen-tgqphd");
+            swallowSoft2(e, "gsa-utils:parseGoogleFolwrOpen-tgqphd");
           }
           var contentNodes = gatherAnswerContentNodes(doc);
           var answers = assignContentToTurns(turnsArr, contentNodes);
@@ -10920,7 +12273,7 @@ if (typeof module !== 'undefined' && module.exports) {
               });
             }
           } catch (e) {
-            swallowSoft(e, "gsa-utils:extractTurnsFromDocument");
+            swallowSoft2(e, "gsa-utils:extractTurnsFromDocument");
           }
           return turns;
         }
@@ -11052,12 +12405,46 @@ if (typeof module !== 'undefined' && module.exports) {
           if (la !== lb) return la > lb;
           return isBetterTurn(candidate, current);
         }
+        var PARAGRAPH_PERMUTATION_MIN = 2;
+        function answerBodyParagraphs(turn) {
+          var wrapper = answerWrapperParts(turn && turn.assistantText);
+          var body = wrapper ? wrapper.body : canonicalAnswerBody(turn && turn.assistantText);
+          var lines = String(body == null ? "" : body).split(String.fromCharCode(10));
+          var out = [];
+          var cur = "";
+          for (var i = 0; i < lines.length; i++) {
+            var line = lines[i];
+            if (line.trim() === "") {
+              var p = normalizeTurnKeyPart(cur);
+              if (p) out.push(p);
+              cur = "";
+              continue;
+            }
+            cur = cur ? cur + String.fromCharCode(10) + line : line;
+          }
+          var tail = normalizeTurnKeyPart(cur);
+          if (tail) out.push(tail);
+          return out;
+        }
+        function bodiesParagraphPermutation(aTurn, bTurn) {
+          var pa = answerBodyParagraphs(aTurn);
+          var pb = answerBodyParagraphs(bTurn);
+          if (pa.length < PARAGRAPH_PERMUTATION_MIN || pa.length !== pb.length) return false;
+          pa.sort();
+          pb.sort();
+          for (var i = 0; i < pa.length; i++) {
+            if (pa[i] !== pb[i]) return false;
+          }
+          return true;
+        }
         function findPrefixCompatibleIndex(turns, turn) {
           var parts = turnIdentityParts(turn);
           if (!parts.u || !parts.a) return -1;
           for (var i = 0; i < turns.length; i++) {
             var other = turnIdentityParts(turns[i]);
-            if (other.u === parts.u && bodiesPrefixCompatible(other.a, parts.a)) return i;
+            if (other.u !== parts.u) continue;
+            if (bodiesPrefixCompatible(other.a, parts.a)) return i;
+            if (other.a.length === parts.a.length && bodiesParagraphPermutation(turns[i], turn)) return i;
           }
           return -1;
         }
@@ -11250,46 +12637,6 @@ if (typeof module !== 'undefined' && module.exports) {
       })();
       (function() {
         "use strict";
-        function cleanInline(s) {
-          s = s.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, "$1");
-          s = s.replace(/(\*\*|__)/g, "");
-          s = s.replace(/(?<![*\w])\*([^*\n]+)\*(?![\w*])/g, "$1");
-          s = s.replace(/(?<![\w_])\_([^_\n]+)\_(?![\w_])/g, "$1");
-          s = s.replace(/`/g, "");
-          return s;
-        }
-        function cleanLine(line) {
-          var s = String(line == null ? "" : line);
-          s = s.replace(/^#{1,6}\s+/, "");
-          s = s.replace(/^>\s?/, "");
-          s = s.replace(/^[-*+]\s+/, "");
-          return s;
-        }
-        function cleanText(text) {
-          var lines = String(text).split("\n");
-          var out = [];
-          for (var i = 0; i < lines.length; i++) {
-            var line = lines[i];
-            var trimmed = line.trim();
-            if (/^-{3,}$/.test(trimmed)) continue;
-            out.push(cleanInline(cleanLine(line)));
-          }
-          return out.join("\n");
-        }
-        function buildReferenceText(messages) {
-          var list = Array.isArray(messages) ? messages : [];
-          var parts = [];
-          for (var i = 0; i < list.length; i++) {
-            var msg = list[i] || {};
-            parts.push(cleanText(msg.text == null ? "" : msg.text));
-          }
-          return parts.join("\n\n");
-        }
-        if (typeof module !== "undefined" && module.exports) module.exports = buildReferenceText;
-        if (typeof window !== "undefined") window.buildReferenceText = buildReferenceText;
-      })();
-      (function() {
-        "use strict";
         function aiCmI18nMessage2(key, fallback, substitutions) {
           try {
             if (typeof chrome !== "undefined" && chrome.i18n && typeof chrome.i18n.getMessage === "function") {
@@ -11396,16 +12743,7 @@ if (typeof module !== 'undefined' && module.exports) {
           return true;
         }
         function renderReferenceText(list) {
-          if (typeof window !== "undefined" && typeof window.buildReferenceText === "function") {
-            return window.buildReferenceText(list);
-          }
-          if (typeof __require === "function") {
-            try {
-              return __require("./buildReferenceText.js")(list);
-            } catch (e) {
-            }
-          }
-          return null;
+          return buildReferenceText(list);
         }
         function renderReferenceTextWithRoleMarkers(list) {
           var src = Array.isArray(list) ? list : [];
@@ -11484,8 +12822,8 @@ if (typeof module !== 'undefined' && module.exports) {
           if (mdMarked) messages = dropContainerMessages(messages);
           for (var i = 0; i < messages.length; i++) {
             var msg = messages[i] || {};
-            if (typeof aiCmDiagLine === "function") {
-              aiCmDiagLine("claude-role-builder", { msgRole: msg.role, mdMarked });
+            if (typeof aiCmDiagLine2 === "function") {
+              aiCmDiagLine2("claude-role-builder", { msgRole: msg.role, mdMarked });
             }
             var title = mdMarked ? mdRoleMarker(msg.role) : msg.role === "user" || msg.role === "human" ? aiCmI18nMessage2("export_md_role_user", "## \u041F\u043E\u043B\u044C\u0437\u043E\u0432\u0430\u0442\u0435\u043B\u044C") : aiCmI18nMessage2("export_md_role_assistant", "## \u0410\u0441\u0441\u0438\u0441\u0442\u0435\u043D\u0442");
             lines.push(title);
@@ -11551,7 +12889,7 @@ if (typeof module !== 'undefined' && module.exports) {
         }
         function diagDownload(trigger, content, fileName, extra) {
           try {
-            if (typeof aiCmDiagDownload === "function") return aiCmDiagDownload(trigger, content, fileName, extra);
+            if (typeof aiCmDiagDownload2 === "function") return aiCmDiagDownload2(trigger, content, fileName, extra);
           } catch (eGlobal) {
           }
           if (!diagOn()) return false;
@@ -11585,8 +12923,8 @@ if (typeof module !== 'undefined' && module.exports) {
         }
         function diagDownloadBlocked(trigger, content, fileName, reason, extra) {
           try {
-            if (typeof aiCmDiagDownloadBlocked === "function") {
-              return aiCmDiagDownloadBlocked(trigger, content, fileName, reason, extra);
+            if (typeof aiCmDiagDownloadBlocked2 === "function") {
+              return aiCmDiagDownloadBlocked2(trigger, content, fileName, reason, extra);
             }
           } catch (eGlobalBlocked) {
           }
@@ -11942,8 +13280,8 @@ if (typeof module !== 'undefined' && module.exports) {
               var text = typeof m.text === "string" ? m.text : typeof m.content === "string" ? m.content : "";
               if (!text) continue;
               var norm = { role: m.role === "user" || m.role === "human" ? "user" : "assistant", text };
-              if (typeof aiCmDiagLine === "function") {
-                aiCmDiagLine("claude-role-normalize", { inputRole: m.role, outputRole: norm.role });
+              if (typeof aiCmDiagLine2 === "function") {
+                aiCmDiagLine2("claude-role-normalize", { inputRole: m.role, outputRole: norm.role });
               }
               if (typeof m.hiddenReasoning === "string" && m.hiddenReasoning) norm.hiddenReasoning = m.hiddenReasoning;
               out.push(norm);
@@ -12468,8 +13806,8 @@ if (typeof module !== 'undefined' && module.exports) {
         var BDS_BOM = "\uFEFF";
         function bdsDiagLine(tag, fields) {
           try {
-            if (typeof aiCmDiagLine !== "function") return false;
-            return aiCmDiagLine(tag, fields) !== false;
+            if (typeof aiCmDiagLine2 !== "function") return false;
+            return aiCmDiagLine2(tag, fields) !== false;
           } catch (eDiag) {
             return false;
           }
@@ -12535,7 +13873,7 @@ if (typeof module !== 'undefined' && module.exports) {
           var lines = s.split("\n");
           var drop = {};
           var forms = [];
-          var diagRows = typeof aiCmDiagLine === "function" ? [] : null;
+          var diagRows = typeof aiCmDiagLine2 === "function" ? [] : null;
           var firstLine = bdsFirstContentLine(lines);
           var lastLine = bdsLastContentLine(lines);
           for (var k = 0; k < lines.length; k++) {
@@ -12750,8 +14088,8 @@ if (typeof module !== 'undefined' && module.exports) {
         var REASONING_SECTION_PAIR_RE = /^\s*\[REASONING\]\r?\n([\s\S]*?)\r?\n\r?\n\[ANSWER\]\r?\n([\s\S]*)$/;
         function diagTag(tag, fields) {
           try {
-            if (typeof aiCmDiagLine !== "function") return false;
-            return aiCmDiagLine(tag, fields) !== false;
+            if (typeof aiCmDiagLine2 !== "function") return false;
+            return aiCmDiagLine2(tag, fields) !== false;
           } catch (eDiag) {
             return false;
           }
@@ -14149,7 +15487,7 @@ if (typeof module !== 'undefined' && module.exports) {
             try {
               aiCmSetPopupOverrides(d && d.selectedModel, d && d.customLimit);
             } catch (eA) {
-              swallowSoft(eA, "widget:loadPopupOverrides-callback");
+              swallowSoft2(eA, "widget:loadPopupOverrides-callback");
             }
           });
         } catch (e) {
@@ -14184,7 +15522,7 @@ if (typeof module !== 'undefined' && module.exports) {
           try {
             chrome.storage.sync.set({ [safePctKey()]: safePct });
           } catch (e) {
-            swallowSoft(e, "widget:snapCurrentPct");
+            swallowSoft2(e, "widget:snapCurrentPct");
           }
         }
         updatePanel();
@@ -14201,7 +15539,7 @@ if (typeof module !== 'undefined' && module.exports) {
           try {
             chrome.storage.sync.set({ [safePctKey()]: safePct });
           } catch (e) {
-            swallowSoft(e, "widget:setSafePctFromInput");
+            swallowSoft2(e, "widget:setSafePctFromInput");
           }
         }
         updatePanel();
@@ -14213,7 +15551,7 @@ if (typeof module !== 'undefined' && module.exports) {
           try {
             chrome.storage.sync.set({ [safePctKey()]: null });
           } catch (e) {
-            swallowSoft(e, "widget:resetSafePct");
+            swallowSoft2(e, "widget:resetSafePct");
           }
         }
         updatePanel();
@@ -14265,24 +15603,24 @@ if (typeof module !== 'undefined' && module.exports) {
               try {
                 chrome.storage.sync.set({ [pair.own]: migrated });
               } catch (eMigrateSet) {
-                swallowSoft(eMigrateSet, "widget:aiCmMigrateSafePct-set");
+                swallowSoft2(eMigrateSet, "widget:aiCmMigrateSafePct-set");
               }
               finish(migrated);
             } catch (eMigrateApply) {
-              swallowSoft(eMigrateApply, "widget:aiCmMigrateSafePct-apply");
+              swallowSoft2(eMigrateApply, "widget:aiCmMigrateSafePct-apply");
               finish(null);
             }
           });
           return true;
         } catch (eMigrate) {
-          swallowSoft(eMigrate, "widget:aiCmMigrateSafePct");
+          swallowSoft2(eMigrate, "widget:aiCmMigrateSafePct");
           finish(null);
           return true;
         }
       }
       function resetConversationState() {
-        if (typeof aiCmDiagLine === "function") {
-          aiCmDiagLine("gsa-state", {
+        if (typeof aiCmDiagLine2 === "function") {
+          aiCmDiagLine2("gsa-state", {
             point: "resetConversationState",
             verdict: "reset",
             reason: "caller-see-src",
@@ -14402,8 +15740,8 @@ if (typeof module !== 'undefined' && module.exports) {
           }
           if (pt) pt.textContent = "\u2014";
           try {
-            if (typeof aiCmDiagLine === "function" && typeof currentAdapter !== "undefined" && currentAdapter && currentAdapter.siteName === "qwen") {
-              aiCmDiagLine("qwen-badge", {
+            if (typeof aiCmDiagLine2 === "function" && typeof currentAdapter !== "undefined" && currentAdapter && currentAdapter.siteName === "qwen") {
+              aiCmDiagLine2("qwen-badge", {
                 ts: Date.now(),
                 event: "placeholder",
                 reason: "reset-conversation",
@@ -14438,7 +15776,7 @@ if (typeof module !== 'undefined' && module.exports) {
             chrome.storage.local.remove(["aiCmState", "aiCmState:" + window.location.hostname]);
           }
         } catch (eResetState14) {
-          swallowSoft(eResetState14, "widget:resetConversationState-localRemove");
+          swallowSoft2(eResetState14, "widget:resetConversationState-localRemove");
         }
         try {
           if (typeof aiCmRestartWidgetSafeBottomWatch === "function") aiCmRestartWidgetSafeBottomWatch();
@@ -14801,7 +16139,7 @@ if (typeof module !== 'undefined' && module.exports) {
             aiCmRepaintRing();
           });
         } catch (eRingGet) {
-          swallowSoft(eRingGet, "widget:loadRingThresholds");
+          swallowSoft2(eRingGet, "widget:loadRingThresholds");
         }
         try {
           var selfRing = aiCmLoadRingThresholds;
@@ -14913,8 +16251,8 @@ if (typeof module !== 'undefined' && module.exports) {
         } catch (eA11yW) {
         }
         try {
-          if (aiCmStalePlaceholder && typeof aiCmDiagLine === "function" && typeof currentAdapter !== "undefined" && currentAdapter && currentAdapter.siteName === "qwen") {
-            aiCmDiagLine("qwen-badge", {
+          if (aiCmStalePlaceholder && typeof aiCmDiagLine2 === "function" && typeof currentAdapter !== "undefined" && currentAdapter && currentAdapter.siteName === "qwen") {
+            aiCmDiagLine2("qwen-badge", {
               ts: Date.now(),
               event: "placeholder",
               reason: "stale",
@@ -15063,8 +16401,8 @@ if (typeof module !== 'undefined' && module.exports) {
             for (var p = 0; p < messages.length; p++) {
               var mp = messages[p] || {};
               var msg = { role: mp.role === "user" || mp.role === "human" ? "user" : "assistant", text: typeof mp.text === "string" ? mp.text : "" };
-              if (typeof aiCmDiagLine === "function" && site === "claude") {
-                aiCmDiagLine("claude-role-dedupe", { site, mpRole: mp.role, normalizedRole: msg.role });
+              if (typeof aiCmDiagLine2 === "function" && site === "claude") {
+                aiCmDiagLine2("claude-role-dedupe", { site, mpRole: mp.role, normalizedRole: msg.role });
               }
               if (typeof mp.reasoning === "string" && mp.reasoning) msg.reasoning = mp.reasoning;
               keep.push(msg);
@@ -15178,7 +16516,7 @@ if (typeof module !== 'undefined' && module.exports) {
           try {
             if (cb) cb(info || {});
           } catch (eCb) {
-            swallowSoft(eCb, "base-handler:netSync-finish-callback");
+            swallowSoft2(eCb, "base-handler:netSync-finish-callback");
           }
         }
         try {
@@ -15307,7 +16645,7 @@ if (typeof module !== 'undefined' && module.exports) {
           try {
             if (cb) cb({ ok: true, drained: true, reason: "idle-or-absent", pending: 0, waitedMs: 0 });
           } catch (eCb0) {
-            swallowSoft(eCb0, "base-handler:filesDrain-idle-cb");
+            swallowSoft2(eCb0, "base-handler:filesDrain-idle-cb");
           }
           return;
         }
@@ -15338,7 +16676,7 @@ if (typeof module !== 'undefined' && module.exports) {
           try {
             if (cb) cb(info || {});
           } catch (eCb) {
-            swallowSoft(eCb, "base-handler:filesDrain-finish-callback");
+            swallowSoft2(eCb, "base-handler:filesDrain-finish-callback");
           }
         }
         try {
@@ -15364,7 +16702,7 @@ if (typeof module !== 'undefined' && module.exports) {
           try {
             if (cb) cb();
           } catch (eCb) {
-            swallowSoft(eCb, "base-handler:filesThenNet-callback");
+            swallowSoft2(eCb, "base-handler:filesThenNet-callback");
           }
         };
         aiCmExportFilesDrainThen(convId, function() {
@@ -15569,9 +16907,9 @@ if (typeof module !== 'undefined' && module.exports) {
       }
       function aiCmEmitEntryDiag(branch, inMsgs, outMsgs, effectiveOn) {
         try {
-          if (typeof aiCmDiagLine !== "function") return false;
+          if (typeof aiCmDiagLine2 !== "function") return false;
           var hiddenOn = effectiveOn === void 0 ? aiCmIncludeHiddenInExport === true : effectiveOn === true;
-          return aiCmDiagLine("o40-emit-entry", {
+          return aiCmDiagLine2("o40-emit-entry", {
             hidden: hiddenOn ? "on" : "off",
             branch,
             msgsIn: Array.isArray(inMsgs) ? inMsgs.length : 0,
@@ -15633,7 +16971,7 @@ if (typeof module !== 'undefined' && module.exports) {
           if (!P || typeof P.applyReasoningExportFields !== "function") return messages;
           P.applyReasoningExportFields(messages, aiCmReasoningExportSite());
         } catch (ePrep) {
-          swallowSoft(ePrep, "export:aiCmPrepareReasoningForExport");
+          swallowSoft2(ePrep, "export:aiCmPrepareReasoningForExport");
         }
         return messages;
       }
@@ -15643,10 +16981,10 @@ if (typeof module !== 'undefined' && module.exports) {
         var prepareReasoning = typeof aiCmPrepareReasoningForExport === "function" ? aiCmPrepareReasoningForExport : null;
         var source = P && typeof P.pickExportSource === "function" ? P.pickExportSource(baseSeen === true, texts.length > 0) : baseSeen && texts.length > 0 ? "network" : "adapter";
         try {
-          if (typeof aiCmDiagLine === "function" && typeof aiCmDiagOn === "function" && aiCmDiagOn() && typeof currentAdapter !== "undefined" && currentAdapter && currentAdapter.siteName === "deepseek") {
+          if (typeof aiCmDiagLine2 === "function" && typeof aiCmDiagOn === "function" && aiCmDiagOn() && typeof currentAdapter !== "undefined" && currentAdapter && currentAdapter.siteName === "deepseek") {
             var o21DomMsgs = typeof currentAdapter.extractMessages === "function" ? currentAdapter.extractMessages().length : 0;
             var o21Reason = baseSeen === true ? texts.length > 0 ? "baseSeen+networkTexts" : "baseSeen-no-networkTexts" : "no-baseSeen";
-            aiCmDiagLine("o21-source-select", {
+            aiCmDiagLine2("o21-source-select", {
               site: currentAdapter.siteName,
               domMsgs: o21DomMsgs,
               netMsgs: texts.length,
@@ -15663,8 +17001,8 @@ if (typeof module !== 'undefined' && module.exports) {
               var dm = lastDetailMessages[i] || {};
               var r = dm.role || "";
               var msg = { role: r === "user" || r === "human" ? "user" : "assistant", text: sanitizeGeminiText(texts[i]) };
-              if (typeof aiCmDiagLine === "function" && typeof currentAdapter !== "undefined" && currentAdapter && currentAdapter.siteName === "claude") {
-                aiCmDiagLine("claude-role-network", { r, normalizedRole: msg.role });
+              if (typeof aiCmDiagLine2 === "function" && typeof currentAdapter !== "undefined" && currentAdapter && currentAdapter.siteName === "claude") {
+                aiCmDiagLine2("claude-role-network", { r, normalizedRole: msg.role });
               }
               if (typeof dm.reasoning === "string" && dm.reasoning) msg.reasoning = dm.reasoning;
               out.push(msg);
@@ -15698,8 +17036,8 @@ if (typeof module !== 'undefined' && module.exports) {
               }
             }
             var norm = P && typeof P.normalizeExportMessages === "function" ? P.normalizeExportMessages(raw) : [];
-            if (typeof aiCmDiagLine === "function" && typeof currentAdapter !== "undefined" && currentAdapter && currentAdapter.siteName === "claude") {
-              aiCmDiagLine("claude-role-adapter", {
+            if (typeof aiCmDiagLine2 === "function" && typeof currentAdapter !== "undefined" && currentAdapter && currentAdapter.siteName === "claude") {
+              aiCmDiagLine2("claude-role-adapter", {
                 rawRole: hasRoles ? raw[k].role : void 0,
                 normalizedRole: norm.length > 0 ? norm[0].role : void 0,
                 hasRoles
@@ -15808,7 +17146,7 @@ if (typeof module !== 'undefined' && module.exports) {
               autoExportPctBySite[site] = !isNaN(n) && n >= 1 && n <= 100 ? n : void 0;
               debugLog("log", "[AI CM][auto-export] per-site load " + key + "=" + (autoExportPctBySite[site] === void 0 ? "\u043D\u0435\u0442 (\u0433\u043B\u043E\u0431\u0430\u043B\u044C\u043D\u044B\u0439 \u0444\u043E\u043B\u0431\u044D\u043A)" : autoExportPctBySite[site]));
             } catch (eParsePs) {
-              swallowSoft(eParsePs, "export:loadAutoExportPerSitePct");
+              swallowSoft2(eParsePs, "export:loadAutoExportPerSitePct");
             }
           });
         } catch (e) {
@@ -15854,12 +17192,12 @@ if (typeof module !== 'undefined' && module.exports) {
             try {
               aiCmTryLateAutoExport(cid);
             } catch (eTick) {
-              swallowSoft(eTick, "export:late-retry-tick");
+              swallowSoft2(eTick, "export:late-retry-tick");
             }
           }, AI_CM_LATE_RETRY_MS);
           return true;
         } catch (eSch) {
-          swallowSoft(eSch, "export:scheduleLateRetry");
+          swallowSoft2(eSch, "export:scheduleLateRetry");
           return false;
         }
       }
@@ -15881,7 +17219,7 @@ if (typeof module !== 'undefined' && module.exports) {
             maybeAutoExport(autoExportLastPct);
           }
         } catch (e) {
-          swallowSoft(e, "export:aiCmTryLateAutoExport");
+          swallowSoft2(e, "export:aiCmTryLateAutoExport");
         }
       }
       function detectTrimStateFallback(prevProbe, snapshot) {
@@ -16009,7 +17347,7 @@ if (typeof module !== 'undefined' && module.exports) {
           msgs = aiCmUnionFileMessages(cidSnap, msgs, baseComplete !== true);
           return msgs;
         } catch (eSnap) {
-          swallowSoft(eSnap, "export:currentBaseSnapshot");
+          swallowSoft2(eSnap, "export:currentBaseSnapshot");
           return null;
         }
       }
@@ -16066,8 +17404,8 @@ if (typeof module !== 'undefined' && module.exports) {
           aiCmPendingHistWrite = null;
           debugLog("log", "[AI CM][export] deferred flushed reason=" + reason + " convId=" + p.convId);
           try {
-            if (typeof aiCmDiagLine === "function") {
-              aiCmDiagLine("o22-deferred-flush", {
+            if (typeof aiCmDiagLine2 === "function") {
+              aiCmDiagLine2("o22-deferred-flush", {
                 ts: Date.now(),
                 convId: p.convId || "(none)",
                 histKey: (typeof baseCount === "number" ? baseCount : 0) + "|" + (typeof baseText === "string" && baseText ? baseText.length : 0),
@@ -16086,10 +17424,10 @@ if (typeof module !== 'undefined' && module.exports) {
       }
       function aiCmScheduleDeferredHistWrite(cid) {
         try {
-          let fireDeferredTimeout2 = function() {
+          let fireDeferredTimeout = function() {
             if (aiCmPendingHistWrite !== p) return;
             if (document.visibilityState !== "visible") {
-              p.timer = setTimeout(fireDeferredTimeout2, 6e4);
+              p.timer = setTimeout(fireDeferredTimeout, 6e4);
               debugLog("log", "[AI CM][export] deferred-wait-visible convId=" + cid + " (\u0432\u043A\u043B\u0430\u0434\u043A\u0430 \u0441\u043A\u0440\u044B\u0442\u0430 \u2014 \u0442\u0430\u0439\u043C\u0430\u0443\u0442 \u043F\u0435\u0440\u0435\u043D\u0435\u0441\u0451\u043D, \u044D\u043A\u0441\u043F\u043E\u0440\u0442 \u043A\u0430\u043A \u0435\u0441\u0442\u044C \u043E\u0442\u043B\u043E\u0436\u0435\u043D)");
               return;
             }
@@ -16110,8 +17448,8 @@ if (typeof module !== 'undefined' && module.exports) {
               debugLog("log", "[AI CM][export] as-is baseComplete=0 \u2192 isLowConfidenceBase=true convId=" + cid);
             }
             try {
-              if (typeof aiCmDiagLine === "function") {
-                aiCmDiagLine("o50-timeout-download", {
+              if (typeof aiCmDiagLine2 === "function") {
+                aiCmDiagLine2("o50-timeout-download", {
                   ts: Date.now(),
                   convId: cid,
                   path: "deferred-timeout-60s",
@@ -16132,11 +17470,10 @@ if (typeof module !== 'undefined' && module.exports) {
               debugLog("log", "[AI CM][export] silent-catch aiCmScheduleDeferredHistWrite(fireDeferredTimeout/export): " + (eW && eW.message || eW));
             }
           };
-          var fireDeferredTimeout = fireDeferredTimeout2;
           aiCmCancelDeferredHistWrite();
           debugLog("log", "[AI CM][export] deferred until base-complete convId=" + cid + " loader=" + !!aiCmLoaderRunningByConv[cid] + " baseComplete=" + baseComplete);
           var p = { convId: cid, timer: null };
-          p.timer = setTimeout(fireDeferredTimeout2, 6e4);
+          p.timer = setTimeout(fireDeferredTimeout, 6e4);
           aiCmPendingHistWrite = p;
         } catch (e) {
           debugLog("log", "[AI CM][export] silent-catch aiCmScheduleDeferredHistWrite: " + (e && e.message || e));
@@ -16393,7 +17730,7 @@ if (typeof module !== 'undefined' && module.exports) {
               if (!cid || cid !== aiCmAutoExportConvId()) return;
               maybeAutoExport(percentage);
             } catch (eR) {
-              swallowSoft(eR, "export:aiCmDeferAutoExportOnLiveStream-timer");
+              swallowSoft2(eR, "export:aiCmDeferAutoExportOnLiveStream-timer");
             }
           }, AI_CM_DS_STREAM_DEFER_MS);
           return true;
@@ -16404,9 +17741,9 @@ if (typeof module !== 'undefined' && module.exports) {
       var aiCmAutoExportSkipReasonState = { reason: "" };
       function aiCmAutoExportBasePendingLog(cid, percentage) {
         try {
-          if (typeof aiCmDiagLine !== "function") return;
+          if (typeof aiCmDiagLine2 !== "function") return;
           var site = typeof currentAdapter !== "undefined" && currentAdapter && currentAdapter.siteName || "";
-          aiCmDiagLine("auto-export", {
+          aiCmDiagLine2("auto-export", {
             point: "maybeAutoExport",
             verdict: "skip",
             reason: "base-pending",
@@ -16421,7 +17758,7 @@ if (typeof module !== 'undefined' && module.exports) {
       }
       function aiCmAutoExportDecisionDiag(percentage, verdictSkip, reason) {
         try {
-          if (typeof aiCmDiagLine !== "function") return false;
+          if (typeof aiCmDiagLine2 !== "function") return false;
           var site = typeof currentAdapter !== "undefined" && currentAdapter && currentAdapter.siteName || "";
           var memMsgs = typeof lastBaseTexts !== "undefined" && Array.isArray(lastBaseTexts) ? lastBaseTexts.length : 0;
           var memTextLen = typeof baseText === "string" ? baseText.length : 0;
@@ -16438,7 +17775,7 @@ if (typeof module !== 'undefined' && module.exports) {
           } catch (eSrc) {
             fileSource = void 0;
           }
-          aiCmDiagLine("auto-export-decision", {
+          aiCmDiagLine2("auto-export-decision", {
             ts: Date.now(),
             point: "maybeAutoExport",
             site,
@@ -16550,7 +17887,7 @@ if (typeof module !== 'undefined' && module.exports) {
                     if (pkHys) delete sessionFiredCache[pkHys];
                   }
                 } catch (eO3hys) {
-                  swallowSoft(eO3hys, "export:maybeAutoExport-latch-hysteresis");
+                  swallowSoft2(eO3hys, "export:maybeAutoExport-latch-hysteresis");
                 }
               }
               if (verdict.reason === "base-pending") {
@@ -16635,7 +17972,7 @@ if (typeof module !== 'undefined' && module.exports) {
                   if (pkHys2) delete sessionFiredCache[pkHys2];
                 }
               } catch (eO3hys2) {
-                swallowSoft(eO3hys2, "export:maybeAutoExport-latch-below-threshold");
+                swallowSoft2(eO3hys2, "export:maybeAutoExport-latch-below-threshold");
               }
             }
             return;
@@ -16693,7 +18030,7 @@ if (typeof module !== 'undefined' && module.exports) {
       }
       function doAutoExportDownload(cid, percentage, reason, netSynced) {
         try {
-          let aiCmWriteAutoExportFile2 = function(fileMsgs, histSource, histConvId, histSite) {
+          let aiCmWriteAutoExportFile = function(fileMsgs, histSource, histConvId, histSite) {
             try {
               if (histSource === "storage-host" && !histConvId && cid || histConvId && cid && String(histConvId) !== String(cid) || histSite && siteNameD && String(histSite) !== String(siteNameD)) {
                 debugLog("log", "[AI CM][auto-export] abort reason=history-source-mismatch histConvId=" + histConvId + " site=" + histSite);
@@ -16741,7 +18078,7 @@ if (typeof module !== 'undefined' && module.exports) {
                       aiCmAutoExportFiredOnce[siteOnce + "|" + cid] = 1;
                     }
                   } catch (eOnce) {
-                    swallowSoft(eOnce, "export:aiCmWriteAutoExportFile-once");
+                    swallowSoft2(eOnce, "export:aiCmWriteAutoExportFile-once");
                   }
                   try {
                     var siteO3 = currentAdapter && currentAdapter.siteName || "";
@@ -16751,7 +18088,7 @@ if (typeof module !== 'undefined' && module.exports) {
                       sessionFiredCache[pkO3] = 1;
                     }
                   } catch (eO3write) {
-                    swallowSoft(eO3write, "export:aiCmWriteAutoExportFile-fired-latch");
+                    swallowSoft2(eO3write, "export:aiCmWriteAutoExportFile-fired-latch");
                   }
                 } else {
                   autoExportFired[cid] = 1;
@@ -16761,7 +18098,7 @@ if (typeof module !== 'undefined' && module.exports) {
                       aiCmAutoExportFiredOnce[siteOnceFb + "|" + cid] = 1;
                     }
                   } catch (eOnceFb) {
-                    swallowSoft(eOnceFb, "export:aiCmWriteAutoExportFile-once-fallback");
+                    swallowSoft2(eOnceFb, "export:aiCmWriteAutoExportFile-once-fallback");
                   }
                 }
               }
@@ -16788,7 +18125,7 @@ if (typeof module !== 'undefined' && module.exports) {
                   reason: reason || ""
                 }) }));
               } catch (eFiredEvt) {
-                swallowSoft(eFiredEvt, "export:auto-export-fired-event");
+                swallowSoft2(eFiredEvt, "export:auto-export-fired-event");
               }
               try {
                 if (typeof aiCmAutoExportTrustedBaseDiag === "function") {
@@ -16803,7 +18140,6 @@ if (typeof module !== 'undefined' && module.exports) {
               debugLog("error", "[AI CM][auto-export] error:", eInner);
             }
           };
-          var aiCmWriteAutoExportFile = aiCmWriteAutoExportFile2;
           if (typeof aiCmDeferAutoExportOnLiveStream === "function" && aiCmDeferAutoExportOnLiveStream(cid, percentage)) return;
           var filesApiD = typeof window !== "undefined" && window.AiCmBaseHandler ? window.AiCmBaseHandler : null;
           var filesDrainSiteD = filesApiD && typeof filesApiD.aiCmFilesDrainSite === "function" ? filesApiD.aiCmFilesDrainSite() === true : false;
@@ -16848,12 +18184,11 @@ if (typeof module !== 'undefined' && module.exports) {
           } else if (P && typeof P.buildExportFileName === "function") {
             file = P.buildExportFileName(siteNameD, cid, reason, lowConfD, fmt, namesUsedD);
           } else {
-            let ap2Fb2 = function(n) {
+            let ap2Fb = function(n) {
               return (n < 10 ? "0" : "") + n;
             };
-            var ap2Fb = ap2Fb2;
             var dFb = /* @__PURE__ */ new Date();
-            file = "chat-" + String(cid).slice(0, 8) + "-" + dFb.getFullYear() + "-" + ap2Fb2(dFb.getMonth() + 1) + "-" + ap2Fb2(dFb.getDate()) + "_" + ap2Fb2(dFb.getHours()) + "-" + ap2Fb2(dFb.getMinutes()) + (reason === "pre-trim" ? "-pretrim" : "") + "." + fmt;
+            file = "chat-" + String(cid).slice(0, 8) + "-" + dFb.getFullYear() + "-" + ap2Fb(dFb.getMonth() + 1) + "-" + ap2Fb(dFb.getDate()) + "_" + ap2Fb(dFb.getHours()) + "-" + ap2Fb(dFb.getMinutes()) + (reason === "pre-trim" ? "-pretrim" : "") + "." + fmt;
           }
           var msgs = buildHistoryMessages();
           if (baseSeen === true && lastBaseTexts.length === 0) {
@@ -16897,7 +18232,7 @@ if (typeof module !== 'undefined' && module.exports) {
                 debugLog("log", "[AI CM][auto-export] skip reason=empty-history convId=" + cid + " histSource=storage-host");
                 return;
               }
-              aiCmWriteAutoExportFile2(rec.messages, "storage-host", rec.convId || "", rec.site || "");
+              aiCmWriteAutoExportFile(rec.messages, "storage-host", rec.convId || "", rec.site || "");
             };
             try {
               if (hostKeyFb && typeof chrome !== "undefined" && chrome && chrome.storage && chrome.storage.local && typeof chrome.storage.local.get === "function") {
@@ -16917,7 +18252,7 @@ if (typeof module !== 'undefined' && module.exports) {
             }
             return;
           }
-          aiCmWriteAutoExportFile2(msgs, "memory", histConvIdMem, histSiteMem);
+          aiCmWriteAutoExportFile(msgs, "memory", histConvIdMem, histSiteMem);
         } catch (e) {
           debugLog("error", "[AI CM][auto-export] error:", e);
         }
@@ -16986,7 +18321,7 @@ if (typeof module !== 'undefined' && module.exports) {
           if (typeof sessionStorage === "undefined" || !sessionStorage) return false;
           return sessionStorage.getItem("aiCmAutoExportFired_" + String(cid)) === "1";
         } catch (e) {
-          swallowSoft(e, "export:autoexport-fired-storage-read");
+          swallowSoft2(e, "export:autoexport-fired-storage-read");
           return false;
         }
       }
@@ -16999,7 +18334,7 @@ if (typeof module !== 'undefined' && module.exports) {
           sessionStorage.setItem("aiCmAutoExportFired_" + String(cid), "1");
           return true;
         } catch (e) {
-          swallowSoft(e, "export:autoexport-fired-storage-write");
+          swallowSoft2(e, "export:autoexport-fired-storage-write");
           return false;
         }
       }
@@ -17208,8 +18543,8 @@ if (typeof module !== 'undefined' && module.exports) {
         try {
           var newCid = getCurrentConvId() || "";
           try {
-            if (typeof aiCmDiagLine === "function") {
-              aiCmDiagLine("o22-conv-changed", {
+            if (typeof aiCmDiagLine2 === "function") {
+              aiCmDiagLine2("o22-conv-changed", {
                 ts: Date.now(),
                 convId: newCid || "(none)",
                 prev: aiCmLastSeenConvId || "(none)",
@@ -17221,8 +18556,8 @@ if (typeof module !== 'undefined' && module.exports) {
           } catch (eO22a) {
           }
           try {
-            if (typeof aiCmDiagLine === "function" && currentAdapter && currentAdapter.siteName === "qwen") {
-              aiCmDiagLine("qwen-spa", {
+            if (typeof aiCmDiagLine2 === "function" && currentAdapter && currentAdapter.siteName === "qwen") {
+              aiCmDiagLine2("qwen-spa", {
                 ts: Date.now(),
                 event: "conv-changed-recv",
                 convId: newCid || "(none)",
@@ -17247,7 +18582,7 @@ if (typeof module !== 'undefined' && module.exports) {
             aiCmLastSeenConvId = newCid;
           }
         } catch (eSpa) {
-          swallowSoft(eSpa, "content:conversation-changed-outer");
+          swallowSoft2(eSpa, "content:conversation-changed-outer");
         }
         aiCmGsaDiagState("conv-changed", "reset", "conversation-id-change", {
           convId: String(getCurrentConvId() || ""),
@@ -17257,9 +18592,9 @@ if (typeof module !== 'undefined' && module.exports) {
         aiCmAdapterBaseCount = 0;
         if (typeof aiCmIsAistudioHost === "function" && typeof aiCmAistudioHistoryCacheRestore === "function" && aiCmIsAistudioHost()) aiCmAistudioHistoryCacheRestore();
         try {
-          if (typeof aiCmDiagLine === "function" && currentAdapter && currentAdapter.siteName === "qwen") {
+          if (typeof aiCmDiagLine2 === "function" && currentAdapter && currentAdapter.siteName === "qwen") {
             aiCmQwenSpaResetAt = Date.now();
-            aiCmDiagLine("qwen-spa", {
+            aiCmDiagLine2("qwen-spa", {
               ts: aiCmQwenSpaResetAt,
               event: "reset-done",
               reason: "conversation-id-change",
@@ -17272,8 +18607,8 @@ if (typeof module !== 'undefined' && module.exports) {
         } catch (eQspaR) {
         }
         try {
-          if (typeof aiCmDiagLine === "function" && currentAdapter && currentAdapter.siteName === "qwen") {
-            aiCmDiagLine("qwen-spa", {
+          if (typeof aiCmDiagLine2 === "function" && currentAdapter && currentAdapter.siteName === "qwen") {
+            aiCmDiagLine2("qwen-spa", {
               ts: Date.now(),
               event: "reshoot",
               convId: String(getCurrentConvId() || "") || "(none)",
@@ -17310,7 +18645,7 @@ if (typeof module !== 'undefined' && module.exports) {
             debugLog("log", "[content-trace] badge-unfreeze: \u0432\u0438\u0434\u0436\u0435\u0442 \u043E\u0431\u043D\u043E\u0432\u043B\u0451\u043D pct=" + d.percentage);
           }
         } catch (e) {
-          swallowSoft(e, "content:loader-freeze");
+          swallowSoft2(e, "content:loader-freeze");
         }
       });
       window.addEventListener("ai-cm-dom-emit-request", function() {
@@ -17330,7 +18665,7 @@ if (typeof module !== 'undefined' && module.exports) {
           processAndSend();
           debugLog("log", "[AI CM][realtime] dom-emit pct=" + lastPercentage + " tokens=" + maxTokenCount);
         } catch (eDe) {
-          swallowSoft(eDe, "content:dom-emit-request");
+          swallowSoft2(eDe, "content:dom-emit-request");
         }
       });
       function aiCmDomThreadId() {
@@ -17354,7 +18689,7 @@ if (typeof module !== 'undefined' && module.exports) {
           if (document.querySelector('[data-scope-id="turn"]')) return true;
           if (document.querySelector('[data-subtree="aimfl"]')) return true;
         } catch (e) {
-          swallowSoft(e, "content:aiCmGsaChatPageMarker");
+          swallowSoft2(e, "content:aiCmGsaChatPageMarker");
         }
         return false;
       }
@@ -17383,7 +18718,7 @@ if (typeof module !== 'undefined' && module.exports) {
               if (Object.prototype.hasOwnProperty.call(extra, k)) f[k] = extra[k];
             }
           }
-          if (typeof aiCmDiagLine === "function") aiCmDiagLine("gsa-state", f);
+          if (typeof aiCmDiagLine2 === "function") aiCmDiagLine2("gsa-state", f);
           return true;
         } catch (eDiagState) {
           return false;
@@ -17424,7 +18759,7 @@ if (typeof module !== 'undefined' && module.exports) {
             result = TK.countTokens(t) + attach;
             tkOk = true;
           } catch (eTk) {
-            swallowSoft(eTk, "content:aiCmEstimateTokensTilde");
+            swallowSoft2(eTk, "content:aiCmEstimateTokensTilde");
           }
         }
         if (!tkOk) {
@@ -17435,7 +18770,7 @@ if (typeof module !== 'undefined' && module.exports) {
           try {
             var cyrDiag = (t.match(/[а-яёА-ЯЁ]/g) || []).length;
             var cyrillicPct = t.length ? (cyrDiag / t.length * 100).toFixed(1) : "0.0";
-            aiCmDiagLine("o23-cyrillic-share", {
+            aiCmDiagLine2("o23-cyrillic-share", {
               textLen: t.length,
               cyrillicPct,
               attachTokens: attach,
@@ -17453,7 +18788,7 @@ if (typeof module !== 'undefined' && module.exports) {
           try {
             return Tokenizer.estimateDialogTokens(text, msgs) + attach;
           } catch (eCanon) {
-            swallowSoft(eCanon, "content:canonical-tokens");
+            swallowSoft2(eCanon, "content:canonical-tokens");
           }
         }
         return aiCmEstimateTokensTilde(text, attach) + msgs * 4;
@@ -17484,7 +18819,7 @@ if (typeof module !== 'undefined' && module.exports) {
               window.__aiCmNetModelSlug = md.slug;
             }
           } catch (eSlugAis) {
-            swallowSoft(eSlugAis, "content:aistudio-model-slug");
+            swallowSoft2(eSlugAis, "content:aistudio-model-slug");
           }
         }
       });
@@ -17510,17 +18845,17 @@ if (typeof module !== 'undefined' && module.exports) {
             try {
               maybeAutoExport(pct);
             } catch (eFire) {
-              swallowSoft(eFire, "content:autoexport-debounce");
+              swallowSoft2(eFire, "content:autoexport-debounce");
             }
           }, AI_CM_AUTOEXPORT_DEBOUNCE_MS);
         } catch (eSched) {
-          swallowSoft(eSched, "content:autoexport-schedule");
+          swallowSoft2(eSched, "content:autoexport-schedule");
         }
       }
       window.addEventListener("ai-cm-full-history", function(ev) {
         try {
-          if (typeof aiCmDiagLine === "function") {
-            aiCmDiagLine("o22-listener-entry", { ts: Date.now() });
+          if (typeof aiCmDiagLine2 === "function") {
+            aiCmDiagLine2("o22-listener-entry", { ts: Date.now() });
           }
         } catch (eO22L1) {
         }
@@ -17533,8 +18868,8 @@ if (typeof module !== 'undefined' && module.exports) {
         } catch (eEmit1) {
         }
         try {
-          if (typeof aiCmDiagLine === "function") {
-            aiCmDiagLine("o22-svc-emit", {
+          if (typeof aiCmDiagLine2 === "function") {
+            aiCmDiagLine2("o22-svc-emit", {
               ts: Date.now(),
               convId: ev && ev.detail && ev.detail.convId || (typeof getCurrentConvId === "function" ? getCurrentConvId() || "" : "") || "(none)",
               histKey: (typeof baseCount === "number" ? baseCount : 0) + "|" + (typeof baseText === "string" && baseText ? baseText.length : 0),
@@ -17558,8 +18893,8 @@ if (typeof module !== 'undefined' && module.exports) {
         var tokenTilde = aiCmCanonicalTokens(detail.text, detail.attachTokens, detail.count || 0);
         debugLog("log", "[AI CM][trace] badge-recv convId=" + (detail.convId || "-") + " msgs=" + (detail.count || 0) + " tokens~" + tokenTilde);
         try {
-          if (typeof aiCmDiagLine === "function") {
-            aiCmDiagLine("o22-badge-recv", {
+          if (typeof aiCmDiagLine2 === "function") {
+            aiCmDiagLine2("o22-badge-recv", {
               ts: Date.now(),
               convId: detail.convId || "(none)",
               msgs: detail.count || 0,
@@ -17626,8 +18961,8 @@ if (typeof module !== 'undefined' && module.exports) {
         lastBaseIds = ids;
         lastBaseTexts = texts;
         try {
-          if ((currentAdapter && currentAdapter.siteName) === "google_search" && typeof aiCmDiagLine === "function") {
-            aiCmDiagLine("gsa-base-accept", {
+          if ((currentAdapter && currentAdapter.siteName) === "google_search" && typeof aiCmDiagLine2 === "function") {
+            aiCmDiagLine2("gsa-base-accept", {
               point: "content-emit",
               verdict: texts.length > 0 ? "accept" : "accept-empty",
               msgs: texts.length,
@@ -17707,7 +19042,7 @@ if (typeof module !== 'undefined' && module.exports) {
         try {
           geminiDetectTrim(detail);
         } catch (eTrim) {
-          swallowSoft(eTrim, "content:full-history-trim");
+          swallowSoft2(eTrim, "content:full-history-trim");
         }
         if (!isInitialized) {
           tryInit();
@@ -17751,12 +19086,12 @@ if (typeof module !== 'undefined' && module.exports) {
               try {
                 aiCmFlushDeferredHistWrite(cid79, "base-complete");
               } catch (eF79) {
-                swallowSoft(eF79, "content:full-history-flush-deferred");
+                swallowSoft2(eF79, "content:full-history-flush-deferred");
               }
               try {
                 aiCmResyncMetricsAfterFlush(cid79, "base-complete");
               } catch (eRs79) {
-                swallowSoft(eRs79, "content:metrics-resync-flush");
+                swallowSoft2(eRs79, "content:metrics-resync-flush");
               }
               var freshPct79 = typeof lastPercentage === "number" && lastPercentage >= 0 ? lastPercentage : autoExportLastPct;
               if (aiCmLateCheckByConv[cid79]) {
@@ -17767,12 +19102,12 @@ if (typeof module !== 'undefined' && module.exports) {
               }
             }
           } catch (e79) {
-            swallowSoft(e79, "content:full-history-complete-transition");
+            swallowSoft2(e79, "content:full-history-complete-transition");
           }
         }
         try {
-          if (typeof aiCmDiagLine === "function") {
-            aiCmDiagLine("o22-call725", {
+          if (typeof aiCmDiagLine2 === "function") {
+            aiCmDiagLine2("o22-call725", {
               ts: Date.now(),
               src: typeof aiCmDiagStack === "function" ? aiCmDiagStack(2) : ""
             });
@@ -17864,7 +19199,7 @@ if (typeof module !== 'undefined' && module.exports) {
       }
       function aiCmQwenInitDiag(event, fields) {
         try {
-          if (typeof aiCmDiagLine !== "function") return false;
+          if (typeof aiCmDiagLine2 !== "function") return false;
           if (typeof currentAdapter === "undefined" || !currentAdapter) return false;
           if (currentAdapter.siteName !== "qwen") return false;
           var f = {
@@ -17877,7 +19212,7 @@ if (typeof module !== 'undefined' && module.exports) {
               if (Object.prototype.hasOwnProperty.call(fields, k)) f[k] = fields[k];
             }
           }
-          return aiCmDiagLine("qwen-init", f);
+          return aiCmDiagLine2("qwen-init", f);
         } catch (eQid) {
           return false;
         }
@@ -18202,8 +19537,8 @@ if (typeof module !== 'undefined' && module.exports) {
             }
             const sig = aiCmDomTextSig();
             if (sig === aiCmLastDomEmitSig && aiCmSiteConvFired()) {
-              if (typeof aiCmDiagLine === "function") {
-                aiCmDiagLine("o24-dom-emit-guard", {
+              if (typeof aiCmDiagLine2 === "function") {
+                aiCmDiagLine2("o24-dom-emit-guard", {
                   verdict: "skip-sig-unchanged",
                   sig,
                   convId: sigConvId || "(none)",
@@ -18403,7 +19738,7 @@ if (typeof module !== 'undefined' && module.exports) {
                 });
                 console.log("[byok-cache] \u0442\u043E\u0447\u043D\u043E\u0435 \u0437\u043D\u0430\u0447\u0435\u043D\u0438\u0435 \u0441\u043E\u0445\u0440\u0430\u043D\u0435\u043D\u043E \u0432 \u0445\u0440\u0430\u043D\u0438\u043B\u0438\u0449\u0435: " + response.totalTokens);
               } catch (e) {
-                swallowSoft(e, "content:requestExactTokens");
+                swallowSoft2(e, "content:requestExactTokens");
               }
             }
             processAndSend();
@@ -18465,7 +19800,7 @@ if (typeof module !== 'undefined' && module.exports) {
             if (isInitialized) processAndSend();
           });
         } catch (eByokInv) {
-          swallowSoft(eByokInv, "content:aiCmByokKeyInvalidate");
+          swallowSoft2(eByokInv, "content:aiCmByokKeyInvalidate");
         }
       }
       function loadByokCache() {
@@ -18548,7 +19883,7 @@ if (typeof module !== 'undefined' && module.exports) {
               }
               aiCmUpdateSourceIndicator();
             } catch (eInner) {
-              swallowSoft(eInner, "content:aiCmLoadArchiveTier");
+              swallowSoft2(eInner, "content:aiCmLoadArchiveTier");
             }
           });
         } catch (eL) {
@@ -18591,8 +19926,8 @@ if (typeof module !== 'undefined' && module.exports) {
       var aiCmBadgeHoldTimer = null;
       function aiCmBadgeHoldDiag(reason) {
         try {
-          if (typeof aiCmDiagLine !== "function") return;
-          aiCmDiagLine("badge-hold", {
+          if (typeof aiCmDiagLine2 !== "function") return;
+          aiCmDiagLine2("badge-hold", {
             point: "badge-hold",
             reason,
             site: currentAdapter && currentAdapter.siteName || "",
@@ -18614,7 +19949,7 @@ if (typeof module !== 'undefined' && module.exports) {
             try {
               aiCmRevealWidget();
             } catch (eRevO1) {
-              swallowSoft(eRevO1, "content:aiCmBadgeHoldRelease");
+              swallowSoft2(eRevO1, "content:aiCmBadgeHoldRelease");
             }
             processAndSend();
           }
@@ -18724,8 +20059,8 @@ if (typeof module !== 'undefined' && module.exports) {
           var sameCount = msgs.length === prevCount;
           var canSkip = sameCount && newKey === lastHistoryWroteKey && rawUnchanged;
           try {
-            if (typeof aiCmDiagLine === "function") {
-              aiCmDiagLine("o22-metrics-resync", {
+            if (typeof aiCmDiagLine2 === "function") {
+              aiCmDiagLine2("o22-metrics-resync", {
                 ts: Date.now(),
                 convId: cid,
                 reason: reason || "(none)",
@@ -18739,7 +20074,7 @@ if (typeof module !== 'undefined' && module.exports) {
               });
             }
           } catch (eRsD) {
-            swallowSoft(eRsD, "content:metrics-resync-diag");
+            swallowSoft2(eRsD, "content:metrics-resync-diag");
           }
           if (canSkip) {
             debugLog("log", "[AI CM][export] metrics-resync skip reason=same convId=" + cid + " histKey=" + newKey);
@@ -18755,7 +20090,7 @@ if (typeof module !== 'undefined' && module.exports) {
           processAndSend();
           return true;
         } catch (eRs) {
-          swallowSoft(eRs, "content:metrics-resync");
+          swallowSoft2(eRs, "content:metrics-resync");
           return false;
         }
       }
@@ -18764,7 +20099,7 @@ if (typeof module !== 'undefined' && module.exports) {
         try {
           aiCmGsaResetStaleStateOnChatlessDoc();
         } catch (eO27c) {
-          swallowSoft(eO27c, "content:processAndSend-gsa-stale-reset");
+          swallowSoft2(eO27c, "content:processAndSend-gsa-stale-reset");
         }
         var aiCmDomListS1 = null;
         try {
@@ -18783,7 +20118,7 @@ if (typeof module !== 'undefined' && module.exports) {
           try {
             aiCmAistudioDomCacheSave(aiCmDomListS1);
           } catch (eDomS1) {
-            swallowSoft(eDomS1, "content:processAndSend-aistudio-dom-cache");
+            swallowSoft2(eDomS1, "content:processAndSend-aistudio-dom-cache");
           }
         }
         try {
@@ -18793,7 +20128,7 @@ if (typeof module !== 'undefined' && module.exports) {
             aiCmLoadArchiveTier(cidArc, "page-load");
           }
         } catch (eArcInit) {
-          swallowSoft(eArcInit, "content:processAndSend-archive-init");
+          swallowSoft2(eArcInit, "content:processAndSend-archive-init");
         }
         if (!restoredTapeLoaded) {
           restoredTapeLoaded = true;
@@ -18871,7 +20206,7 @@ if (typeof module !== 'undefined' && module.exports) {
                       maybeAutoExport(autoExportLastPct);
                     }
                   } catch (eT79) {
-                    swallowSoft(eT79, "content:processAndSend-tape-restore");
+                    swallowSoft2(eT79, "content:processAndSend-tape-restore");
                   }
                   if (!cacheRefreshPlanned[convId]) {
                     cacheRefreshPlanned[convId] = true;
@@ -18977,9 +20312,9 @@ if (typeof module !== 'undefined' && module.exports) {
           try {
             var metricSrc = baseComplete ? "base-complete" : lastBounded ? "base-floor+dom-tail" : "base-floor";
             var metricSig = [metricSrc, baseCount, fullText ? fullText.length : 0, tokenEstimate, baseSeen ? 1 : 0].join("|");
-            if (typeof aiCmDiagLine === "function" && metricSig !== lastMetricSig) {
+            if (typeof aiCmDiagLine2 === "function" && metricSig !== lastMetricSig) {
               lastMetricSig = metricSig;
-              aiCmDiagLine("gsa-metric-src", {
+              aiCmDiagLine2("gsa-metric-src", {
                 site: svc,
                 src: metricSrc,
                 note: !baseComplete && baseCount > 0 ? "incomplete-canonical-floor" : "",
@@ -19043,8 +20378,8 @@ if (typeof module !== 'undefined' && module.exports) {
             };
           }
           try {
-            if (typeof aiCmDiagLine === "function" && currentAdapter && currentAdapter.siteName === "qwen") {
-              aiCmDiagLine("qwen-badge", {
+            if (typeof aiCmDiagLine2 === "function" && currentAdapter && currentAdapter.siteName === "qwen") {
+              aiCmDiagLine2("qwen-badge", {
                 ts: Date.now(),
                 event: "badge-update",
                 reason: badgeSuppressActive ? "spa-suppress" : aiCmLoaderFreeze ? "loader-freeze" : "draw",
@@ -19112,7 +20447,7 @@ if (typeof module !== 'undefined' && module.exports) {
               statePatch["aiCmState:" + window.location.hostname] = stateSnapshot;
               chrome.storage.local.set(statePatch);
             } catch (e) {
-              swallowSoft(e, "content:processAndSend-state-write");
+              swallowSoft2(e, "content:processAndSend-state-write");
             }
           }
           var emitConvA = lastEmitConvId || "";
@@ -19120,8 +20455,8 @@ if (typeof module !== 'undefined' && module.exports) {
           if (isExtensionValid() && baseSeen && lastBaseTexts.length > 0 && !(emitConvA && currentConvB && emitConvA !== currentConvB)) {
             var histKey = baseCount + "|" + (baseText ? baseText.length : 0);
             try {
-              if (typeof aiCmDiagLine === "function") {
-                aiCmDiagLine("o22-histkey-dedup", {
+              if (typeof aiCmDiagLine2 === "function") {
+                aiCmDiagLine2("o22-histkey-dedup", {
                   ts: Date.now(),
                   convId: emitConvA || currentConvB || "(none)",
                   histKey,
@@ -19138,8 +20473,8 @@ if (typeof module !== 'undefined' && module.exports) {
               lastHistoryWroteKey = histKey;
               debugLog("log", "[AI CM][trace] history-write source=network convId=" + (emitConvA || "-") + " msgs=" + baseCount);
               try {
-                if (typeof aiCmDiagLine === "function" && currentAdapter && currentAdapter.siteName === "qwen") {
-                  aiCmDiagLine("qwen-adapter", {
+                if (typeof aiCmDiagLine2 === "function" && currentAdapter && currentAdapter.siteName === "qwen") {
+                  aiCmDiagLine2("qwen-adapter", {
                     ts: Date.now(),
                     source: "network",
                     msgs: baseCount,
@@ -19195,7 +20530,7 @@ if (typeof module !== 'undefined' && module.exports) {
                   chrome.storage.local.set(histPatch);
                 }
               } catch (e) {
-                swallowSoft(e, "content:processAndSend-history-write");
+                swallowSoft2(e, "content:processAndSend-history-write");
               }
             }
           }
@@ -19212,14 +20547,14 @@ if (typeof module !== 'undefined' && module.exports) {
                 if (typeof aiCmScheduleAutoExport === "function") aiCmScheduleAutoExport(percentage);
                 debugLog("log", "[AI CM][trace] history-write source=adapter site=" + (currentAdapter.siteName || "") + " convId=" + cidS24 + " msgs=" + msgsS24.length);
                 try {
-                  if (typeof aiCmDiagLine === "function" && currentAdapter && currentAdapter.siteName === "qwen") {
+                  if (typeof aiCmDiagLine2 === "function" && currentAdapter && currentAdapter.siteName === "qwen") {
                     var qUsers = 0;
                     var qAssist = 0;
                     for (var qr = 0; qr < msgsS24.length; qr++) {
                       if (msgsS24[qr] && msgsS24[qr].role === "user") qUsers++;
                       else qAssist++;
                     }
-                    aiCmDiagLine("qwen-adapter", {
+                    aiCmDiagLine2("qwen-adapter", {
                       ts: Date.now(),
                       source: "adapter",
                       msgs: msgsS24.length,
@@ -19252,7 +20587,7 @@ if (typeof module !== 'undefined' && module.exports) {
               }
             }
           } catch (eS24) {
-            swallowSoft(eS24, "content:processAndSend-history-write-adapter");
+            swallowSoft2(eS24, "content:processAndSend-history-write-adapter");
           }
           if (isExtensionValid()) {
             chrome.runtime.sendMessage({
@@ -19283,7 +20618,7 @@ if (typeof module !== 'undefined' && module.exports) {
             processAndSend();
           }
         } catch (eVis77) {
-          swallowSoft(eVis77, "content:visibilitychange-refresh");
+          swallowSoft2(eVis77, "content:visibilitychange-refresh");
         }
       });
       var aiCmProactiveEnabled = true;
@@ -19344,7 +20679,7 @@ if (typeof module !== 'undefined' && module.exports) {
       }
       function aiCmAutoExportTrustedBaseDiag(trigger, cid, percentage) {
         try {
-          if (typeof aiCmDiagLine !== "function") return false;
+          if (typeof aiCmDiagLine2 !== "function") return false;
           if (!aiCmAutoExportTrustedBase()) return false;
           var diagSite = currentAdapter && currentAdapter.siteName || "";
           var diagNetReady = 0;
@@ -19354,7 +20689,7 @@ if (typeof module !== 'undefined' && module.exports) {
           } catch (eAtbNet) {
             diagNetReady = 0;
           }
-          aiCmDiagLine("auto-export", {
+          aiCmDiagLine2("auto-export", {
             point: "maybeAutoExport",
             verdict: "fire",
             trigger,
@@ -19389,7 +20724,7 @@ if (typeof module !== 'undefined' && module.exports) {
             try {
               aiCmFlushLiveStreamForExport(curCidExp);
             } catch (eFlushExp) {
-              swallowSoft(eFlushExp, "content:aiCmAutoExportTrustedBaseDiag-flush");
+              swallowSoft2(eFlushExp, "content:aiCmAutoExportTrustedBaseDiag-flush");
             }
             var pctExp = typeof lastPercentage === "number" && lastPercentage >= 0 ? lastPercentage : 0;
             try {
@@ -19706,7 +21041,7 @@ if (typeof module !== 'undefined' && module.exports) {
               }
             }
           } catch (ePerSite) {
-            swallowSoft(ePerSite, "content:storage-onchanged-per-site");
+            swallowSoft2(ePerSite, "content:storage-onchanged-per-site");
           }
           if (changes.ai_cm_exact_token_count || changes.ai_cm_gemini_api_key) {
             loadByokSettings();
@@ -19752,7 +21087,7 @@ if (typeof module !== 'undefined' && module.exports) {
           }
           return true;
         } catch (eNrReset) {
-          swallowSoft(eNrReset, "content:aistudio-net-ready-reset");
+          swallowSoft2(eNrReset, "content:aistudio-net-ready-reset");
           return false;
         }
       }
@@ -19760,7 +21095,7 @@ if (typeof module !== 'undefined' && module.exports) {
         try {
           return String(window.location && window.location.hostname || "").indexOf("aistudio.google.com") !== -1;
         } catch (eAih) {
-          swallowSoft(eAih, "content:aistudio-net-host");
+          swallowSoft2(eAih, "content:aistudio-net-host");
           return false;
         }
       }
@@ -19821,7 +21156,7 @@ if (typeof module !== 'undefined' && module.exports) {
           aiCmAistudioNativeValue = found;
           return found;
         } catch (eNat) {
-          swallowSoft(eNat, "content:aistudio-native-tokens");
+          swallowSoft2(eNat, "content:aistudio-native-tokens");
           return 0;
         }
       }
@@ -19840,7 +21175,7 @@ if (typeof module !== 'undefined' && module.exports) {
             box = box.parentElement;
           }
         } catch (eNatProbe) {
-          swallowSoft(eNatProbe, "content:aistudio-native-probe");
+          swallowSoft2(eNatProbe, "content:aistudio-native-probe");
         }
         return 0;
       }
@@ -19853,7 +21188,7 @@ if (typeof module !== 'undefined' && module.exports) {
         try {
           return typeof sessionStorage !== "undefined" ? sessionStorage : null;
         } catch (eSs) {
-          swallowSoft(eSs, "content:aistudio-cache-storage");
+          swallowSoft2(eSs, "content:aistudio-cache-storage");
           return null;
         }
       }
@@ -19903,7 +21238,7 @@ if (typeof module !== 'undefined' && module.exports) {
           aiCmAistudioPeakCount = aiCmNetMsgsAistudio.msgs.length;
           return true;
         } catch (eSave) {
-          swallowSoft(eSave, "content:aistudio-cache-save");
+          swallowSoft2(eSave, "content:aistudio-cache-save");
           return false;
         }
       }
@@ -19945,7 +21280,7 @@ if (typeof module !== 'undefined' && module.exports) {
             cached: true
           });
         } catch (eRestore) {
-          swallowSoft(eRestore, "content:aistudio-cache-restore");
+          swallowSoft2(eRestore, "content:aistudio-cache-restore");
           return false;
         }
       }
@@ -19965,7 +21300,7 @@ if (typeof module !== 'undefined' && module.exports) {
           window.__aiCmNetModelSlug = "";
           return true;
         } catch (eClear) {
-          swallowSoft(eClear, "content:aistudio-cache-clear");
+          swallowSoft2(eClear, "content:aistudio-cache-clear");
           return false;
         }
       }
@@ -20002,7 +21337,7 @@ if (typeof module !== 'undefined' && module.exports) {
           debugLog("log", "[AI CM][aistudio-cache] dom-peak key=" + key + " msgs=" + msgs.length);
           return true;
         } catch (eDomSave) {
-          swallowSoft(eDomSave, "content:aistudio-dom-cache-save");
+          swallowSoft2(eDomSave, "content:aistudio-dom-cache-save");
           return false;
         }
       }
@@ -20075,7 +21410,7 @@ if (typeof module !== 'undefined' && module.exports) {
           var changed = aiCmIngestAistudioNet(detail);
           if (changed && detail.kind === "history") aiCmAistudioHistoryCacheSave();
         } catch (eNet) {
-          swallowSoft(eNet, "content:aistudio-net");
+          swallowSoft2(eNet, "content:aistudio-net");
         }
       });
       aiCmAistudioHistoryCacheRestore();
@@ -20567,7 +21902,7 @@ if (typeof module !== 'undefined' && module.exports) {
 
 
 (function () {
-  var OPTIONS_HTML = "<!DOCTYPE html>\n<html lang=\"ru\">\n\n<head>\n<script>window.__AI_CM_OPTIONS_FRAME__=true;</script>\n  <meta charset=\"UTF-8\">\n  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n  <title data-i18n=\"options_page_title\">AI Context Monitor</title>\n  <style>\n* {\n  margin: 0;\n  padding: 0;\n  box-sizing: border-box;\n}\n\nbody {\n  /* Minor-B (#19, WCAG 1.4.10): фиксированные 300px убраны — раскладка тянется по окну.\n     Потокобезопасность на 320px: `overflow-wrap: anywhere` обнуляет min-content текста,\n     поэтому длинные RU/EN-подписи переносятся, а не выпирают за вьюпорт. */\n  min-width: 0;\n  max-width: 100%;\n  overflow-wrap: anywhere;\n  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;\n  background: #1a1a2e;\n  color: #e0e0e0;\n}\n\n.popup {\n  /* Minor-B (#19): колонка контента без фиксированной ширины (max-width — не фикс). */\n  padding: 16px;\n  max-width: 720px;\n}\n\n.header {\n  display: flex;\n  align-items: center;\n  gap: 8px;\n  margin-bottom: 16px;\n  padding-bottom: 12px;\n  border-bottom: 1px solid #2a2a4a;\n}\n\n.logo {\n  font-size: 24px;\n}\n\nh1 {\n  font-size: 16px;\n  font-weight: 600;\n  color: #ffffff;\n}\n\n.stats {\n  background: #16213e;\n  border-radius: 10px;\n  padding: 12px;\n  margin-bottom: 16px;\n}\n\n.stat-row {\n  display: flex;\n  justify-content: space-between;\n  padding: 4px 0;\n  font-size: 13px;\n}\n\n.stat-row.highlight {\n  margin-top: 4px;\n  padding-top: 8px;\n  border-top: 1px solid #2a2a4a;\n  font-weight: 600;\n}\n\n.stat-label {\n  color: #8b8bad;\n}\n\n.stat-value {\n  color: #ffffff;\n  font-variant-numeric: tabular-nums;\n}\n\n.section {\n  margin-bottom: 12px;\n}\n\n.label {\n  display: block;\n  font-size: 12px;\n  color: #8b8bad;\n  margin-bottom: 4px;\n}\n\nselect, input {\n  width: 100%;\n  padding: 8px 10px;\n  border-radius: 8px;\n  border: 1px solid #2a2a4a;\n  background: #16213e;\n  color: #ffffff;\n  font-size: 13px;\n}\n\nselect:focus, input:focus {\n  border-color: #7c3aed;\n}\n\n/* v1.20 (M-3): видимый фокус для клавиатуры. Прежняя смена border-color на :focus\n   сохранена выше как дополнение; outline больше не подавляется.\n   Кнопки/ссылки получили обводку впервые — раньше у них не было :focus-стилей вовсе. */\nbutton:focus-visible,\nselect:focus-visible,\ninput:focus-visible,\na:focus-visible,\n[tabindex]:focus-visible {\n  outline: 2px solid #a78bfa;\n  outline-offset: 2px;\n}\n\n/* v1.20 (M-1): смысловые группы (role=\"group\") — обычные .section-контейнеры:\n   ни рамки, ни собственных отступов, поэтому раскладка остаётся прежней. */\n[role=\"group\"].section {\n  border: none;\n  margin: 0 0 12px 0;\n  padding: 0;\n  min-width: 0;\n}\n\n.hint {\n  display: block;\n  font-size: 10px;\n  color: #8b8bad;\n  margin-top: 4px;\n}\n\n.checkbox-row {\n  display: flex;\n  align-items: center;\n  gap: 8px;\n}\n\n/* O-7: тумблер сырого режима экспорта — внутри секции «Экспорт истории»,\n   после ряда кнопок; раскладку прочих секций не трогает. */\n.export-hidden-row {\n  margin-top: 8px;\n}\n\n\n.checkbox-row input[type=\"checkbox\"] {\n  width: auto;\n  accent-color: #7c3aed;\n}\n\n.checkbox-row label {\n  font-size: 13px;\n  cursor: pointer;\n}\n\n.footer {\n  text-align: center;\n  margin-top: 12px;\n  padding-top: 12px;\n  border-top: 1px solid #2a2a4a;\n}\n\n.version {\n  font-size: 11px;\n  color: #8b8bad;\n}\n\n/* v1.18 (P1): ссылка на политику конфиденциальности в футере */\n#privacy-link {\n  display: inline-block;\n  margin-left: 8px;\n  font-size: 11px;\n  color: #a78bfa;\n  text-decoration: none;\n  cursor: pointer;\n}\n\n#privacy-link:hover {\n  color: #c4b5fd;\n  text-decoration: underline;\n}\n\n/* v1.19 (M-6): ссылка на руководство в футере — стиль как у #privacy-link */\n#help-link {\n  display: inline-block;\n  margin-left: 8px;\n  font-size: 11px;\n  color: #a78bfa;\n  text-decoration: none;\n  cursor: pointer;\n}\n\n#help-link:hover {\n  color: #c4b5fd;\n  text-decoration: underline;\n}\n\n.input-row {\n  display: flex;\n  gap: 6px;\n}\n\n/* v1.8: ряд «Порог, %» — фикс ширины поля, чтобы цифра не заходила под стрелки спиннера */\n#auto-export-section .input-row {\n  gap: 8px;\n  align-items: center;\n}\n#aiCmAutoExportPct {\n  /* Minor-B (#19/#21): размер в ch вместо жёстких 64px; гарантия v1.8 («цифра не заходит\n     под стрелки спиннера») сохранена через min-width: 64px + padding-right: 20px. */\n  inline-size: 6ch !important;\n  min-width: 64px;\n  flex: 0 0 auto;\n  box-sizing: border-box;\n  padding-right: 20px;\n  height: 32px;\n}\n#aiCmAutoExportFmt {\n  flex: 1 1 auto;\n  min-width: 0;\n  height: 32px;\n}\n\n.input-row input {\n  flex: 1;\n  /* Minor-B (#19): flex-ребёнок без min-width: 0 не сжимается ниже min-content инпута. */\n  min-width: 0;\n}\n\n.btn-reset {\n  padding: 8px 12px;\n  border-radius: 8px;\n  border: 1px solid #2a2a4a;\n  background: #16213e;\n  color: #8b8bad;\n  font-size: 12px;\n  cursor: pointer;\n  white-space: nowrap;\n}\n\n.btn-reset:hover {\n  background: #2a2a4a;\n  color: #ffffff;\n}\n\n.api-key-row {\n  display: flex;\n  gap: 4px;\n}\n\n.api-key-row input {\n  flex: 1;\n  /* Minor-B (#19): без min-width: 0 поле ключа не сжимается на 320px. */\n  min-width: 0;\n}\n\n.btn-toggle {\n  padding: 8px 10px;\n  border-radius: 8px;\n  border: 1px solid #2a2a4a;\n  background: #16213e;\n  color: #e0e0e0;\n  font-size: 14px;\n  cursor: pointer;\n  white-space: nowrap;\n}\n\n.btn-toggle:hover {\n  background: #2a2a4a;\n}\n\n.export-row {\n  display: flex;\n  gap: 6px;\n}\n\n.btn-export {\n  flex: 1;\n  padding: 8px 10px;\n  border-radius: 8px;\n  border: 1px solid #2a2a4a;\n  background: #16213e;\n  color: #ffffff;\n  font-size: 12px;\n  cursor: pointer;\n  white-space: nowrap;\n}\n\n.btn-export:hover:not(:disabled) {\n  background: #2a2a4a;\n}\n\n.btn-export:disabled {\n  color: #9a9ab0;\n  cursor: not-allowed;\n}\n\n.stale-warning {\n  background: #3a1f2b;\n  border: 1px solid #7c3aed;\n  border-radius: 10px;\n  padding: 10px 12px;\n  margin-bottom: 12px;\n  font-size: 12px;\n  line-height: 1.45;\n  color: #f0b0c0;\n}\n\n/* T1 (v1.16): секция «Архивы» — первый ярус истории */\n.archive-list {\n  margin-top: 8px;\n  display: flex;\n  flex-direction: column;\n  gap: 4px;\n  font-size: 11px;\n  line-height: 1.4;\n  color: #c8c8e0;\n}\n\n.archive-item {\n  display: flex;\n  align-items: center;\n  justify-content: space-between;\n  gap: 6px;\n  padding: 4px 6px;\n  border: 1px solid #2a2a4a;\n  border-radius: 6px;\n}\n\n.archive-info {\n  overflow: hidden;\n  text-overflow: ellipsis;\n  white-space: nowrap;\n}\n\n.archive-del {\n  flex: 0 0 auto;\n  font-size: 11px;\n  padding: 2px 6px;\n}\n\n.archive-status {\n  display: block;\n  margin-top: 6px;\n}\n\n/* Аудит 1.6 (a11y, WCAG 2.2 target-size): минимальная область нажатия 24×24 px.\n   Блок только добавляющий: прежние объявления и цвета не изменены, раскладка\n   300-пиксельного попапа не затронута (габариты растут только до минимума). */\n.checkbox-row input[type=\"checkbox\"] {\n  min-width: 24px;\n  min-height: 24px;\n}\n\n.archive-del {\n  min-width: 24px;\n  min-height: 24px;\n}\n\n.btn-reset,\n.btn-toggle,\n.btn-export {\n  min-height: 24px;\n}\n\n#privacy-link,\n#help-link {\n  min-height: 24px;\n  line-height: 24px;\n}\n\n/* Major-подбатч 1 (аудит #10): свёрнутая секция «Дополнительно» (<details>/<summary>).\n   Блок только добавляющий: ни одно прежнее правило и ни один цвет не изменены. */\ndetails.section > summary {\n  cursor: pointer;\n  font-size: 12px;\n  color: #8b8bad;\n  padding: 4px 0;\n  margin-bottom: 4px;\n  list-style-position: inside;\n}\n\ndetails.section > summary::marker {\n  color: #a78bfa;\n}\n\ndetails.section > summary:hover {\n  color: #ffffff;\n}\n\n/* Аудит #10: :focus-visible для summary обязателен — подавлять обводку здесь нельзя\n   (это пинится в tests/a11y-options.test.js). Правило намеренно стоит ПОСЛЕ combined-правила\n   выше: a11y-пин берёт первое :focus-visible-правило файла и проверяет по нему\n   селекторы button/select/input/a/[tabindex]. */\nsummary:focus-visible {\n  outline: 2px solid #a78bfa;\n  outline-offset: 2px;\n}\n\n/* =====================================================================================\n * Minor-подбатч B (UI-аудит 2026-09-28, options: находки #19/#20/#21)\n * Блок только добавляющий. Изменены две прежние вещи (обе перечислены в отчёте):\n *   body — снята фикс-ширина 300px (#19);  #aiCmAutoExportPct — width → inline-size (#19).\n * ===================================================================================== */\n\n/* #20: сетка 2×2 для четырёх кнопок экспорта истории (MD / JSON / PDF / TXT).\n   minmax(72px, 1fr) не даёт кнопкам схлопнуться и не переполняет строку даже на 320px. */\n.export-grid {\n  display: grid;\n  grid-template-columns: repeat(2, minmax(72px, 1fr));\n  gap: 6px;\n  min-width: 0;\n}\n\n.export-grid .btn-export {\n  min-width: 0;\n}\n\n/* #20: MD — основной формат (primary); остальные кнопки остаются tonal (.btn-export).\n   Контраст: #ffffff на #7c3aed = 5.70:1; hover #ffffff на #6d28d9 = 7.10:1 (AA ≥ 4.5:1). */\n.export-grid .btn-export--primary {\n  background: #7c3aed;\n  border-color: #7c3aed;\n  color: #ffffff;\n  font-weight: 600;\n}\n\n.export-grid .btn-export--primary:hover:not(:disabled) {\n  background: #6d28d9;\n  border-color: #6d28d9;\n}\n\n/* #20: пока история недоступна, primary-вид не перебивает .btn-export:disabled. */\n.export-grid .btn-export--primary:disabled {\n  background: #16213e;\n  border-color: #2a2a4a;\n  color: #9a9ab0;\n}\n\n/* #21: ряд порогов — суффикс «%» внутри обёртки поля, размер в ch.\n   Число не уходит под стрелки спиннера: спиннер внутри инпута, «%» — снаружи него.\n   #21-polish: поля больше не растягиваются на всю ширину ряда — инпут компактный\n   (~8ch ≈ 55px, хватает под «100»), цифры по центру, «%» сразу за числом. */\n.thresholds-row {\n  gap: 8px;\n  align-items: center;\n}\n\n.threshold-field {\n  display: flex;\n  align-items: center;\n  gap: 2px;\n  flex: 0 0 auto;\n  min-width: 0;\n}\n\n.threshold-field input {\n  flex: 0 0 8ch;\n  min-width: 0;\n  inline-size: 8ch;\n  padding: 4px 2px;\n  font-size: 13px;\n  text-align: center;\n}\n\n.threshold-unit {\n  flex: 0 0 auto;\n  font-size: 11px;\n  color: #8b8bad;\n}\n\n/* #21: визуальная валидация диапазона 1–100 — чистый CSS, без aria-правок в options.js\n   (пин tests/a11y-options.test.js:340-342 допускает в options.js ровно одно aria-).\n   Контраст рамки: #ef4444 на фоне поля #16213e = 4.22:1 (≥ 3:1, WCAG 1.4.11). */\n#aiCmProactiveLow:invalid,\n#aiCmProactiveMedium:invalid,\n#aiCmProactiveHigh:invalid {\n  border-color: #ef4444;\n  outline: 1px solid #ef4444;\n}\n\n</style>\n</head>\n\n<body>\n  <div class=\"popup\">\n    <!-- Аудит 1.6 (a11y): весь контент попапа — ровно один main landmark -->\n    <main>\n    <div class=\"header\">\n      <span class=\"logo\">📊</span>\n      <h1 data-i18n=\"options_header_title\">AI Context Monitor</h1>\n    </div>\n\n    <!-- v1.20 (M-2): регион статистики объявляет изменения вежливо -->\n    <div class=\"stats\" id=\"stats\" aria-live=\"polite\">\n      <div class=\"stat-row\">\n        <span class=\"stat-label\" data-i18n=\"options_stat_site\">Сайт:</span>\n        <span class=\"stat-value\" id=\"stat-site\">—</span>\n      </div>\n      <div class=\"stat-row\">\n        <span class=\"stat-label\" data-i18n=\"options_stat_model\">Модель:</span>\n        <span class=\"stat-value\" id=\"stat-model\">—</span>\n      </div>\n      <div class=\"stat-row\">\n        <span class=\"stat-label\" data-i18n=\"options_stat_tokens\">Токены:</span>\n        <span class=\"stat-value\" id=\"stat-tokens\">—</span>\n      </div>\n      <div class=\"stat-row\">\n        <span class=\"stat-label\" data-i18n=\"options_stat_limit\">Лимит:</span>\n        <span class=\"stat-value\" id=\"stat-limit\">—</span>\n      </div>\n      <div class=\"stat-row highlight\">\n        <span class=\"stat-label\" data-i18n=\"options_stat_fill\">Заполнение:</span>\n        <span class=\"stat-value\" id=\"stat-percent\">—</span>\n      </div>\n      <div class=\"stat-row\">\n        <span class=\"stat-label\" data-i18n=\"options_stat_source\">Источник:</span>\n        <span class=\"stat-value\" id=\"stat-source\">—</span>\n      </div>\n    </div>\n\n    <!-- v1.20 (M-2): предупреждение об устаревших данных — срочное объявление -->\n    <div class=\"stale-warning\" id=\"stale-warning\" role=\"alert\" style=\"display: none;\"></div>\n\n    <div class=\"section\">\n      <!-- v1.20 (M-1): подпись связана с select через for/id -->\n      <label class=\"label\" for=\"model-select\" data-i18n=\"options_model_label\">Модель:</label>\n      <select id=\"model-select\">\n        <option value=\"auto\" data-i18n=\"options_model_auto\">Автоопределение</option>\n        <optgroup label=\"OpenAI\">\n          <option value=\"gpt-4o\">GPT-4o (128K)</option>\n          <option value=\"gpt-4o-mini\">GPT-4o Mini (128K)</option>\n          <option value=\"gpt-4-turbo\">GPT-4 Turbo (128K)</option>\n          <option value=\"gpt-4\">GPT-4 (8K)</option>\n          <option value=\"gpt-3.5-turbo\">GPT-3.5 Turbo (16K)</option>\n        </optgroup>\n        <optgroup label=\"Google\">\n          <option value=\"gemini-2.5-pro\">Gemini 2.5 Pro (1M)</option>\n          <option value=\"gemini-2.5-flash\">Gemini 2.5 Flash (1M)</option>\n          <option value=\"gemini-1.5-pro\">Gemini 1.5 Pro (2M)</option>\n        </optgroup>\n        <optgroup label=\"DeepSeek\">\n          <option value=\"deepseek-v3\">DeepSeek V3 (128K)</option>\n          <option value=\"deepseek-r1\">DeepSeek R1 (128K)</option>\n        </optgroup>\n      </select>\n    </div>\n\n    <div class=\"section\">\n      <label class=\"label\" data-i18n=\"options_limit_label\">Лимит контекста:</label>\n      <div class=\"input-row\">\n        <!-- v1.20 (M-1): поле без видимой текстовой подписи получает имя доступности -->\n        <input type=\"number\" id=\"custom-limit\" aria-label=\"Пользовательский лимит токенов\" data-i18n-aria-label=\"options_limit_aria\" placeholder=\"Авто\" data-i18n-placeholder=\"options_limit_placeholder\" min=\"1\" max=\"100\" step=\"1\">\n        <button id=\"reset-limit\" class=\"btn-reset\" data-i18n=\"options_limit_auto_btn\">Авто</button>\n      </div>\n      <span class=\"hint\" data-i18n=\"options_limit_hint\">Порог в % от Авто-порога: цвета и % считаются от этого порога. 100% = как Авто. Пусто = Авто</span>\n    </div>\n\n    <div class=\"section checkbox-row\">\n      <input type=\"checkbox\" id=\"show-widget\" checked>\n      <label for=\"show-widget\" data-i18n=\"options_show_widget\">Показывать индикатор на странице</label>\n    </div>\n    <!-- Major-подбатч 1 (аудит #10): проактивные пороги остаются видимыми; редкие\n         настройки (логи, автоэкспорт, API-ключ, экспорт, архивы) свёрнуты в Advanced ниже. -->\n    <!-- v1.20 (M-1): смысловая группа «Проактивные пороги» -->\n    <div class=\"section\" id=\"proactive-section\" role=\"group\" aria-labelledby=\"proactive-legend\">\n      <label class=\"label\" id=\"proactive-legend\" data-i18n=\"options_proactive_legend\">Проактивные пороги</label>\n      <div class=\"checkbox-row\">\n        <input type=\"checkbox\" id=\"aiCmProactive\" checked>\n        <label for=\"aiCmProactive\" data-i18n=\"options_proactive_badge\">Бейдж и уведомления о порогах</label>\n      </div>\n      <div class=\"checkbox-row\">\n        <input type=\"checkbox\" id=\"aiCmProactiveNotify\">\n        <label for=\"aiCmProactiveNotify\" data-i18n=\"options_proactive_notify\">Chrome-уведомления</label>\n      </div>\n      <div class=\"input-row\">\n        <label class=\"label\" for=\"aiCmProactiveLow\" data-i18n=\"options_proactive_levels_label\">Пороги уведомлений и бейджа (1–100, возрастающий порядок):</label>\n      </div>\n      <div class=\"input-row thresholds-row\">\n        <!-- v1.20 (M-1): у трёх числовых полей порога — собственные имена доступности (title сохранён) -->\n        <!-- Minor-B (#21): суффикс единицы «%», inputmode=numeric и общая подсказка о диапазоне 1–100.\n             «%» — языконейтральный символ-токен (как MD/JSON/PDF/TXT): литерал без data-i18n,\n             т.к. пин tests/i18n-locales.test.js:187-204 требует, чтобы ЛЮБОЕ совпадение ru/en\n             (кроме брендовых строк и options_info_separator) было переведено. -->\n        <span class=\"threshold-field\">\n          <input type=\"number\" id=\"aiCmProactiveLow\" aria-label=\"Низкий порог процентов\" data-i18n-aria-label=\"options_proactive_low_aria\" inputmode=\"numeric\" min=\"1\" max=\"100\" step=\"1\" value=\"70\" title=\"Низкий порог — зелёный\" data-i18n-title=\"options_proactive_low_title\" aria-describedby=\"proactive-threshold-msg\">\n          <span class=\"threshold-unit\">%</span>\n        </span>\n        <span class=\"threshold-field\">\n          <input type=\"number\" id=\"aiCmProactiveMedium\" aria-label=\"Средний порог процентов\" data-i18n-aria-label=\"options_proactive_medium_aria\" inputmode=\"numeric\" min=\"1\" max=\"100\" step=\"1\" value=\"85\" title=\"Средний порог — жёлтый\" data-i18n-title=\"options_proactive_medium_title\" aria-describedby=\"proactive-threshold-msg\">\n          <span class=\"threshold-unit\">%</span>\n        </span>\n        <span class=\"threshold-field\">\n          <input type=\"number\" id=\"aiCmProactiveHigh\" aria-label=\"Высокий порог процентов\" data-i18n-aria-label=\"options_proactive_high_aria\" inputmode=\"numeric\" min=\"1\" max=\"100\" step=\"1\" value=\"95\" title=\"Высокий порог — красный\" data-i18n-title=\"options_proactive_high_title\" aria-describedby=\"proactive-threshold-msg\">\n          <span class=\"threshold-unit\">%</span>\n        </span>\n      </div>\n      <!-- v2.0.13: кольцо на странице красится ТЕМИ ЖЕ порогами — подсказка переписана -->\n      <span class=\"hint\" data-i18n=\"options_ring_zones_hint\">Цвет кольца на странице — по тем же порогам: зелёный ниже нижнего, жёлтый между нижним и верхним, красный от верхнего. Пороги также управляют уведомлениями и автоэкспортом.</span>\n      <!-- Minor-B (#21): статическое сообщение о диапазоне и фактическом поведении,\n           связано с тремя полями порогов через aria-describedby (инвалидация — CSS :invalid) -->\n      <span class=\"hint\" id=\"proactive-threshold-msg\" data-i18n=\"options_proactive_hint\">Допустимо 1–100. Каждый порог срабатывает один раз на разговор; при неверном значении берётся 70/85/95</span>\n    </div>\n\n    <!-- Major-подбатч 1 (аудит #10): один свёрнутый блок для редких настроек.\n         Без атрибута open — по умолчанию закрыт. -->\n    <details class=\"section\" id=\"advanced-section\">\n      <summary data-i18n=\"options_advanced_summary\">Дополнительно</summary>\n\n      <div class=\"section checkbox-row\">\n        <input type=\"checkbox\" id=\"debugLogs\">\n        <label for=\"debugLogs\" data-i18n=\"options_debug_logs\">Подробные логи</label>\n      </div>\n\n      <!-- v1.20 (M-1): смысловая группа «Автоэкспорт чатов».\n           Выбран role=\"group\" + aria-labelledby (вместо fieldset/legend): имя группы\n           даёт существующая видимая подпись .label, а раскладка .section не меняется. -->\n      <div class=\"section\" id=\"auto-export-section\" role=\"group\" aria-labelledby=\"auto-export-legend\">\n        <label class=\"label\" id=\"auto-export-legend\" data-i18n=\"options_autoexport_legend\">Автоэкспорт чатов (все поддерживаемые платформы)</label>\n        <div class=\"checkbox-row\">\n          <input type=\"checkbox\" id=\"aiCmAutoExport\">\n          <label for=\"aiCmAutoExport\" data-i18n=\"options_autoexport_enable\">Автоэкспорт при пороге</label>\n        </div>\n        <div class=\"input-row\">\n          <label class=\"label\" for=\"aiCmAutoExportPct\" data-i18n=\"options_autoexport_pct_label\">Порог, %:</label>\n          <input type=\"number\" id=\"aiCmAutoExportPct\" min=\"1\" max=\"100\" step=\"1\" value=\"90\">\n          <select id=\"aiCmAutoExportFmt\" aria-label=\"Формат файла автоэкспорта\" data-i18n-aria-label=\"options_autoexport_fmt_aria\">\n            <option value=\"txt\">txt</option>\n            <option value=\"md\">md</option>\n            <option value=\"json\">json</option>\n          </select>\n        </div>\n        <span class=\"hint\" data-i18n=\"options_autoexport_hint\">Один раз скачивает историю чата при достижении порога</span>\n      </div>\n\n      <div class=\"section\">\n        <label class=\"label\" data-i18n=\"options_byok_label\">Gemini API — точный подсчёт токенов</label>\n        <!-- Major-подбатч 1 (аудит #12): у поля ключа появилась видимая подпись label[for] -->\n        <label class=\"label\" for=\"api-key\" data-i18n=\"options_byok_key_label\">API-ключ Google AI Studio</label>\n        <div class=\"api-key-row\">\n          <input type=\"password\" id=\"api-key\" placeholder=\"Введите API-ключ Google AI Studio\" data-i18n-placeholder=\"options_byok_key_placeholder\" autocomplete=\"off\">\n          <button id=\"toggle-api-key\" class=\"btn-toggle\" type=\"button\" aria-pressed=\"false\" title=\"Показать/скрыть ключ\" data-i18n-title=\"options_byok_toggle_title\">👁</button>\n        </div>\n        <span class=\"hint\" data-i18n=\"options_byok_hint\">Ключ хранится только до перезапуска браузера (chrome.storage.session). После перезапуска введите заново.</span>\n        <div class=\"api-key-row\">\n          <span class=\"hint\" id=\"api-key-status\" role=\"status\" data-i18n=\"options_byok_status_unset\">Ключ: не задан</span>\n          <button id=\"api-key-remove\" class=\"btn-toggle\" type=\"button\" data-i18n=\"options_byok_remove\">Убрать ключ</button>\n        </div>\n      </div>\n\n      <div class=\"section\">\n        <div class=\"checkbox-row\">\n          <input type=\"checkbox\" id=\"exact-count\">\n          <label for=\"exact-count\" data-i18n=\"options_exact_count\">Точный подсчёт токенов через Gemini API</label>\n        </div>\n        <!-- BYOK-синхронизация: ключ живёт в session (стирается при перезапуске), флаг — в local.\n             Текст подставляется из локали в options.js; пустой span == предупреждения нет. -->\n        <span class=\"hint\" id=\"exact-count-warning\" role=\"status\"></span>\n      </div>\n\n      <div class=\"section\">\n        <label class=\"label\" data-i18n=\"options_export_legend\">Экспорт истории</label>\n        <!-- Minor-B (#20): сетка 2×2, короткие визуальные подписи MD/JSON/PDF/TXT, доступное имя у каждой кнопки.\n             Локализованные строки действий («Сохранить .md», «Сохранить .txt (эталон)») переехали в title\n             через data-i18n-title: они остаются переводимыми и не дублируют короткую подпись. -->\n        <div class=\"export-grid\" id=\"export-history-grid\">\n          <button id=\"export-md\" class=\"btn-export btn-export--primary\" disabled title=\"Сохранить .md\" data-i18n-title=\"options_export_md\" aria-label=\"MD — сохранить историю в формате Markdown\" data-i18n-aria-label=\"options_export_md_aria\">MD</button>\n          <button id=\"export-json\" class=\"btn-export\" disabled title=\"Сохранить .json\" data-i18n-title=\"options_export_json\" aria-label=\"JSON — сохранить историю в формате JSON\" data-i18n-aria-label=\"options_export_json_aria\">JSON</button>\n          <button id=\"export-pdf\" class=\"btn-export\" disabled title=\"Сохранить .pdf\" data-i18n-title=\"options_export_pdf\" aria-label=\"PDF — сохранить историю в формате PDF\" data-i18n-aria-label=\"options_export_pdf_aria\">PDF</button>\n          <button id=\"export-txt\" class=\"btn-export\" disabled title=\"Сохранить .txt (эталон)\" data-i18n-title=\"options_export_txt\" aria-label=\"TXT — сохранить историю в формате TXT (эталон)\" data-i18n-aria-label=\"options_export_txt_aria\">TXT</button>\n        </div>\n        <div class=\"export-row\">\n          <button id=\"export-diag\" class=\"btn-export\" data-i18n=\"options_export_diag\">Экспорт диагностики</button>\n        </div>\n        <!-- O-7: единственный тумблер сырого режима экспорта (default OFF = текущее поведение) -->\n        <!-- D-O41 (UX): подсказка тумблера — reasoning автоматически попадает в экспорт, если он\n             есть в источнике; принудительное исключение (OFF) действует, когда reasoning в\n             источнике нет (force-exclude). Строки — ключ options_export_hidden_title (ru/en). -->\n        <div class=\"checkbox-row export-hidden-row\">\n          <input type=\"checkbox\" id=\"aiCmIncludeHiddenInExport\" title=\"Reasoning автоматически включается при наличии в источнике; тумблер принудительно исключает\" data-i18n-title=\"options_export_hidden_title\">\n          <label for=\"aiCmIncludeHiddenInExport\" data-i18n=\"options_export_hidden_label\">Включать reasoning и инъекции соседних расширений (DeepSeek++, Better DeepSeek) в экспорт</label>\n        </div>\n        <span class=\"hint\" data-i18n=\"options_export_hidden_hint\">Выключено: в файл попадают только вопросы и ответы, без размышлений и инъекций соседних расширений (DeepSeek++, Better DeepSeek). Включено: размышления и инъекции попадают в экспорт.</span>\n        <span class=\"hint\" id=\"export-hint\" data-i18n=\"options_open_supported_site\">Откройте поддерживаемый сайт</span>\n      </div>\n\n      <div class=\"section\" id=\"archive-section\">\n        <label class=\"label\" data-i18n=\"options_archive_legend\">Архивы (первый ярус истории)</label>\n        <div class=\"input-row\">\n          <input type=\"file\" id=\"archive-file\" accept=\".json,application/json\" multiple aria-label=\"Выбрать файлы архивов\" data-i18n-aria-label=\"options_archive_file_aria\">\n        </div>\n        <div class=\"input-row\">\n          <button id=\"archive-import\" class=\"btn-export\" type=\"button\" data-i18n=\"options_archive_import\">Импортировать</button>\n          <button id=\"archive-refresh\" class=\"btn-reset\" type=\"button\" data-i18n=\"options_archive_refresh\">Обновить список</button>\n        </div>\n        <span class=\"hint\" data-i18n=\"options_archive_hint\">Локальные экспорты: Gemini Takeout (MyActivity.json), ChatGPT conversations.json,\n          Claude conversations.json, Perplexity threads. Файлы читаются в браузере (FileReader) и никуда не отправляются.\n          Архив — первый ярус: он задаёт авторитетный пол истории и даёт терминальную полноту archive-complete.</span>\n        <!-- v1.20 (M-2): статус архива — вежливый live-region -->\n        <div class=\"hint archive-status\" id=\"archive-status\" role=\"status\"></div>\n        <div class=\"archive-list\" id=\"archive-list\"></div>\n      </div>\n    </details>\n\n    <div class=\"footer\">\n      <span class=\"version\"></span>\n      <a href=\"privacy/privacy.html\" id=\"privacy-link\" target=\"_blank\" rel=\"noopener\"><span data-i18n=\"options_footer_privacy\">Политика конфиденциальности</span></a>\n      <!-- v1.19 (M-6): ссылка на руководство docs/index.html (входит в пакет расширения) -->\n      <a href=\"../docs/index.html\" id=\"help-link\" target=\"_blank\" rel=\"noopener\"><span data-i18n=\"options_footer_help\">Помощь</span></a>\n    </div>\n    </main>\n  </div>\n</body>\n<script>\n// Р—Р°РіР»СѓС€РєРё РґР»СЏ Р»РѕРіРіРµСЂР° Рё РѕС‚Р»Р°РґРѕС‡РЅС‹С… С„СѓРЅРєС†РёР№ СЂР°СЃС€РёСЂРµРЅРёСЏ\nif (typeof window.debugLog === 'undefined') {\n  window.debugLog = function(...args) {\n    console.log('[AI CM DEBUG]', ...args);\n  };\n}\nif (typeof window.__aiCmSetDebugLogs === 'undefined') {\n  window.__aiCmSetDebugLogs = function() {};\n}\n\n// Р­РјСѓР»СЏС‚РѕСЂ Chrome API РґР»СЏ Pake / Tauri\n(function() {\n  window.chrome = window.chrome || {};\n\n  var messageListeners = [];\n  var storageListeners = [];\n\n  var onMessageStub = {\n    addListener: function(fn) {\n      if (typeof fn === 'function' && !messageListeners.includes(fn)) {\n        messageListeners.push(fn);\n      }\n    },\n    removeListener: function(fn) {\n      messageListeners = messageListeners.filter(function(l) { return l !== fn; });\n    },\n    hasListener: function(fn) { return messageListeners.includes(fn); }\n  };\n\n  var onChangedStub = {\n    addListener: function(fn) {\n      if (typeof fn === 'function' && !storageListeners.includes(fn)) {\n        storageListeners.push(fn);\n      }\n    },\n    removeListener: function(fn) {\n      storageListeners = storageListeners.filter(function(l) { return l !== fn; });\n    }\n  };\n\n  function createEventStub() {\n    return {\n      addListener: function() {},\n      removeListener: function() {},\n      hasListener: function() { return false; },\n      dispatch: function() {}\n    };\n  }\n\n  // Runtime API\n  window.chrome.runtime = window.chrome.runtime || {};\n  window.chrome.runtime.id = 'pake-ai-context-monitor';\n  window.chrome.runtime.getURL = window.chrome.runtime.getURL || function(path) { return path; };\n  window.chrome.runtime.getManifest = window.chrome.runtime.getManifest || function() {\n    return { version: '2.0.40', manifest_version: 3, name: 'AI Context Monitor' };\n  };\n  window.chrome.runtime.onMessage = onMessageStub;\n  window.chrome.runtime.onInstalled = createEventStub();\n  window.chrome.runtime.onStartup = createEventStub();\n  window.chrome.runtime.lastError = null;\n\n  // РћС‚РїСЂР°РІРєР° СЃРѕРѕР±С‰РµРЅРёР№ РјРµР¶РґСѓ С„РѕРЅРѕРІС‹Рј СЃРµСЂРІРёСЃРѕРј Рё СЃС‚СЂР°РЅРёС†РµР№\n  window.chrome.runtime.sendMessage = function(message, callback) {\n    return new Promise(function(resolve) {\n      var responded = false;\n      var sender = { id: 'pake-ai-context-monitor', tab: { id: 1 } };\n\n      var sendResponse = function(response) {\n        if (!responded) {\n          responded = true;\n          if (callback) callback(response);\n          resolve(response);\n        }\n      };\n\n      var listeners = messageListeners.slice();\n      listeners.forEach(function(listener) {\n        try {\n          listener(message, sender, sendResponse);\n        } catch (e) {\n          console.error('[AI CM Polyfill] РћС€РёР±РєР° РѕР±СЂР°Р±РѕС‚С‡РёРєР°:', e);\n        }\n      });\n\n      if (!responded) {\n        setTimeout(function() {\n          if (!responded) {\n            responded = true;\n            if (callback) callback();\n            resolve();\n          }\n        }, 10);\n      }\n    });\n  };\n\n  // Storage API\n  window.chrome.storage = window.chrome.storage || {};\n  window.chrome.storage.onChanged = onChangedStub;\n\n  // РќР°СЃС‚СЂРѕР№РєРё РѕС‚РєСЂС‹РІР°СЋС‚СЃСЏ РІ iframe РїРѕРІРµСЂС… СЃС‚СЂР°РЅРёС†С‹ (Р°РЅР°Р»РѕРі РёРєРѕРЅРєРё СЂР°СЃС€РёСЂРµРЅРёСЏ).\n  // Р—Р°РїРёСЃСЊ РёР· iframe РґРѕР»Р¶РЅР° СЃСЂР°Р·Сѓ РґРѕС…РѕРґРёС‚СЊ РґРѕ content.js РІ СЂРѕРґРёС‚РµР»СЊСЃРєРѕРј РѕРєРЅРµ.\n  var IS_OPTIONS_FRAME = (typeof window !== 'undefined') && window.__AI_CM_OPTIONS_FRAME__ === true;\n\n  function notifyStorage(changes, area) {\n    storageListeners.forEach(function(listener) {\n      try { listener(changes, area); } catch (e) {}\n    });\n    if (IS_OPTIONS_FRAME) {\n      try { parent.postMessage({ __aiCmStorage: 1, changes: changes, area: area }, '*'); } catch (e) {}\n    }\n  }\n\n  function readStored(store, key) {\n    var raw = store.getItem('ai_cm_' + key);\n    if (raw === null) return undefined;\n    try { return JSON.parse(raw); } catch (e) { return raw; }\n  }\n\n  if (!window.chrome.storage.local) {\n    window.chrome.storage.local = {\n      get: function(keys, callback) {\n        var res = {};\n        var defaults = {\n          showWidget: true,\n          showBadge: true,\n          enabled: true\n          // ai_cm_safe_pct_<site> РќР• Р·Р°РґР°С‘Рј: РєР°Рє Рё РІ Chrome, РїРѕСЂРѕРі РїРѕ СѓРјРѕР»С‡Р°РЅРёСЋ\n          // РЅРµ Р·Р°РґР°РЅ (100% РѕРєРЅР°), РїРѕРєР° РїРѕР»СЊР·РѕРІР°С‚РµР»СЊ СЃР°Рј РЅРµ РІС‹СЃС‚Р°РІРёС‚ РµРіРѕ РІ РїР°РЅРµР»Рё.\n        };\n\n        var keysArr = Array.isArray(keys) ? keys : (typeof keys === 'object' && keys !== null ? Object.keys(keys) : [keys]);\n\n        keysArr.forEach(function(k) {\n          var val = readStored(localStorage, k);\n          if (val !== undefined) {\n            res[k] = val;\n          } else {\n            res[k] = defaults[k] !== undefined ? defaults[k] : true;\n          }\n        });\n\n        if (typeof keys === 'object' && !Array.isArray(keys) && keys !== null) {\n          Object.keys(keys).forEach(function(k) {\n            if (res[k] === undefined) res[k] = keys[k];\n          });\n        }\n\n        if (callback) callback(res);\n        return Promise.resolve(res);\n      },\n      set: function(obj, callback) {\n        var changes = {};\n        if (obj && typeof obj === 'object') {\n          Object.keys(obj).forEach(function(k) {\n            var oldVal = readStored(localStorage, k);\n            var newVal = obj[k];\n            localStorage.setItem('ai_cm_' + k, typeof newVal === 'object' ? JSON.stringify(newVal) : newVal);\n            changes[k] = { oldValue: oldVal, newValue: newVal };\n          });\n        }\n        notifyStorage(changes, 'local');\n        if (callback) callback();\n        return Promise.resolve();\n      },\n      remove: function(keys, callback) {\n        var arr = Array.isArray(keys) ? keys : [keys];\n        var changes = {};\n        arr.forEach(function(k) {\n          var oldVal = readStored(localStorage, k);\n          if (oldVal !== undefined) {\n            localStorage.removeItem('ai_cm_' + k);\n            changes[k] = { oldValue: oldVal, newValue: undefined };\n          }\n        });\n        if (Object.keys(changes).length) notifyStorage(changes, 'local');\n        if (callback) callback();\n        return Promise.resolve();\n      },\n      getKeys: function(callback) {\n        var keys = [];\n        try {\n          for (var i = 0; i < localStorage.length; i++) {\n            var k = localStorage.key(i);\n            if (k && k.indexOf('ai_cm_') === 0) keys.push(k.slice(6));\n          }\n        } catch (e) {}\n        if (callback) callback(keys);\n        return Promise.resolve(keys);\n      }\n    };\n  }\n\n  // session: РєР°Рє РІ Chrome вЂ” РѕС‚РґРµР»СЊРЅРѕРµ С…СЂР°РЅРёР»РёС‰Рµ (BYOK-РєР»СЋС‡Рё РЅРµ РґРѕР»Р¶РЅС‹ РїРѕРїР°РґР°С‚СЊ РІ local)\n  if (!window.chrome.storage.session) {\n    window.chrome.storage.session = {\n      get: function(keys, callback) {\n        var res = {};\n        var keysArr = Array.isArray(keys) ? keys : (typeof keys === 'object' && keys !== null ? Object.keys(keys) : [keys]);\n        keysArr.forEach(function(k) {\n          var val = readStored(sessionStorage, 'sess_' + k);\n          if (val !== undefined) res[k] = val;\n        });\n        if (callback) callback(res);\n        return Promise.resolve(res);\n      },\n      set: function(obj, callback) {\n        var changes = {};\n        if (obj && typeof obj === 'object') {\n          Object.keys(obj).forEach(function(k) {\n            var oldVal = readStored(sessionStorage, 'sess_' + k);\n            var newVal = obj[k];\n            sessionStorage.setItem('ai_cm_sess_' + k, typeof newVal === 'object' ? JSON.stringify(newVal) : newVal);\n            changes[k] = { oldValue: oldVal, newValue: newVal };\n          });\n        }\n        notifyStorage(changes, 'session');\n        if (callback) callback();\n        return Promise.resolve();\n      },\n      remove: function(keys, callback) {\n        var arr = Array.isArray(keys) ? keys : [keys];\n        var changes = {};\n        arr.forEach(function(k) {\n          var oldVal = readStored(sessionStorage, 'sess_' + k);\n          if (oldVal !== undefined) {\n            sessionStorage.removeItem('ai_cm_sess_' + k);\n            changes[k] = { oldValue: oldVal, newValue: undefined };\n          }\n        });\n        if (Object.keys(changes).length) notifyStorage(changes, 'session');\n        if (callback) callback();\n        return Promise.resolve();\n      }\n    };\n  }\n\n  window.chrome.storage.sync = window.chrome.storage.local;\n\n  if (!IS_OPTIONS_FRAME) {\n    try {\n      window.addEventListener('message', function(ev) {\n        var d = ev && ev.data;\n        if (!d || d.__aiCmStorage !== 1 || !d.changes) return;\n        storageListeners.forEach(function(listener) {\n          try { listener(d.changes, d.area || 'local'); } catch (e) {}\n        });\n      });\n    } catch (e) {}\n  }\n\n  // Tabs API\n  window.chrome.tabs = window.chrome.tabs || {};\n  window.chrome.tabs.query = function(q, cb) {\n    var href = (typeof location !== 'undefined' ? location.href : '');\n    var title = (typeof document !== 'undefined' ? document.title : '');\n    // РќР°СЃС‚СЂРѕР№РєРё Р¶РёРІСѓС‚ РІ srcdoc-iframe: Р°РєС‚РёРІРЅР°СЏ \"РІРєР»Р°РґРєР°\" вЂ” СЌС‚Рѕ СЂРѕРґРёС‚РµР»СЊСЃРєР°СЏ СЃС‚СЂР°РЅРёС†Р°.\n    if (IS_OPTIONS_FRAME) {\n      try { if (parent && parent.location) href = parent.location.href; } catch (e) {}\n      try { if (parent && parent.document) title = parent.document.title; } catch (e) {}\n    }\n    var tab = { id: 1, active: true, currentWindow: true, url: href, title: title };\n    if (cb) cb([tab]);\n    return Promise.resolve([tab]);\n  };\n  window.chrome.tabs.sendMessage = function(tabId, message, callback) {\n    return window.chrome.runtime.sendMessage(message, callback);\n  };\n  window.chrome.tabs.create = function(opts, cb) {\n    try { if (opts && opts.url) window.open(opts.url, '_blank'); } catch (e) {}\n    if (cb) cb();\n  };\n  window.chrome.tabs.onUpdated = createEventStub();\n  window.chrome.tabs.onActivated = createEventStub();\n\n  window.chrome.action = window.chrome.action || {\n    setIcon: function() {}, setBadgeText: function() {}, setBadgeBackgroundColor: function() {}\n  };\n})();\n\n\n</script>\n<script>\n(() => {\n  var __getOwnPropNames = Object.getOwnPropertyNames;\n  var __require = /* @__PURE__ */ ((x) => typeof require !== \"undefined\" ? require : typeof Proxy !== \"undefined\" ? new Proxy(x, {\n    get: (a, b) => (typeof require !== \"undefined\" ? require : a)[b]\n  }) : x)(function(x) {\n    if (typeof require !== \"undefined\") return require.apply(this, arguments);\n    throw Error('Dynamic require of \"' + x + '\" is not supported');\n  });\n  var __commonJS = (cb, mod) => function __require2() {\n    try {\n      return mod || (0, cb[__getOwnPropNames(cb)[0]])((mod = { exports: {} }).exports, mod), mod.exports;\n    } catch (e) {\n      throw mod = 0, e;\n    }\n  };\n\n  // entry-options.js\n  var require_entry_options = __commonJS({\n    \"entry-options.js\"(exports, module) {\n      (function() {\n        \"use strict\";\n        var BINDINGS = [\n          { key: \"data-i18n\", target: \"textContent\" },\n          { key: \"data-i18n-placeholder\", target: \"placeholder\" },\n          { key: \"data-i18n-title\", target: \"title\" },\n          { key: \"data-i18n-aria-label\", target: \"aria-label\" },\n          // M-4.4: alt скриншотов руководства и карточек документации.\n          { key: \"data-i18n-alt\", target: \"alt\" }\n        ];\n        function aiCmI18nAvailable() {\n          return typeof chrome !== \"undefined\" && !!chrome.i18n && typeof chrome.i18n.getMessage === \"function\";\n        }\n        function aiCmI18nMessage2(key) {\n          try {\n            if (aiCmI18nAvailable()) {\n              return chrome.i18n.getMessage(key) || \"\";\n            }\n          } catch (eMessage) {\n            return \"\";\n          }\n          return \"\";\n        }\n        function aiCmI18nApply(root) {\n          var scope = root || (typeof document !== \"undefined\" ? document : null);\n          if (!scope || typeof scope.querySelectorAll !== \"function\") return 0;\n          var applied = 0;\n          for (var i = 0; i < BINDINGS.length; i++) {\n            var binding = BINDINGS[i];\n            var nodes = scope.querySelectorAll(\"[\" + binding.key + \"]\");\n            for (var j = 0; j < nodes.length; j++) {\n              var message = aiCmI18nMessage2(nodes[j].getAttribute(binding.key));\n              if (!message) continue;\n              if (binding.target === \"textContent\") nodes[j].textContent = message;\n              else nodes[j].setAttribute(binding.target, message);\n              applied++;\n            }\n          }\n          return applied;\n        }\n        function aiCmI18nBoot() {\n          if (!aiCmI18nAvailable()) return;\n          aiCmI18nApply(document);\n        }\n        if (typeof document !== \"undefined\") {\n          if (document.readyState === \"loading\") {\n            document.addEventListener(\"DOMContentLoaded\", aiCmI18nBoot);\n          } else {\n            aiCmI18nBoot();\n          }\n        }\n        if (typeof module !== \"undefined\" && module.exports) {\n          module.exports = {\n            aiCmI18nApply,\n            aiCmI18nMessage: aiCmI18nMessage2,\n            aiCmI18nAvailable,\n            bindings: BINDINGS\n          };\n        }\n      })();\n      (function() {\n        var CHATGPT_DEFAULT_MODEL = \"gpt-4o\";\n        function getConvIdFromPath(pathname) {\n          try {\n            var m = String(pathname || \"\").match(/\\/c\\/([A-Za-z0-9_-]+)/);\n            return m ? m[1] : \"\";\n          } catch (e) {\n            return \"\";\n          }\n        }\n        function shouldResetChatConversation(prevId, newId) {\n          if (!newId) return false;\n          return prevId !== newId;\n        }\n        function shouldResetConversationOnNav(prevId, newId) {\n          var p = prevId == null ? \"\" : String(prevId);\n          var n = newId == null ? \"\" : String(newId);\n          return p !== n;\n        }\n        function sanitizeChatGPTText(s) {\n          if (typeof s !== \"string\") return s;\n          return String(s).replace(/\\uE200entity\\uE202([^\\uE200\\uE201]*?)\\uE201/g, function(m, payload) {\n            try {\n              var arr = JSON.parse(payload);\n              if (Array.isArray(arr) && arr.length > 1 && typeof arr[1] === \"string\" && arr[1]) return arr[1];\n            } catch (e) {\n              swallowSoft(e, \"chatgpt-utils:sanitizeChatGPTText-entity\");\n            }\n            try {\n              var mt = String(payload).match(/\"([^\"]+)\"/g);\n              if (mt && mt.length > 1) {\n                var v = mt[1].replace(/^\"|\"$/g, \"\");\n                if (v) return v;\n              }\n            } catch (e2) {\n            }\n            return \"\";\n          }).replace(/\\uE200(?:cite|image_group)\\uE202[^\\uE200\\uE201]*?\\uE201/g, \"\").replace(/[\\uE000-\\uF8FF]/g, \"\").replace(/\\[entity\\](?:\\[[^\\]]*\\])+/g, \"\").replace(/\\[entity\\]/g, \"\").replace(/\\[cite:[^\\]]*\\]/g, \"\").replace(/[ \\t]{2,}/g, \" \");\n        }\n        function orderChatGPTMapping(mapping) {\n          var keys = Object.keys(mapping || {});\n          if (!keys.length) return [];\n          var byId = {};\n          for (var i = 0; i < keys.length; i++) {\n            var k = keys[i];\n            var n = mapping[k];\n            var nid = n && n.id != null ? String(n.id) : k;\n            byId[nid] = k;\n          }\n          var hasParent = false;\n          var hasChildren = false;\n          for (var p = 0; p < keys.length; p++) {\n            var np = mapping[keys[p]];\n            if (np && np.parent !== void 0) hasParent = true;\n            if (np && Array.isArray(np.children) && np.children.length) hasChildren = true;\n          }\n          var childrenOf = {};\n          for (var c0 = 0; c0 < keys.length; c0++) childrenOf[keys[c0]] = [];\n          var roots = [];\n          for (var m = 0; m < keys.length; m++) {\n            var kk = keys[m];\n            var nn = mapping[kk];\n            var pid = nn && nn.parent != null ? String(nn.parent) : null;\n            var pk = pid ? byId[pid] || pid : null;\n            if (pk) {\n              if (childrenOf[pk]) childrenOf[pk].push(kk);\n            } else if (hasParent) {\n              roots.push(kk);\n            }\n          }\n          if (!hasParent) {\n            if (hasChildren) {\n              var isChild = {};\n              for (var c1 = 0; c1 < keys.length; c1++) {\n                var n1 = mapping[keys[c1]];\n                if (n1 && Array.isArray(n1.children)) {\n                  for (var c2 = 0; c2 < n1.children.length; c2++) {\n                    var cid = String(n1.children[c2]);\n                    isChild[byId[cid] || cid] = true;\n                  }\n                }\n              }\n              roots = keys.filter(function(k2) {\n                return !isChild[k2];\n              });\n              if (!roots.length) roots = [keys[0]];\n            } else {\n              return keys.slice().sort(function(a, b) {\n                var ca = mapping[a] && mapping[a].message && mapping[a].message.create_time || 0;\n                var cb = mapping[b] && mapping[b].message && mapping[b].message.create_time || 0;\n                return ca - cb;\n              });\n            }\n          }\n          roots.sort(function(a, b) {\n            var ca = mapping[a] && mapping[a].message && mapping[a].message.create_time || 0;\n            var cb = mapping[b] && mapping[b].message && mapping[b].message.create_time || 0;\n            return ca - cb;\n          });\n          var out = [];\n          var visited = {};\n          function walk(k2) {\n            if (!k2 || visited[k2] || mapping[k2] === void 0) return;\n            visited[k2] = true;\n            out.push(k2);\n            var ch = childrenOf[k2] || [];\n            if (mapping[k2] && Array.isArray(mapping[k2].children) && mapping[k2].children.length) {\n              ch = mapping[k2].children.map(function(cid2) {\n                return byId[String(cid2)] || String(cid2);\n              });\n            }\n            for (var w = 0; w < ch.length; w++) walk(ch[w]);\n          }\n          for (var r = 0; r < roots.length; r++) walk(roots[r]);\n          for (var u = 0; u < keys.length; u++) if (!visited[keys[u]]) out.push(keys[u]);\n          return out;\n        }\n        function parseChatGPTConversation(json) {\n          var messages = [];\n          var model = \"\";\n          var tokens = 0;\n          try {\n            if (!json || typeof json !== \"object\") {\n              return { messages: [], model: CHATGPT_DEFAULT_MODEL, tokens: 0 };\n            }\n            if (json.model_slug) model = json.model_slug;\n            if (typeof json.tokens === \"number\") tokens = json.tokens;\n            var mapping = json.mapping || {};\n            var keys = orderChatGPTMapping(mapping);\n            for (var i = 0; i < keys.length; i++) {\n              var node = mapping[keys[i]];\n              var msg = node && node.message;\n              if (!msg || !msg.content) continue;\n              var role = msg.author && msg.author.role;\n              if (role === \"system\" || role === \"tool\") continue;\n              var parts = msg.content.parts || [];\n              var contentPieces = [];\n              for (var j = 0; j < parts.length; j++) {\n                if (typeof parts[j] === \"string\") {\n                  contentPieces.push(sanitizeChatGPTText(parts[j]));\n                } else if (parts[j] && typeof parts[j] === \"object\" && typeof parts[j].text === \"string\") {\n                  contentPieces.push(sanitizeChatGPTText(parts[j].text));\n                }\n              }\n              var content = contentPieces.join(\"\\n\").trim();\n              if (content) {\n                messages.push({\n                  role: role === \"assistant\" ? \"assistant\" : \"user\",\n                  content\n                });\n              }\n            }\n          } catch (e) {\n            swallowSoft(e, \"chatgpt-utils:parseChatGPTConversation\");\n          }\n          if (!model) model = CHATGPT_DEFAULT_MODEL;\n          return { messages, model, tokens };\n        }\n        var api = {\n          getConvIdFromPath,\n          shouldResetChatConversation,\n          shouldResetConversationOnNav,\n          orderChatGPTMapping,\n          sanitizeChatGPTText,\n          parseChatGPTConversation\n        };\n        if (typeof window !== \"undefined\") {\n          window.ChatGPTConversationParser = api;\n        }\n        if (typeof module !== \"undefined\" && module.exports) {\n          module.exports = api;\n        }\n      })();\n      (function() {\n        function parsePerplexityThread(json) {\n          function getTrim(obj, name) {\n            if (!obj || typeof obj !== \"object\") return void 0;\n            var keys = Object.keys(obj);\n            for (var i2 = 0; i2 < keys.length; i2++) {\n              if (keys[i2].trim() === name) return obj[keys[i2]];\n            }\n            return void 0;\n          }\n          var model = \"\";\n          var pieces = [];\n          var ids = [];\n          var count = 0;\n          var lastText = \"\";\n          var messages = [];\n          try {\n            var entries = getTrim(json, \"entries\");\n            if (!Array.isArray(entries)) entries = [];\n            for (var i = 0; i < entries.length; i++) {\n              var entry = entries[i];\n              if (!entry || typeof entry !== \"object\") continue;\n              var queryStr = getTrim(entry, \"query_str\") || \"\";\n              var displayModel = getTrim(entry, \"display_model\") || \"\";\n              var userSelectedModel = getTrim(entry, \"user_selected_model\") || \"\";\n              var threadUrlSlug = getTrim(entry, \"thread_url_slug\") || \"\";\n              var entryModel = displayModel || userSelectedModel || \"\";\n              if (entryModel) model = entryModel;\n              var entryId = threadUrlSlug || \"entry\" + i;\n              if (queryStr && typeof queryStr === \"string\" && queryStr.trim()) {\n                pieces.push(queryStr.trim());\n                ids.push(entryId + \"_user\");\n                count++;\n                lastText = queryStr.trim();\n                messages.push({ role: \"user\", text: queryStr.trim() });\n              }\n              var blocks = getTrim(entry, \"blocks\");\n              var assistantPushed = false;\n              if (Array.isArray(blocks)) {\n                var assistantTextParts = [];\n                for (var j = 0; j < blocks.length; j++) {\n                  var block = blocks[j];\n                  if (!block || typeof block !== \"object\") continue;\n                  var wfBlock = getTrim(block, \"workflow_block\");\n                  if (wfBlock && typeof wfBlock === \"object\") {\n                    var steps = getTrim(wfBlock, \"steps\");\n                    if (Array.isArray(steps)) {\n                      for (var s = 0; s < steps.length; s++) {\n                        var step = steps[s];\n                        if (!step || typeof step !== \"object\") continue;\n                        var items = getTrim(step, \"items\");\n                        if (Array.isArray(items)) {\n                          for (var it = 0; it < items.length; it++) {\n                            var item = items[it];\n                            if (!item || typeof item !== \"object\") continue;\n                            if (getTrim(item, \"type\") === \"WORKFLOW_ITEM_TEXT\") {\n                              var payload = getTrim(item, \"payload\");\n                              if (payload && typeof payload === \"object\") {\n                                var textPayload = getTrim(payload, \"text_payload\");\n                                if (textPayload && typeof textPayload === \"object\") {\n                                  var text = getTrim(textPayload, \"text\");\n                                  if (typeof text === \"string\" && text.trim()) {\n                                    assistantTextParts.push(text.trim());\n                                  }\n                                }\n                              }\n                            }\n                          }\n                        }\n                      }\n                    }\n                  }\n                  var wrBlock = getTrim(block, \"web_result_block\");\n                  if (wrBlock && typeof wrBlock === \"object\") {\n                    var webResults = getTrim(wrBlock, \"web_results\");\n                    if (Array.isArray(webResults)) {\n                      for (var w = 0; w < webResults.length; w++) {\n                        var wr = webResults[w];\n                        if (!wr || typeof wr !== \"object\") continue;\n                        var wrName = getTrim(wr, \"name\") || \"\";\n                        var wrSnippet = getTrim(wr, \"snippet\") || \"\";\n                        if (wrName || wrSnippet) {\n                          var wrText = (wrName ? wrName + \": \" : \"\") + (wrSnippet || \"\");\n                          if (wrText.trim()) assistantTextParts.push(\"[source] \" + wrText.trim());\n                        }\n                      }\n                    }\n                  }\n                }\n                if (assistantTextParts.length > 0) {\n                  var assistantText = assistantTextParts.join(\"\\n\").trim();\n                  if (assistantText) {\n                    pieces.push(assistantText);\n                    ids.push(entryId + \"_assistant\");\n                    count++;\n                    lastText = assistantText;\n                    messages.push({ role: \"assistant\", text: assistantText });\n                    assistantPushed = true;\n                  }\n                }\n              }\n              if (!assistantPushed) {\n                var entryText = getTrim(entry, \"text\");\n                if (typeof entryText === \"string\" && entryText.trim()) {\n                  var stepsJson = null;\n                  try {\n                    stepsJson = JSON.parse(entryText);\n                  } catch (e1) {\n                    stepsJson = null;\n                  }\n                  var stepItems = null;\n                  if (Array.isArray(stepsJson)) stepItems = stepsJson;\n                  else if (stepsJson && typeof stepsJson === \"object\") {\n                    stepItems = Object.keys(stepsJson).map(function(k) {\n                      return stepsJson[k];\n                    });\n                  }\n                  var answerText = \"\";\n                  if (stepItems) {\n                    for (var si = 0; si < stepItems.length; si++) {\n                      var stepItem = stepItems[si];\n                      if (!stepItem || typeof stepItem !== \"object\") continue;\n                      if (getTrim(stepItem, \"step_type\") !== \"FINAL\") continue;\n                      var stepContent = getTrim(stepItem, \"content\");\n                      var contentObj = null;\n                      if (typeof stepContent === \"string\") {\n                        try {\n                          contentObj = JSON.parse(stepContent);\n                        } catch (e2) {\n                          contentObj = null;\n                        }\n                      } else if (stepContent && typeof stepContent === \"object\") {\n                        contentObj = stepContent;\n                      }\n                      if (!contentObj) continue;\n                      var answerRaw = getTrim(contentObj, \"answer\");\n                      if (typeof answerRaw === \"string\" && answerRaw.trim()) {\n                        var answerObj = null;\n                        try {\n                          answerObj = JSON.parse(answerRaw);\n                        } catch (e3) {\n                          answerObj = null;\n                        }\n                        if (answerObj && typeof answerObj === \"object\") {\n                          var answerField = getTrim(answerObj, \"answer\");\n                          if (typeof answerField === \"string\") answerText = answerField;\n                        } else if (typeof answerObj === \"string\") {\n                          answerText = answerObj;\n                        }\n                      } else if (answerRaw && typeof answerRaw === \"object\") {\n                        var answerField2 = getTrim(answerRaw, \"answer\");\n                        if (typeof answerField2 === \"string\") answerText = answerField2;\n                      }\n                      if (answerText) break;\n                    }\n                  }\n                  answerText = answerText.trim();\n                  if (answerText) {\n                    pieces.push(answerText);\n                    ids.push(entryId + \"_assistant\");\n                    count++;\n                    lastText = answerText;\n                    messages.push({ role: \"assistant\", text: answerText });\n                  }\n                }\n              }\n            }\n          } catch (e) {\n            swallowSoft(e, \"perplexity-utils:parsePerplexityThread\");\n          }\n          return {\n            text: pieces.join(\"\\n\"),\n            count,\n            lastText,\n            modelSlug: model,\n            pieces,\n            ids,\n            messages,\n            model\n          };\n        }\n        function stripPerplexityHistoryTruncation(urlStr) {\n          var src = String(urlStr || \"\");\n          if (!src) return src;\n          var hash = \"\";\n          var h = src.indexOf(\"#\");\n          if (h !== -1) {\n            hash = src.slice(h);\n            src = src.slice(0, h);\n          }\n          var q = src.indexOf(\"?\");\n          if (q === -1) return src + hash;\n          var base = src.slice(0, q);\n          var parts = src.slice(q + 1).split(\"&\");\n          var kept = [];\n          for (var i = 0; i < parts.length; i++) {\n            if (!parts[i]) continue;\n            var name = parts[i].split(\"=\")[0];\n            if (name === \"limit\" || name === \"offset\" || name === \"from_first\") continue;\n            kept.push(parts[i]);\n          }\n          return base + (kept.length ? \"?\" + kept.join(\"&\") : \"\") + hash;\n        }\n        if (typeof window !== \"undefined\") {\n          window.parsePerplexityThread = parsePerplexityThread;\n          window.stripPerplexityHistoryTruncation = stripPerplexityHistoryTruncation;\n        }\n        if (typeof module !== \"undefined\" && module.exports) {\n          module.exports = {\n            parsePerplexityThread,\n            stripPerplexityHistoryTruncation\n          };\n        }\n      })();\n      (function() {\n        \"use strict\";\n        var ARCHIVE_KEY_PREFIX = \"aiCmArchive:\";\n        var CONV_SOURCE_KEY_PREFIX = \"aiCmConvSource:\";\n        var SOURCE_ARCHIVE = \"archive\";\n        var SOURCE_LIVE = \"live\";\n        var ARCHIVE_RECORD_VERSION = 1;\n        var FORMATS = {\n          GEMINI_TAKEOUT: \"gemini-takeout\",\n          CHATGPT_CONVERSATIONS: \"chatgpt-conversations\",\n          CLAUDE_CONVERSATIONS: \"claude-conversations\",\n          PERPLEXITY_THREADS: \"perplexity-threads\"\n        };\n        var SERVICE_BY_FORMAT = {};\n        SERVICE_BY_FORMAT[FORMATS.GEMINI_TAKEOUT] = \"gemini\";\n        SERVICE_BY_FORMAT[FORMATS.CHATGPT_CONVERSATIONS] = \"chatgpt\";\n        SERVICE_BY_FORMAT[FORMATS.CLAUDE_CONVERSATIONS] = \"claude\";\n        SERVICE_BY_FORMAT[FORMATS.PERPLEXITY_THREADS] = \"perplexity\";\n        var FORMAT_LABEL = {};\n        FORMAT_LABEL[FORMATS.GEMINI_TAKEOUT] = \"Gemini Takeout\";\n        FORMAT_LABEL[FORMATS.CHATGPT_CONVERSATIONS] = \"ChatGPT conversations.json\";\n        FORMAT_LABEL[FORMATS.CLAUDE_CONVERSATIONS] = \"Claude export\";\n        FORMAT_LABEL[FORMATS.PERPLEXITY_THREADS] = \"Perplexity threads\";\n        var MAX_CONVERSATION_BYTES = 2 * 1024 * 1024;\n        var MAX_TOTAL_BYTES = 8 * 1024 * 1024;\n        var MAX_MESSAGES_PER_CONVERSATION = 5e3;\n        var MAX_ARCHIVE_SIZE = 50 * 1024 * 1024;\n        function archiveStorageKey(convId) {\n          return ARCHIVE_KEY_PREFIX + String(convId == null ? \"\" : convId);\n        }\n        function convSourceStorageKey(convId) {\n          return CONV_SOURCE_KEY_PREFIX + String(convId == null ? \"\" : convId);\n        }\n        function normalizeText(v) {\n          if (typeof v !== \"string\") return \"\";\n          return v.replace(/\\r\\n?/g, \"\\n\").replace(/[ \\t]+$/gm, \"\").trim();\n        }\n        function collapseWs(v) {\n          return String(v == null ? \"\" : v).replace(/\\s+/g, \" \").trim();\n        }\n        function hash6(s) {\n          var str = String(s == null ? \"\" : s);\n          var h = 5381;\n          for (var i = 0; i < str.length; i++) {\n            h = (h << 5) + h + str.charCodeAt(i) | 0;\n          }\n          var hex = (h >>> 0).toString(16);\n          while (hex.length < 6) hex = \"0\" + hex;\n          return hex.slice(-6);\n        }\n        function normalizeRole(role) {\n          var r = collapseWs(role).toLowerCase();\n          if (r === \"user\" || r === \"human\" || r === \"me\" || r === \"prompt\" || r === \"you\") return \"user\";\n          if (r === \"assistant\" || r === \"model\" || r === \"bot\" || r === \"ai\" || r === \"gpt\" || r === \"gemini\" || r === \"claude\") return \"assistant\";\n          return \"\";\n        }\n        function toMs(v) {\n          if (typeof v === \"number\" && isFinite(v)) {\n            return v > 1e12 ? Math.round(v) : Math.round(v * 1e3);\n          }\n          if (typeof v === \"string\" && v) {\n            var t = Date.parse(v);\n            if (!isNaN(t)) return t;\n            var trimmed = v.replace(/(\\.\\d{3})\\d+/, \"$1\");\n            if (trimmed !== v) {\n              t = Date.parse(trimmed);\n              if (!isNaN(t)) return t;\n            }\n          }\n          return 0;\n        }\n        function arrayifyConversations(json) {\n          if (Array.isArray(json)) return json;\n          if (!json || typeof json !== \"object\") return [];\n          if (Array.isArray(json.conversations)) return json.conversations;\n          return [json];\n        }\n        function resolveOrderChatGPTMapping(deps) {\n          if (deps && typeof deps.orderChatGPTMapping === \"function\") return deps.orderChatGPTMapping;\n          try {\n            if (typeof __require === \"function\") {\n              var m = __require(\"./chatgpt-conversation-parser.js\");\n              if (m && typeof m.orderChatGPTMapping === \"function\") return m.orderChatGPTMapping;\n            }\n          } catch (eR) {\n          }\n          try {\n            if (typeof window !== \"undefined\" && window.ChatGPTConversationParser && typeof window.ChatGPTConversationParser.orderChatGPTMapping === \"function\") {\n              return window.ChatGPTConversationParser.orderChatGPTMapping;\n            }\n          } catch (eW) {\n          }\n          return null;\n        }\n        function resolveSanitizeChatGPT(deps) {\n          if (deps && typeof deps.sanitizeChatGPTText === \"function\") return deps.sanitizeChatGPTText;\n          try {\n            if (typeof __require === \"function\") {\n              var m = __require(\"./chatgpt-conversation-parser.js\");\n              if (m && typeof m.sanitizeChatGPTText === \"function\") return m.sanitizeChatGPTText;\n            }\n          } catch (eR) {\n          }\n          try {\n            if (typeof window !== \"undefined\" && window.ChatGPTConversationParser && typeof window.ChatGPTConversationParser.sanitizeChatGPTText === \"function\") {\n              return window.ChatGPTConversationParser.sanitizeChatGPTText;\n            }\n          } catch (eW) {\n          }\n          return function(s) {\n            return s;\n          };\n        }\n        function resolveParsePerplexityThread(deps) {\n          if (deps && typeof deps.parsePerplexityThread === \"function\") return deps.parsePerplexityThread;\n          try {\n            if (typeof __require === \"function\") {\n              var m = __require(\"./perplexity-parser.js\");\n              if (m && typeof m.parsePerplexityThread === \"function\") return m.parsePerplexityThread;\n            }\n          } catch (eR) {\n          }\n          try {\n            if (typeof window !== \"undefined\" && typeof window.parsePerplexityThread === \"function\") {\n              return window.parsePerplexityThread;\n            }\n          } catch (eW) {\n          }\n          return null;\n        }\n        function normalizeMessage(raw, ordinal) {\n          if (!raw || typeof raw !== \"object\") return null;\n          var role = normalizeRole(raw.role != null ? raw.role : raw.sender);\n          if (!role) return null;\n          var text = normalizeText(raw.text != null ? raw.text : raw.content);\n          if (!text) return null;\n          return {\n            id: typeof raw.id === \"string\" && raw.id ? raw.id : \"a:\" + (ordinal || 0) + \":\" + hash6(role + \"\\0\" + text),\n            role,\n            text,\n            ts: typeof raw.ts === \"number\" && isFinite(raw.ts) ? raw.ts : toMs(raw.created_at != null ? raw.created_at : raw.time)\n          };\n        }\n        function finalizeConversation(conv) {\n          var messages = [];\n          var textLen = 0;\n          var raw = conv && Array.isArray(conv.messages) ? conv.messages : [];\n          for (var i = 0; i < raw.length; i++) {\n            var m = normalizeMessage(raw[i], messages.length);\n            if (!m) continue;\n            if (messages.length >= MAX_MESSAGES_PER_CONVERSATION) break;\n            messages.push(m);\n            textLen += m.text.length;\n          }\n          var title = normalizeText(conv && conv.title);\n          if (!title) {\n            for (var t = 0; t < messages.length; t++) {\n              if (messages[t].role === \"user\") {\n                title = collapseWs(messages[t].text).slice(0, 80);\n                break;\n              }\n            }\n          }\n          return {\n            convId: String(conv && conv.convId || \"\"),\n            service: conv && conv.service || \"\",\n            format: conv && conv.format || \"\",\n            title,\n            updatedAt: conv && typeof conv.updatedAt === \"number\" && isFinite(conv.updatedAt) ? conv.updatedAt : 0,\n            messages,\n            count: messages.length,\n            textLen\n          };\n        }\n        function looksLikeGeminiActivity(item) {\n          if (!item || typeof item !== \"object\") return false;\n          var url = String(item.titleUrl || item.title_url || \"\");\n          if (/gemini\\.google\\.com\\/app\\//.test(url)) return true;\n          return collapseWs(item.header).toLowerCase() === \"gemini apps\";\n        }\n        function detectArchiveFormat(json) {\n          var items = arrayifyConversations(json);\n          if (!items.length) return null;\n          var limit = Math.min(items.length, 20);\n          for (var i = 0; i < limit; i++) {\n            var it = items[i];\n            if (!it || typeof it !== \"object\") continue;\n            if (it.mapping && typeof it.mapping === \"object\") return FORMATS.CHATGPT_CONVERSATIONS;\n            if (Array.isArray(it.chat_messages)) return FORMATS.CLAUDE_CONVERSATIONS;\n            if (Array.isArray(it.entries) || it.thread && Array.isArray(it.thread.entries)) return FORMATS.PERPLEXITY_THREADS;\n            if (looksLikeGeminiActivity(it)) return FORMATS.GEMINI_TAKEOUT;\n          }\n          return null;\n        }\n        function serviceOfFormat(format) {\n          return SERVICE_BY_FORMAT[format] || \"\";\n        }\n        function messageTextOf(m) {\n          if (!m || typeof m !== \"object\") return \"\";\n          return normalizeText(m.text != null ? m.text : m.content);\n        }\n        function aggregateMessageList(conv) {\n          if (Array.isArray(conv.messages)) return conv.messages;\n          if (Array.isArray(conv.chat_messages)) return conv.chat_messages;\n          if (Array.isArray(conv.entries)) return conv.entries;\n          return [];\n        }\n        function detectFullTextAnomaly(conv) {\n          if (!conv || typeof conv !== \"object\") return null;\n          if (typeof conv.full !== \"string\") return null;\n          var fullText = normalizeText(conv.full);\n          if (!fullText) return null;\n          var raw = aggregateMessageList(conv);\n          var msgsLen = 0;\n          for (var i = 0; i < raw.length; i++) msgsLen += messageTextOf(raw[i]).length;\n          if (fullText.length <= msgsLen) return null;\n          return {\n            convId: String(conv.convId || conv.conversation_id || conv.uuid || conv.id || \"\"),\n            code: \"full-longer-than-messages\",\n            fullLen: fullText.length,\n            msgsLen,\n            over: fullText.length - msgsLen,\n            msgCount: raw.length\n          };\n        }\n        function collectFullTextAnomalies(json) {\n          var items = arrayifyConversations(json);\n          var out = [];\n          for (var i = 0; i < items.length; i++) {\n            var a = detectFullTextAnomaly(items[i]);\n            if (a) out.push(a);\n          }\n          return out;\n        }\n        function reportFullTextAnomalies(json, deps) {\n          var d = deps || {};\n          var warn = typeof d.warn === \"function\" ? d.warn : typeof console !== \"undefined\" && console && typeof console.warn === \"function\" ? function(msg) {\n            console.warn(msg);\n          } : null;\n          var anomalies = collectFullTextAnomalies(json);\n          if (warn) {\n            for (var i = 0; i < anomalies.length; i++) {\n              var a = anomalies[i];\n              warn(\"[AI CM][archive] \\u0430\\u043D\\u043E\\u043C\\u0430\\u043B\\u0438\\u044F full>messages convId=\" + (a.convId || \"-\") + \" full=\" + a.fullLen + \" msgs=\" + a.msgsLen + \" over=\" + a.over + \" msgsCount=\" + a.msgCount);\n            }\n          }\n          return anomalies;\n        }\n        function extractConvIdFromUrl(url) {\n          var m = String(url == null ? \"\" : url).match(/\\/app\\/(?!prompts(?:\\/|$)|new(?:\\/|$)|apikey(?:\\/|$))([A-Za-z0-9_-]+)/);\n          return m ? m[1] : \"\";\n        }\n        var GEMINI_PROMPT_PREFIX = /^(prompted|asked|you asked|said|запрос:?|вы спросили:?|запрос\\s)\\s*/i;\n        var GEMINI_RESPONSE_DETAIL = /^(response|answer|ответ|ответ модели|model response)$/i;\n        function geminiActivityUserText(rec) {\n          var title = normalizeText(rec.title != null ? rec.title : rec.description);\n          if (!title) return \"\";\n          return normalizeText(title.replace(GEMINI_PROMPT_PREFIX, \"\"));\n        }\n        function geminiActivityAssistantText(rec) {\n          var direct = normalizeText(rec.response != null ? rec.response : rec.answer);\n          if (direct) return direct;\n          var details = rec.details;\n          if (!Array.isArray(details)) return \"\";\n          for (var i = 0; i < details.length; i++) {\n            var d = details[i];\n            if (!d || typeof d !== \"object\") continue;\n            if (!GEMINI_RESPONSE_DETAIL.test(collapseWs(d.name))) continue;\n            var val = normalizeText(d.value);\n            if (val) return val;\n          }\n          return \"\";\n        }\n        function parseGeminiTakeout(json) {\n          var items = Array.isArray(json) ? json : json && Array.isArray(json.items) ? json.items : [];\n          var order = [];\n          var byConv = {};\n          var skippedNoConvId = 0;\n          var skippedEmpty = 0;\n          for (var i = 0; i < items.length; i++) {\n            var rec = items[i];\n            if (!rec || typeof rec !== \"object\") {\n              skippedEmpty++;\n              continue;\n            }\n            var convId = extractConvIdFromUrl(rec.titleUrl != null ? rec.titleUrl : rec.title_url);\n            if (!convId) {\n              skippedNoConvId++;\n              continue;\n            }\n            var ts = toMs(rec.time);\n            var userText = geminiActivityUserText(rec);\n            var assistantText = geminiActivityAssistantText(rec);\n            if (!userText && !assistantText) {\n              skippedEmpty++;\n              continue;\n            }\n            if (!byConv[convId]) {\n              byConv[convId] = {\n                convId,\n                service: SERVICE_BY_FORMAT[FORMATS.GEMINI_TAKEOUT],\n                format: FORMATS.GEMINI_TAKEOUT,\n                title: \"\",\n                updatedAt: 0,\n                messages: []\n              };\n              order.push(convId);\n            }\n            var conv = byConv[convId];\n            if (userText) conv.messages.push({ role: \"user\", text: userText, ts });\n            if (assistantText) conv.messages.push({ role: \"assistant\", text: assistantText, ts });\n            if (ts > conv.updatedAt) conv.updatedAt = ts;\n            if (!conv.title && userText) conv.title = collapseWs(userText).slice(0, 80);\n          }\n          var out = [];\n          for (var k = 0; k < order.length; k++) out.push(finalizeConversation(byConv[order[k]]));\n          return { conversations: out, skippedNoConvId, skippedEmpty };\n        }\n        function parseChatGPTArchive(json, deps) {\n          var orderFn = resolveOrderChatGPTMapping(deps);\n          if (!orderFn) return { conversations: [], error: \"chatgpt-parser-unavailable\", skippedNoConvId: 0, skippedEmpty: 0 };\n          var sanitize = resolveSanitizeChatGPT(deps);\n          var items = arrayifyConversations(json);\n          var out = [];\n          var skippedNoConvId = 0;\n          var skippedEmpty = 0;\n          for (var i = 0; i < items.length; i++) {\n            var c = items[i];\n            if (!c || typeof c !== \"object\" || !c.mapping || typeof c.mapping !== \"object\") {\n              skippedEmpty++;\n              continue;\n            }\n            var convId = String(c.conversation_id || c.id || \"\");\n            if (!convId) {\n              skippedNoConvId++;\n              continue;\n            }\n            var keys = orderFn(c.mapping);\n            var messages = [];\n            for (var k = 0; k < keys.length; k++) {\n              var node = c.mapping[keys[k]];\n              var msg = node && node.message;\n              if (!msg || !msg.content) continue;\n              var role = normalizeRole(msg.author && msg.author.role);\n              if (!role) continue;\n              var parts = Array.isArray(msg.content.parts) ? msg.content.parts : [];\n              var pieces = [];\n              for (var p = 0; p < parts.length; p++) {\n                if (typeof parts[p] === \"string\") {\n                  var s = sanitize(parts[p]);\n                  if (normalizeText(s)) pieces.push(normalizeText(s));\n                } else if (parts[p] && typeof parts[p] === \"object\" && typeof parts[p].text === \"string\") {\n                  var s2 = sanitize(parts[p].text);\n                  if (normalizeText(s2)) pieces.push(normalizeText(s2));\n                }\n              }\n              var text = normalizeText(pieces.join(\"\\n\"));\n              if (!text) continue;\n              messages.push({ role, text, ts: toMs(msg.create_time) });\n            }\n            out.push(finalizeConversation({\n              convId,\n              service: SERVICE_BY_FORMAT[FORMATS.CHATGPT_CONVERSATIONS],\n              format: FORMATS.CHATGPT_CONVERSATIONS,\n              title: c.title,\n              updatedAt: toMs(c.update_time != null ? c.update_time : c.create_time),\n              messages\n            }));\n          }\n          return { conversations: out, skippedNoConvId, skippedEmpty };\n        }\n        function claudeMessageText(msg) {\n          var parts = [];\n          if (Array.isArray(msg.content)) {\n            for (var i = 0; i < msg.content.length; i++) {\n              var b = msg.content[i];\n              if (!b || typeof b !== \"object\") continue;\n              if (b.type === \"text\" && typeof b.text === \"string\") {\n                var t = normalizeText(b.text);\n                if (t) parts.push(t);\n              }\n            }\n          }\n          if (!parts.length) {\n            var fallback = normalizeText(msg.text);\n            if (fallback) parts.push(fallback);\n          }\n          return normalizeText(parts.join(\"\\n\"));\n        }\n        function parseClaudeArchive(json) {\n          var items = arrayifyConversations(json);\n          var out = [];\n          var skippedNoConvId = 0;\n          var skippedEmpty = 0;\n          for (var i = 0; i < items.length; i++) {\n            var c = items[i];\n            if (!c || typeof c !== \"object\" || !Array.isArray(c.chat_messages)) {\n              skippedEmpty++;\n              continue;\n            }\n            var convId = String(c.uuid || c.id || \"\");\n            if (!convId) {\n              skippedNoConvId++;\n              continue;\n            }\n            var messages = [];\n            for (var k = 0; k < c.chat_messages.length; k++) {\n              var msg = c.chat_messages[k];\n              if (!msg || typeof msg !== \"object\") continue;\n              var role = normalizeRole(msg.sender);\n              if (!role) continue;\n              var text = claudeMessageText(msg);\n              if (!text) continue;\n              messages.push({\n                id: typeof msg.uuid === \"string\" && msg.uuid ? msg.uuid : void 0,\n                role,\n                text,\n                ts: toMs(msg.created_at)\n              });\n            }\n            var providerDate = String(c.updated_at || c.created_at || \"\");\n            out.push(finalizeConversation({\n              convId,\n              service: SERVICE_BY_FORMAT[FORMATS.CLAUDE_CONVERSATIONS],\n              format: FORMATS.CLAUDE_CONVERSATIONS,\n              title: c.name || c.title,\n              updatedAt: toMs(providerDate),\n              messages\n            }));\n          }\n          return { conversations: out, skippedNoConvId, skippedEmpty };\n        }\n        function parsePerplexityArchive(json, deps) {\n          var parseThread = resolveParsePerplexityThread(deps);\n          if (!parseThread) return { conversations: [], error: \"perplexity-parser-unavailable\", skippedNoConvId: 0, skippedEmpty: 0 };\n          var items = arrayifyConversations(json);\n          var out = [];\n          var skippedNoConvId = 0;\n          var skippedEmpty = 0;\n          for (var i = 0; i < items.length; i++) {\n            var it = items[i];\n            if (!it || typeof it !== \"object\") {\n              skippedEmpty++;\n              continue;\n            }\n            var thread = it.thread && typeof it.thread === \"object\" ? it.thread : it;\n            var entries = Array.isArray(it.entries) ? it.entries : Array.isArray(thread.entries) ? thread.entries : null;\n            if (!entries) {\n              skippedEmpty++;\n              continue;\n            }\n            var convId = String(thread.id || thread.slug || it.id || it.slug || \"\");\n            if (!convId) {\n              skippedNoConvId++;\n              continue;\n            }\n            var parsed = parseThread({ entries }) || {};\n            var msgs = Array.isArray(parsed.messages) ? parsed.messages : [];\n            var messages = [];\n            for (var k = 0; k < msgs.length; k++) {\n              var m = msgs[k];\n              if (!m || typeof m !== \"object\") continue;\n              var role = normalizeRole(m.role);\n              var text = normalizeText(m.text);\n              if (!role || !text) continue;\n              messages.push({ role, text, ts: 0 });\n            }\n            out.push(finalizeConversation({\n              convId,\n              service: SERVICE_BY_FORMAT[FORMATS.PERPLEXITY_THREADS],\n              format: FORMATS.PERPLEXITY_THREADS,\n              title: thread.title || it.title,\n              updatedAt: toMs(thread.updated_at || it.updated_at),\n              messages\n            }));\n          }\n          return { conversations: out, skippedNoConvId, skippedEmpty };\n        }\n        function parseArchive(json, deps) {\n          reportFullTextAnomalies(json, deps);\n          var format = detectArchiveFormat(json);\n          if (!format) {\n            return { ok: false, format: null, service: \"\", error: \"unknown-format\", conversations: [], skippedNoConvId: 0, skippedEmpty: 0 };\n          }\n          var res;\n          if (format === FORMATS.GEMINI_TAKEOUT) res = parseGeminiTakeout(json);\n          else if (format === FORMATS.CHATGPT_CONVERSATIONS) res = parseChatGPTArchive(json, deps);\n          else if (format === FORMATS.CLAUDE_CONVERSATIONS) res = parseClaudeArchive(json);\n          else res = parsePerplexityArchive(json, deps);\n          if (res.error) {\n            return { ok: false, format, service: serviceOfFormat(format), error: res.error, conversations: [], skippedNoConvId: 0, skippedEmpty: 0 };\n          }\n          return {\n            ok: true,\n            format,\n            service: serviceOfFormat(format),\n            error: null,\n            conversations: res.conversations || [],\n            skippedNoConvId: res.skippedNoConvId || 0,\n            skippedEmpty: res.skippedEmpty || 0\n          };\n        }\n        function parseArchiveText(text, deps) {\n          var json = null;\n          try {\n            json = JSON.parse(String(text == null ? \"\" : text));\n          } catch (e) {\n            return { ok: false, format: null, service: \"\", error: \"invalid-json\", conversations: [], skippedNoConvId: 0, skippedEmpty: 0 };\n          }\n          return parseArchive(json, deps);\n        }\n        function buildArchiveRecord(conversation, extra) {\n          var conv = finalizeConversation(conversation);\n          var x = extra || {};\n          return {\n            v: ARCHIVE_RECORD_VERSION,\n            convId: conv.convId,\n            service: conv.service,\n            format: conv.format,\n            title: conv.title,\n            count: conv.count,\n            textLen: conv.textLen,\n            messages: conv.messages,\n            importedAt: typeof x.importedAt === \"number\" ? x.importedAt : Date.now(),\n            fileName: String(x.fileName || \"\")\n          };\n        }\n        function buildConvSourceRecord(archiveRecord, extra) {\n          var r = archiveRecord || {};\n          var x = extra || {};\n          var rec = {\n            kind: SOURCE_ARCHIVE,\n            service: String(r.service || \"\"),\n            format: String(r.format || \"\"),\n            count: typeof r.count === \"number\" ? r.count : 0,\n            textLen: typeof r.textLen === \"number\" ? r.textLen : 0,\n            importedAt: typeof r.importedAt === \"number\" ? r.importedAt : Date.now()\n          };\n          rec.label = describeSource(rec);\n          if (x.fileName) rec.fileName = String(x.fileName);\n          return (\n            /** @type {ArchiveSourceRecord} */\n            rec\n          );\n        }\n        function buildLiveSourceRecord(extra) {\n          var x = extra || {};\n          var rec = {\n            kind: SOURCE_LIVE,\n            service: String(x.service || \"\"),\n            format: \"\",\n            count: typeof x.count === \"number\" ? x.count : 0,\n            textLen: typeof x.textLen === \"number\" ? x.textLen : 0,\n            importedAt: 0\n          };\n          rec.label = describeSource(rec);\n          return (\n            /** @type {ArchiveSourceRecord} */\n            rec\n          );\n        }\n        function describeSource(record) {\n          if (!record || typeof record !== \"object\") return \"\\u2014\";\n          if (record.kind === SOURCE_LIVE) return \"live (\\u0441\\u0435\\u0442\\u044C/DOM)\";\n          if (record.kind !== SOURCE_ARCHIVE) return \"\\u2014\";\n          var fmt = FORMAT_LABEL[record.format] || record.format || \"\\u0430\\u0440\\u0445\\u0438\\u0432\";\n          var n = typeof record.count === \"number\" && record.count > 0 ? \" \\xB7 \" + record.count + \" \\u0441\\u043E\\u043E\\u0431\\u0449.\" : \"\";\n          return \"\\u0430\\u0440\\u0445\\u0438\\u0432: \" + fmt + n;\n        }\n        function sourceBadge(record) {\n          if (!record || typeof record !== \"object\") return \"\";\n          if (record.kind === SOURCE_ARCHIVE) return \"\\u{1F4E6} \\u0430\\u0440\\u0445\\u0438\\u0432\";\n          if (record.kind === SOURCE_LIVE) return \"\\u26A1 live\";\n          return \"\";\n        }\n        function isArchiveRecordFor(record, convId) {\n          if (!record || typeof record !== \"object\") return false;\n          if (!convId) return false;\n          return String(record.convId || \"\") === String(convId);\n        }\n        function recordBytes(rec) {\n          try {\n            return JSON.stringify(rec).length;\n          } catch (e) {\n            return Infinity;\n          }\n        }\n        function planArchiveImport(conversations, opts) {\n          var o = opts || {};\n          var perConv = typeof o.maxConversationBytes === \"number\" ? o.maxConversationBytes : MAX_CONVERSATION_BYTES;\n          var total = typeof o.maxTotalBytes === \"number\" ? o.maxTotalBytes : MAX_TOTAL_BYTES;\n          var fileName = o.fileName || \"\";\n          var importedAt = typeof o.importedAt === \"number\" ? o.importedAt : Date.now();\n          var accepted = [];\n          var skipped = [];\n          var used = 0;\n          var list = Array.isArray(conversations) ? conversations : [];\n          for (var i = 0; i < list.length; i++) {\n            var conv = list[i];\n            if (!conv || !conv.convId) {\n              skipped.push({ convId: \"\", reason: \"no-conv-id\", bytes: 0 });\n              continue;\n            }\n            if (!conv.messages || !conv.messages.length) {\n              skipped.push({ convId: conv.convId, reason: \"empty\", bytes: 0 });\n              continue;\n            }\n            var rec = buildArchiveRecord(conv, { fileName, importedAt });\n            var bytes = recordBytes(rec);\n            if (bytes > perConv) {\n              skipped.push({ convId: conv.convId, reason: \"too-large\", bytes });\n              continue;\n            }\n            if (used + bytes > total) {\n              skipped.push({ convId: conv.convId, reason: \"budget-exceeded\", bytes });\n              continue;\n            }\n            used += bytes;\n            accepted.push(rec);\n          }\n          return { accepted, skipped, bytes: used };\n        }\n        var Api = {\n          ARCHIVE_KEY_PREFIX,\n          CONV_SOURCE_KEY_PREFIX,\n          ARCHIVE_RECORD_VERSION,\n          FORMATS,\n          SERVICE_BY_FORMAT,\n          FORMAT_LABEL,\n          SOURCE_ARCHIVE,\n          SOURCE_LIVE,\n          MAX_CONVERSATION_BYTES,\n          MAX_TOTAL_BYTES,\n          MAX_MESSAGES_PER_CONVERSATION,\n          MAX_ARCHIVE_SIZE,\n          archiveStorageKey,\n          convSourceStorageKey,\n          normalizeText,\n          normalizeRole,\n          normalizeMessage,\n          hash6,\n          toMs,\n          detectArchiveFormat,\n          serviceOfFormat,\n          detectFullTextAnomaly,\n          collectFullTextAnomalies,\n          reportFullTextAnomalies,\n          extractConvIdFromUrl,\n          parseGeminiTakeout,\n          parseChatGPTArchive,\n          parseClaudeArchive,\n          parsePerplexityArchive,\n          parseArchive,\n          parseArchiveText,\n          buildArchiveRecord,\n          buildConvSourceRecord,\n          buildLiveSourceRecord,\n          describeSource,\n          sourceBadge,\n          isArchiveRecordFor,\n          recordBytes,\n          planArchiveImport\n        };\n        if (typeof window !== \"undefined\") window.AiCmArchiveImport = Api;\n        if (typeof module !== \"undefined\" && module.exports) module.exports = Api;\n      })();\n      (function() {\n        \"use strict\";\n        function cleanInline(s) {\n          s = s.replace(/\\[([^\\]]+)\\]\\(([^)\\s]+)\\)/g, \"$1\");\n          s = s.replace(/(\\*\\*|__)/g, \"\");\n          s = s.replace(/(?<![*\\w])\\*([^*\\n]+)\\*(?![\\w*])/g, \"$1\");\n          s = s.replace(/(?<![\\w_])\\_([^_\\n]+)\\_(?![\\w_])/g, \"$1\");\n          s = s.replace(/`/g, \"\");\n          return s;\n        }\n        function cleanLine(line) {\n          var s = String(line == null ? \"\" : line);\n          s = s.replace(/^#{1,6}\\s+/, \"\");\n          s = s.replace(/^>\\s?/, \"\");\n          s = s.replace(/^[-*+]\\s+/, \"\");\n          return s;\n        }\n        function cleanText(text) {\n          var lines = String(text).split(\"\\n\");\n          var out = [];\n          for (var i = 0; i < lines.length; i++) {\n            var line = lines[i];\n            var trimmed = line.trim();\n            if (/^-{3,}$/.test(trimmed)) continue;\n            out.push(cleanInline(cleanLine(line)));\n          }\n          return out.join(\"\\n\");\n        }\n        function buildReferenceText(messages) {\n          var list = Array.isArray(messages) ? messages : [];\n          var parts = [];\n          for (var i = 0; i < list.length; i++) {\n            var msg = list[i] || {};\n            parts.push(cleanText(msg.text == null ? \"\" : msg.text));\n          }\n          return parts.join(\"\\n\\n\");\n        }\n        if (typeof module !== \"undefined\" && module.exports) module.exports = buildReferenceText;\n        if (typeof window !== \"undefined\") window.buildReferenceText = buildReferenceText;\n      })();\n      (function() {\n        \"use strict\";\n        function aiCmI18nMessage2(key, fallback, substitutions) {\n          try {\n            if (typeof chrome !== \"undefined\" && chrome.i18n && typeof chrome.i18n.getMessage === \"function\") {\n              var message = substitutions ? chrome.i18n.getMessage(key, substitutions) : chrome.i18n.getMessage(key);\n              if (message) return message;\n            }\n          } catch (eMessage) {\n          }\n          return fallback;\n        }\n        var REASONING_SECTION_TAG = \"[REASONING]\";\n        var ANSWER_SECTION_TAG = \"[ANSWER]\";\n        function reasoningOfMessage(msg) {\n          if (!msg || typeof msg !== \"object\") return \"\";\n          var r = msg.reasoning;\n          return typeof r === \"string\" ? r : \"\";\n        }\n        function withReasoningSections(text, reasoning) {\n          var t = typeof text === \"string\" ? text : \"\";\n          var r = typeof reasoning === \"string\" ? reasoning : \"\";\n          if (!r) return t;\n          if (t.indexOf(r) !== -1) return t;\n          return REASONING_SECTION_TAG + \"\\n\" + r + \"\\n\\n\" + ANSWER_SECTION_TAG + \"\\n\" + t;\n        }\n        function messageTextWithReasoning(msg) {\n          if (!msg || typeof msg !== \"object\") return \"\";\n          return withReasoningSections(msg.text, reasoningOfMessage(msg));\n        }\n        function reasoningOfMessageForExport(msg, useHidden) {\n          var r = reasoningOfMessage(msg);\n          if (r) return r;\n          if (useHidden !== true || !msg || typeof msg !== \"object\") return \"\";\n          return typeof msg.hiddenReasoning === \"string\" ? msg.hiddenReasoning : \"\";\n        }\n        function markersMessageTextWithReasoning(msg, useHidden) {\n          return withReasoningSections(\n            messageTextForMarkers(msg),\n            reasoningOfMessageForExport(msg, useHidden)\n          );\n        }\n        var TXT_ROLE_MARKER_SITES = [\"qwen\"];\n        function isTxtRoleMarkerHistory(history) {\n          try {\n            var site = String(history && history.site || \"\").toLowerCase();\n            return TXT_ROLE_MARKER_SITES.indexOf(site) !== -1;\n          } catch (e) {\n            return false;\n          }\n        }\n        function txtRoleMarker(role) {\n          return role === \"user\" ? \"USER:\" : \"ASSISTANT:\";\n        }\n        function mdRoleMarker(role) {\n          return role === \"user\" ? \"### USER\" : \"### ASSISTANT\";\n        }\n        var CONTAINER_MIN_CONTAINED = 2;\n        var CONTAINER_COVER_MIN = 0.8;\n        function messageTextForMarkers(msg) {\n          if (!msg || typeof msg !== \"object\") return \"\";\n          if (typeof msg.text === \"string\" && msg.text) return msg.text;\n          if (typeof msg.content === \"string\") return msg.content;\n          return typeof msg.text === \"string\" ? msg.text : \"\";\n        }\n        function dropContainerMessages(list) {\n          var src = Array.isArray(list) ? list : [];\n          var texts = [];\n          for (var t = 0; t < src.length; t++) texts.push(messageTextForMarkers(src[t]));\n          var keep = [];\n          for (var c = 0; c < src.length; c++) {\n            var candidate = texts[c];\n            var contained = 0;\n            var covered = 0;\n            var longest = 0;\n            if (candidate) {\n              for (var j = 0; j < texts.length; j++) {\n                var other = texts[j];\n                if (j === c || !other || other.length >= candidate.length) continue;\n                if (candidate.indexOf(other) === -1) continue;\n                contained++;\n                covered += other.length;\n                if (other.length > longest) longest = other.length;\n              }\n            }\n            var isContainer = contained >= CONTAINER_MIN_CONTAINED && covered >= CONTAINER_COVER_MIN * candidate.length && candidate.length >= 2 * longest;\n            if (!isContainer) keep.push(src[c]);\n          }\n          return keep;\n        }\n        function diagTxtRoleStructure(list, totalCount) {\n          if (!diagOn()) return false;\n          try {\n            var kept = Array.isArray(list) ? list.length : -1;\n            var total = typeof totalCount === \"number\" ? totalCount : kept;\n            var first = Array.isArray(list) && list.length > 0 ? list[0] : null;\n            var text = messageTextForMarkers(first);\n            var kind = \"\\u043D\\u0435\\u0442\";\n            if (first && typeof first === \"object\") {\n              if (typeof first.text === \"string\") kind = \"text\";\n              else if (typeof first.content === \"string\") kind = \"content\";\n            }\n            console.log(DIAG_PREFIX + \" txt-roles site=qwen isArray=\" + Array.isArray(list) + \" msgs=\" + total + \" kept=\" + kept + \" dropped-containers=\" + (kept >= 0 && total >= kept ? total - kept : 0) + \" first.role=\" + (first && first.role !== void 0 && first.role !== null ? String(first.role) : \"(\\u043D\\u0435\\u0442)\") + \" first.kind=\" + kind + \" first.len=\" + text.length + \" first.head=\" + (diagHead(text, 60) || \"\\u043F\\u0443\\u0441\\u0442\\u043E\"));\n          } catch (eLogRoles) {\n          }\n          return true;\n        }\n        function renderReferenceText(list) {\n          if (typeof window !== \"undefined\" && typeof window.buildReferenceText === \"function\") {\n            return window.buildReferenceText(list);\n          }\n          if (typeof __require === \"function\") {\n            try {\n              return __require(\"./buildReferenceText.js\")(list);\n            } catch (e) {\n            }\n          }\n          return null;\n        }\n        function renderReferenceTextWithRoleMarkers(list) {\n          var src = Array.isArray(list) ? list : [];\n          var parts = [];\n          for (var i = 0; i < src.length; i++) {\n            var m = src[i] || {};\n            var text = renderReferenceText([{ role: m.role, text: messageTextForMarkers(m) }]);\n            if (text === null) return null;\n            if (!String(text).trim()) continue;\n            parts.push(txtRoleMarker(m.role) + \"\\n\" + text);\n          }\n          return parts.join(\"\\n\\n\");\n        }\n        function buildTxtFromHistory(history) {\n          var hist = history || {};\n          var site = typeof hist.site === \"string\" ? hist.site : \"\";\n          var messages = history && Array.isArray(history.messages) ? history.messages : [];\n          var marked = isTxtRoleMarkerHistory(history);\n          var kept = marked ? dropContainerMessages(messages) : messages;\n          var forTxt = kept.map(function(m) {\n            var text = marked ? markersMessageTextWithReasoning(m, true) : messageTextWithReasoning(m);\n            if (!m || typeof m !== \"object\" || text === m.text) return m;\n            var copy = {};\n            for (var k in m) {\n              if (Object.prototype.hasOwnProperty.call(m, k)) copy[k] = m[k];\n            }\n            copy.text = text;\n            return copy;\n          });\n          var out;\n          if (marked) {\n            diagTxtRoleStructure(forTxt, messages.length);\n            out = renderReferenceTextWithRoleMarkers(forTxt);\n          } else {\n            out = renderReferenceText(forTxt);\n          }\n          if (site === \"gemini\" && hist.sourceTier && out) out = hist.sourceTier + \"\\n\\n\" + out;\n          return out === null ? \"\" : out;\n        }\n        function exportTokenSnapshot(history) {\n          var h = history || {};\n          var tokens = typeof h.tokens === \"number\" ? h.tokens : 0;\n          var limit = typeof h.limit === \"number\" ? h.limit : 0;\n          var percent = typeof h.percent === \"number\" ? h.percent : 0;\n          if (limit > 0) {\n            var calc = Math.round(tokens / limit * 1e3) / 10;\n            if (calc !== percent) percent = calc;\n          }\n          return { tokens, limit, percent };\n        }\n        function buildMdFromHistory(history, platform) {\n          var h = history || {};\n          var site = typeof h.site === \"string\" ? h.site : \"\";\n          var lines = [];\n          lines.push(aiCmI18nMessage2(\"export_md_title\", \"# AI Context Monitor \\u2014 \\u044D\\u043A\\u0441\\u043F\\u043E\\u0440\\u0442 \\u0438\\u0441\\u0442\\u043E\\u0440\\u0438\\u0438\"));\n          lines.push(\"\");\n          lines.push(aiCmI18nMessage2(\"export_md_platform\", \"\\u041F\\u043B\\u0430\\u0442\\u0444\\u043E\\u0440\\u043C\\u0430: \" + (platform || \"AI Chat\"), [platform || \"AI Chat\"]));\n          lines.push(aiCmI18nMessage2(\"export_md_model\", \"\\u041C\\u043E\\u0434\\u0435\\u043B\\u044C: \" + (h.model || \"\\u2014\"), [h.model || \"\\u2014\"]));\n          var exportedAt = (/* @__PURE__ */ new Date()).toISOString();\n          lines.push(aiCmI18nMessage2(\"export_md_date\", \"\\u0414\\u0430\\u0442\\u0430 \\u044D\\u043A\\u0441\\u043F\\u043E\\u0440\\u0442\\u0430: \" + exportedAt, [exportedAt]));\n          var snap = exportTokenSnapshot(h);\n          var tokens = snap.tokens;\n          var limit = snap.limit;\n          var percent = snap.percent;\n          if (tokens === 0 && limit === 0) {\n            lines.push(\"\\u0422\\u043E\\u043A\\u0435\\u043D\\u044B: \\u043D/\\u0434 (\" + percent + \"%)\");\n          } else {\n            lines.push(aiCmI18nMessage2(\"export_md_tokens\", \"\\u0422\\u043E\\u043A\\u0435\\u043D\\u044B: \" + tokens + \" / \" + limit + \" (\" + percent + \"%)\", [String(tokens), String(limit), String(percent)]));\n          }\n          lines.push(\"\");\n          if (site === \"gemini\" && h.sourceTier) {\n            lines.push(h.sourceTier, \"\");\n          }\n          var mdMarked = isTxtRoleMarkerHistory(h);\n          var messages = Array.isArray(h.messages) ? h.messages : [];\n          if (mdMarked) messages = dropContainerMessages(messages);\n          for (var i = 0; i < messages.length; i++) {\n            var msg = messages[i] || {};\n            if (typeof aiCmDiagLine === \"function\") {\n              aiCmDiagLine(\"claude-role-builder\", { msgRole: msg.role, mdMarked });\n            }\n            var title = mdMarked ? mdRoleMarker(msg.role) : msg.role === \"user\" || msg.role === \"human\" ? aiCmI18nMessage2(\"export_md_role_user\", \"## \\u041F\\u043E\\u043B\\u044C\\u0437\\u043E\\u0432\\u0430\\u0442\\u0435\\u043B\\u044C\") : aiCmI18nMessage2(\"export_md_role_assistant\", \"## \\u0410\\u0441\\u0441\\u0438\\u0441\\u0442\\u0435\\u043D\\u0442\");\n            lines.push(title);\n            lines.push(\"\");\n            lines.push(mdMarked ? markersMessageTextWithReasoning(msg, true) : messageTextWithReasoning(msg));\n            lines.push(\"\");\n          }\n          return lines.join(\"\\n\");\n        }\n        function buildJsonFromHistory(history, platform) {\n          var h = history || {};\n          return JSON.stringify({\n            platform: platform || \"AI Chat\",\n            model: h.model || \"\",\n            exportedAt: (/* @__PURE__ */ new Date()).toISOString(),\n            tokens: typeof h.tokens === \"number\" ? h.tokens : 0,\n            limit: typeof h.limit === \"number\" ? h.limit : 0,\n            percent: typeof h.percent === \"number\" ? h.percent : 0,\n            // Two-Tier (v89): аддитивное поле метаданных. undefined → JSON.stringify ключ НЕ\n            // добавляет, поэтому у прочих платформ и у Gemini без метки байты прежние.\n            sourceTier: h.sourceTier,\n            messages: Array.isArray(h.messages) ? h.messages : []\n          }, null, 2);\n        }\n        var DIAG_PREFIX = \"[AI CM][diag]\";\n        function diagOn() {\n          try {\n            if (typeof sessionStorage !== \"undefined\" && sessionStorage && sessionStorage.getItem(\"aiCmDebug\") === \"1\") return true;\n          } catch (eSess) {\n          }\n          try {\n            if (typeof window !== \"undefined\" && window && window.__aiCmDebugLogs === true) return true;\n          } catch (eWin) {\n          }\n          return false;\n        }\n        function diagHead(v, n) {\n          try {\n            var lim = typeof n === \"number\" && n > 0 ? n : 100;\n            if (v === void 0 || v === null) return \"\";\n            var s = String(v);\n            if (!s) return \"\";\n            var flat = s.replace(/\\s+/g, \" \").trim();\n            if (!flat) return \"\";\n            return flat.length > lim ? flat.slice(0, lim) + \"\\u2026\" : flat;\n          } catch (eHead) {\n            return \"\";\n          }\n        }\n        function diagStack() {\n          try {\n            var lines = String(new Error().stack || \"\").split(\"\\n\");\n            var out = [];\n            for (var i = 1; i < lines.length && out.length < 4; i++) {\n              var s = String(lines[i] || \"\").replace(/\\s+/g, \" \").trim();\n              if (!s || s.indexOf(\"diag\") !== -1) continue;\n              out.push(s);\n            }\n            return out.join(\" <- \");\n          } catch (eStack) {\n            return \"\";\n          }\n        }\n        function diagDownload(trigger, content, fileName, extra) {\n          try {\n            if (typeof aiCmDiagDownload === \"function\") return aiCmDiagDownload(trigger, content, fileName, extra);\n          } catch (eGlobal) {\n          }\n          if (!diagOn()) return false;\n          try {\n            var e = extra || {};\n            var url = \"\";\n            try {\n              url = String(typeof location !== \"undefined\" && location && location.href || \"\");\n            } catch (eUrl) {\n            }\n            console.log(DIAG_PREFIX + \" download trigger=\" + (trigger || \"(\\u043D\\u0435\\u0442)\") + \" file=\" + (fileName === void 0 || fileName === null || String(fileName) === \"\" ? \"\\u043F\\u0443\\u0441\\u0442\\u043E\\u0435\" : String(fileName)) + \" bytes100=\" + (diagHead(content, 100) || \"\\u043F\\u0443\\u0441\\u0442\\u043E\") + \" len=\" + (content === void 0 || content === null ? 0 : String(content).length) + \" mime=\" + (e.mime === void 0 ? \"(\\u043D\\u0435\\u0442)\" : e.mime) + \" url=\" + url + \" threadId=\" + (e.threadId === void 0 || e.threadId === \"\" ? \"(\\u043D\\u0435\\u0442)\" : e.threadId) + \" site=\" + (e.site === void 0 ? \"\" : e.site) + \" reason=\" + (e.reason === void 0 ? \"\" : e.reason) + \" src=\" + diagStack());\n          } catch (eLog) {\n          }\n          return true;\n        }\n        var XSSI_PREFIX_LEN = 4;\n        function startsWithXssiPrefix(content) {\n          try {\n            if (content === void 0 || content === null) return false;\n            var s = String(content);\n            if (s.length < XSSI_PREFIX_LEN) return false;\n            return s.charCodeAt(0) === 41 && s.charCodeAt(1) === 93 && s.charCodeAt(2) === 125 && s.charCodeAt(3) === 39;\n          } catch (eXssi) {\n            return false;\n          }\n        }\n        function downloadBlockReason(content, fileName) {\n          if (startsWithXssiPrefix(content)) return \"xssi-prefix\";\n          if (fileName === void 0 || fileName === null || String(fileName).trim() === \"\") return \"empty-name\";\n          return null;\n        }\n        function diagDownloadBlocked(trigger, content, fileName, reason, extra) {\n          try {\n            if (typeof aiCmDiagDownloadBlocked === \"function\") {\n              return aiCmDiagDownloadBlocked(trigger, content, fileName, reason, extra);\n            }\n          } catch (eGlobalBlocked) {\n          }\n          if (!diagOn()) return false;\n          try {\n            var e = extra || {};\n            var url = \"\";\n            try {\n              url = String(typeof location !== \"undefined\" && location && location.href || \"\");\n            } catch (eUrlB) {\n            }\n            console.log(DIAG_PREFIX + \" download-blocked reason=\" + (reason || \"(\\u043D\\u0435\\u0442)\") + \" trigger=\" + (trigger || \"(\\u043D\\u0435\\u0442)\") + \" file=\" + (fileName === void 0 || fileName === null || String(fileName) === \"\" ? \"\\u043F\\u0443\\u0441\\u0442\\u043E\\u0435\" : String(fileName)) + \" bytes100=\" + (diagHead(content, 100) || \"\\u043F\\u0443\\u0441\\u0442\\u043E\") + \" len=\" + (content === void 0 || content === null ? 0 : String(content).length) + \" mime=\" + (e.mime === void 0 ? \"(\\u043D\\u0435\\u0442)\" : e.mime) + \" url=\" + url + \" threadId=\" + (e.threadId === void 0 || e.threadId === \"\" ? \"(\\u043D\\u0435\\u0442)\" : e.threadId) + \" site=\" + (e.site === void 0 ? \"\" : e.site) + \" src=\" + diagStack());\n          } catch (eLogBlocked) {\n          }\n          return true;\n        }\n        function downloadBlob2(content, fileName, mimeType, trigger, extra) {\n          var ex = extra || {};\n          var blockReason = downloadBlockReason(content, fileName);\n          if (blockReason) {\n            try {\n              diagDownloadBlocked(\n                trigger || \"builder-download\",\n                content,\n                fileName,\n                blockReason,\n                { mime: mimeType, threadId: ex.threadId, site: ex.site }\n              );\n            } catch (eDiagBlocked) {\n            }\n            return false;\n          }\n          try {\n            diagDownload(\n              trigger || \"builder-download\",\n              content,\n              fileName,\n              { mime: mimeType, threadId: ex.threadId, site: ex.site, reason: ex.reason }\n            );\n          } catch (eDiag) {\n          }\n          try {\n            var blob = new Blob([content], { type: mimeType });\n            var url = URL.createObjectURL(blob);\n            var a = document.createElement(\"a\");\n            a.href = url;\n            a.download = fileName;\n            document.body.appendChild(a);\n            a.click();\n            a.remove();\n            setTimeout(function() {\n              URL.revokeObjectURL(url);\n            }, 1e3);\n          } catch (e) {\n            console.warn(\"[export] \\u043D\\u0435 \\u0443\\u0434\\u0430\\u043B\\u043E\\u0441\\u044C \\u0441\\u043A\\u0430\\u0447\\u0430\\u0442\\u044C \\u0444\\u0430\\u0439\\u043B:\", e);\n          }\n          return true;\n        }\n        var Api = {\n          buildTxtFromHistory,\n          buildMdFromHistory,\n          buildJsonFromHistory,\n          downloadBlob: downloadBlob2,\n          // O-27 (защитный фикс): причина отказа точки скачивания (null — выдача разрешена) и\n          // сама точка отказа наружу — для пинов тестов и переиспользования вызывающим кодом.\n          aiCmDownloadBlockReason: downloadBlockReason,\n          aiCmDiagDownloadBlocked: diagDownloadBlocked,\n          // O-27/O-32: диагностические хелперы наружу (content.js/export-manager.js зовут их\n          // через window.AiCmExportBuilders, если глобальный utils/debug.js не подключён).\n          aiCmDiagOn: diagOn,\n          aiCmDiagHead: diagHead,\n          aiCmDiagDownload: diagDownload,\n          // O-35: рендер reasoning контрактом DeepSeek — чистая функция наружу (пины тестов\n          // и переиспользование; на боевом пути вызывается только двумя сборщиками выше).\n          aiCmMessageTextWithReasoning: messageTextWithReasoning,\n          aiCmWithReasoningSections: withReasoningSections,\n          // O-37 (C): источник размышления для маркерного пути (reasoning, иначе поле захвата\n          // hiddenReasoning) и композиция «текст сообщения + секции» — чистые функции наружу;\n          // на боевом пути их зовут только buildTxtFromHistory/buildMdFromHistory выше.\n          aiCmReasoningOfMessageForExport: reasoningOfMessageForExport,\n          aiCmMarkersMessageTextWithReasoning: markersMessageTextWithReasoning,\n          // O-36 (D2): маркеры ролей txt-экспорта — чистые предикаты наружу (пины тестов;\n          // на боевом пути вызываются только сборщиком buildTxtFromHistory выше).\n          aiCmTxtRoleMarker: txtRoleMarker,\n          aiCmIsTxtRoleMarkerHistory: isTxtRoleMarkerHistory,\n          aiCmTxtRoleMarkerSites: TXT_ROLE_MARKER_SITES,\n          // O-36 (D2.1): маркер роли md (Qwen Studio), текст сообщения для маркерного пути\n          // (с фолбэком на .content) и контейнер-чистка — чистые функции наружу для пинов\n          // и переиспользования; на боевом пути их зовут только два сборщика выше.\n          aiCmMdRoleMarker: mdRoleMarker,\n          aiCmMessageTextForMarkers: messageTextForMarkers,\n          aiCmDropContainerMessages: dropContainerMessages,\n          aiCmDiagTxtRoleStructure: diagTxtRoleStructure,\n          aiCmContainerRules: { minContained: CONTAINER_MIN_CONTAINED, coverMin: CONTAINER_COVER_MIN }\n        };\n        if (typeof module !== \"undefined\" && module.exports) module.exports = Api;\n        if (typeof window !== \"undefined\") window.AiCmExportBuilders = Api;\n      })();\n      function aiCmIsFirefox() {\n        try {\n          var api = typeof browser !== \"undefined\" && browser && browser.runtime ? browser : typeof chrome !== \"undefined\" && chrome && chrome.runtime ? chrome : null;\n          if (!api) return false;\n          if (api.runtime && typeof api.runtime.getURL === \"function\") {\n            return String(api.runtime.getURL(\"\")).indexOf(\"moz-extension://\") === 0;\n          }\n          if (typeof api.getURL === \"function\") {\n            return String(api.getURL(\"\")).indexOf(\"moz-extension://\") === 0;\n          }\n          return false;\n        } catch (e) {\n          return false;\n        }\n      }\n      if (typeof module !== \"undefined\" && module.exports) {\n        module.exports = { aiCmIsFirefox };\n      }\n      console.log(\"AI Context Monitor: \\u041D\\u0430\\u0441\\u0442\\u0440\\u043E\\u0439\\u043A\\u0438 \\u0437\\u0430\\u0433\\u0440\\u0443\\u0436\\u0435\\u043D\\u044B\");\n      var siteEl = document.getElementById(\"stat-site\");\n      var modelEl = document.getElementById(\"stat-model\");\n      var tokensEl = document.getElementById(\"stat-tokens\");\n      var limitEl = document.getElementById(\"stat-limit\");\n      var percentEl = document.getElementById(\"stat-percent\");\n      var modelSelect = document.getElementById(\"model-select\");\n      var customLimit = document.getElementById(\"custom-limit\");\n      var showWidget = document.getElementById(\"show-widget\");\n      var apiKeyInput = document.getElementById(\"api-key\");\n      var toggleApiKeyBtn = document.getElementById(\"toggle-api-key\");\n      var exactCountCheckbox = document.getElementById(\"exact-count\");\n      var exactCountWarningEl = document.getElementById(\"exact-count-warning\");\n      var aiCmByokUiDisabled = aiCmIsFirefox();\n      var versionEl = document.querySelector(\".version\");\n      var exportMdBtn = document.getElementById(\"export-md\");\n      var exportJsonBtn = document.getElementById(\"export-json\");\n      var exportPdfBtn = document.getElementById(\"export-pdf\");\n      var exportTxtBtn = document.getElementById(\"export-txt\");\n      var exportHintEl = document.getElementById(\"export-hint\");\n      var staleWarningEl = document.getElementById(\"stale-warning\");\n      var exportDiagBtn = document.getElementById(\"export-diag\");\n      var sourceEl = document.getElementById(\"stat-source\");\n      function percentColor(p) {\n        if (p < 50) return \"#22c55e\";\n        if (p < 80) return \"#eab308\";\n        return \"#ef4444\";\n      }\n      try {\n        manifest = chrome.runtime.getManifest();\n        if (versionEl && manifest.version) versionEl.textContent = \"v\" + manifest.version;\n      } catch (e) {\n        aiCmPopupDiagLine(\"manifest-version\", { err: String(e) });\n      }\n      var manifest;\n      var privacyLink = document.getElementById(\"privacy-link\");\n      privacyLink && privacyLink.addEventListener(\"click\", function(e) {\n        e.preventDefault();\n        try {\n          chrome.tabs.create({ url: chrome.runtime.getURL(\"privacy/privacy.html\") });\n        } catch (ePrivacy) {\n          console.warn(\"[privacy] \\u043D\\u0435 \\u0443\\u0434\\u0430\\u043B\\u043E\\u0441\\u044C \\u043E\\u0442\\u043A\\u0440\\u044B\\u0442\\u044C \\u043F\\u043E\\u043B\\u0438\\u0442\\u0438\\u043A\\u0443 \\u043A\\u043E\\u043D\\u0444\\u0438\\u0434\\u0435\\u043D\\u0446\\u0438\\u0430\\u043B\\u044C\\u043D\\u043E\\u0441\\u0442\\u0438:\", ePrivacy);\n        }\n      });\n      var helpLink = document.getElementById(\"help-link\");\n      helpLink && helpLink.addEventListener(\"click\", function(e) {\n        e.preventDefault();\n        try {\n          chrome.tabs.create({ url: chrome.runtime.getURL(\"docs/index.html\") });\n        } catch (eHelp) {\n          console.warn(\"[help] \\u043D\\u0435 \\u0443\\u0434\\u0430\\u043B\\u043E\\u0441\\u044C \\u043E\\u0442\\u043A\\u0440\\u044B\\u0442\\u044C \\u0440\\u0443\\u043A\\u043E\\u0432\\u043E\\u0434\\u0441\\u0442\\u0432\\u043E:\", eHelp);\n        }\n      });\n      var siteLabels = {\n        \"chatgpt\": \"ChatGPT\",\n        \"gemini\": \"Gemini\",\n        \"aistudio\": \"Google AI Studio\",\n        \"google_search\": \"Google Search AI\",\n        \"deepseek\": \"DeepSeek\",\n        \"claude\": \"Claude\",\n        \"perplexity\": \"Perplexity\"\n      };\n      chrome.storage.sync.get([\"selectedModel\", \"customLimit\", \"showWidget\"], function(data) {\n        if (data.selectedModel) modelSelect.value = data.selectedModel;\n        if (data.customLimit) customLimit.value = data.customLimit;\n        if (data.showWidget !== void 0) showWidget.checked = data.showWidget;\n      });\n      var AI_CM_BYOK_SESSION_KEY = \"aiCmApiKeySession\";\n      var AI_CM_BYOK_LEGACY_KEYS = [\n        \"ai_cm_gemini_api_key\",\n        \"ai_cm_api_key\",\n        \"ai_cm_byok_key\",\n        \"aiCmGeminiApiKey\",\n        \"aiCmApiKey\",\n        \"gemini_api_key\"\n      ];\n      var apiKeyStatusEl = document.getElementById(\"api-key-status\");\n      var removeApiKeyBtn = document.getElementById(\"api-key-remove\");\n      function aiCmFirstLegacyByokKey(data) {\n        for (var iLk = 0; iLk < AI_CM_BYOK_LEGACY_KEYS.length; iLk++) {\n          var vLk = data ? data[AI_CM_BYOK_LEGACY_KEYS[iLk]] : null;\n          if (typeof vLk === \"string\" && vLk) return vLk;\n        }\n        return \"\";\n      }\n      function aiCmPurgeLegacyByokKeys() {\n        try {\n          if (!chrome.storage || !chrome.storage.local || typeof chrome.storage.local.remove !== \"function\") return;\n          chrome.storage.local.remove(AI_CM_BYOK_LEGACY_KEYS);\n        } catch (ePurge) {\n          console.warn(\"[AI CM][catch] aiCmPurgeLegacyByokKeys:\", ePurge);\n        }\n      }\n      function aiCmI18nMessage(key, fallback, substitutions) {\n        try {\n          if (typeof chrome !== \"undefined\" && chrome.i18n && typeof chrome.i18n.getMessage === \"function\") {\n            var message = substitutions ? chrome.i18n.getMessage(key, substitutions) : chrome.i18n.getMessage(key);\n            if (message) return message;\n          }\n        } catch (eMessage) {\n          aiCmPopupDiagLine(\"aiCmI18nMessage\", { err: String(eMessage) });\n        }\n        return fallback;\n      }\n      function aiCmRenderApiKeyStatus(hasKey) {\n        if (!apiKeyStatusEl) return;\n        apiKeyStatusEl.textContent = hasKey ? aiCmI18nMessage(\"options_byok_status_set\", \"\\u041A\\u043B\\u044E\\u0447: \\u0437\\u0430\\u0434\\u0430\\u043D\") : aiCmI18nMessage(\"options_byok_status_unset\", \"\\u041A\\u043B\\u044E\\u0447: \\u043D\\u0435 \\u0437\\u0430\\u0434\\u0430\\u043D\");\n      }\n      function aiCmSaveByokKey(value) {\n        try {\n          if (chrome.storage && chrome.storage.session && typeof chrome.storage.session.set === \"function\") {\n            var patch = {};\n            patch[AI_CM_BYOK_SESSION_KEY] = value;\n            chrome.storage.session.set(patch);\n          }\n        } catch (eSet) {\n          console.warn(\"[AI CM][catch] aiCmSaveByokKey:\", eSet);\n        }\n        aiCmPurgeLegacyByokKeys();\n      }\n      var aiCmByokHasKeyState = null;\n      function aiCmRenderExactCountWarning(show) {\n        if (!exactCountWarningEl) return;\n        exactCountWarningEl.textContent = show ? aiCmI18nMessage(\n          \"options_exact_count_nokey\",\n          \"\\u041A\\u043B\\u044E\\u0447 API \\u043D\\u0435 \\u043D\\u0430\\u0439\\u0434\\u0435\\u043D. \\u0412\\u0432\\u0435\\u0434\\u0438\\u0442\\u0435 \\u043A\\u043B\\u044E\\u0447 \\u0437\\u0430\\u043D\\u043E\\u0432\\u043E, \\u0447\\u0442\\u043E\\u0431\\u044B \\u0432\\u043A\\u043B\\u044E\\u0447\\u0438\\u0442\\u044C \\u0442\\u043E\\u0447\\u043D\\u044B\\u0439 \\u043F\\u043E\\u0434\\u0441\\u0447\\u0451\\u0442\"\n        ) : \"\";\n      }\n      function aiCmSyncExactCountWithByok(hasKey) {\n        if (hasKey !== true && hasKey !== false) return;\n        aiCmByokHasKeyState = hasKey;\n        if (hasKey || !exactCountCheckbox || !exactCountCheckbox.checked) {\n          aiCmRenderExactCountWarning(false);\n          return;\n        }\n        exactCountCheckbox.checked = false;\n        aiCmRenderExactCountWarning(true);\n        try {\n          chrome.storage.local.set({ ai_cm_exact_token_count: false });\n        } catch (eSync) {\n          console.warn(\"[AI CM][catch] aiCmSyncExactCountWithByok:\", eSync);\n        }\n      }\n      function aiCmLoadByokKey() {\n        try {\n          let onSession2 = function(data) {\n            if (handled) return;\n            handled = true;\n            var key = data ? data[AI_CM_BYOK_SESSION_KEY] : \"\";\n            if (typeof key === \"string\" && key) {\n              if (apiKeyInput) apiKeyInput.value = key;\n              aiCmRenderApiKeyStatus(true);\n              aiCmSyncExactCountWithByok(true);\n              return;\n            }\n            aiCmRenderApiKeyStatus(false);\n            aiCmSyncExactCountWithByok(false);\n            try {\n              chrome.storage.local.get(AI_CM_BYOK_LEGACY_KEYS, function(dl) {\n                var legacy = aiCmFirstLegacyByokKey(dl);\n                if (!legacy) return;\n                aiCmSaveByokKey(legacy);\n                if (apiKeyInput) apiKeyInput.value = legacy;\n                aiCmRenderApiKeyStatus(true);\n                aiCmSyncExactCountWithByok(true);\n                console.log(\"[AI CM][byok] migrated plaintext\\u2192session\");\n              });\n            } catch (eLeg) {\n              aiCmPopupDiagLine(\"aiCmLoadByokKey\", { err: String(eLeg) });\n            }\n          };\n          var onSession = onSession2;\n          if (!chrome.storage || !chrome.storage.session || typeof chrome.storage.session.get !== \"function\") {\n            aiCmRenderApiKeyStatus(false);\n            return;\n          }\n          var handled = false;\n          var maybePromise = chrome.storage.session.get([AI_CM_BYOK_SESSION_KEY], onSession2);\n          if (maybePromise && typeof maybePromise.then === \"function\") {\n            maybePromise.then(onSession2, function() {\n              if (!handled) {\n                handled = true;\n                aiCmRenderApiKeyStatus(false);\n                aiCmSyncExactCountWithByok(false);\n              }\n            });\n          }\n        } catch (eLoad) {\n          aiCmRenderApiKeyStatus(false);\n        }\n      }\n      chrome.storage.local.get([\"ai_cm_exact_token_count\"], function(data) {\n        if (aiCmByokUiDisabled) {\n          [apiKeyInput, exactCountCheckbox].forEach(function(el) {\n            var section = el && el.closest ? el.closest(\".section\") : null;\n            if (section) {\n              section.hidden = true;\n              section.style.display = \"none\";\n            }\n          });\n          if (data.ai_cm_exact_token_count) chrome.storage.local.set({ ai_cm_exact_token_count: false });\n          return;\n        }\n        if (data.ai_cm_exact_token_count === void 0) return;\n        exactCountCheckbox.checked = !!data.ai_cm_exact_token_count;\n        if (aiCmByokHasKeyState === false) aiCmSyncExactCountWithByok(false);\n      });\n      if (!aiCmByokUiDisabled) aiCmLoadByokKey();\n      modelSelect && modelSelect.addEventListener(\"change\", function() {\n        chrome.storage.sync.set({ selectedModel: modelSelect.value });\n      });\n      var CUSTOM_LIMIT_DEBOUNCE_MS = 500;\n      var customLimitWriteTimer = null;\n      function aiCmCancelCustomLimitWrite() {\n        if (customLimitWriteTimer !== null) {\n          clearTimeout(customLimitWriteTimer);\n          customLimitWriteTimer = null;\n        }\n      }\n      customLimit && customLimit.addEventListener(\"input\", function() {\n        aiCmCancelCustomLimitWrite();\n        customLimitWriteTimer = setTimeout(function() {\n          customLimitWriteTimer = null;\n          var value = customLimit.value ? parseInt(customLimit.value) : null;\n          chrome.storage.sync.set({ customLimit: value });\n        }, CUSTOM_LIMIT_DEBOUNCE_MS);\n      });\n      customLimit && customLimit.addEventListener(\"change\", function() {\n        if (!customLimit.value) {\n          aiCmCancelCustomLimitWrite();\n          customLimit.placeholder = aiCmI18nMessage(\"options_limit_placeholder\", \"\\u0410\\u0432\\u0442\\u043E\");\n          chrome.storage.sync.set({ customLimit: null });\n        }\n      });\n      showWidget && showWidget.addEventListener(\"change\", function() {\n        chrome.storage.sync.set({ showWidget: showWidget.checked });\n      });\n      var debugLogsCheckbox = document.getElementById(\"debugLogs\");\n      chrome.storage.local.get([\"aiCmDebugLogs\"], function(data) {\n        if (debugLogsCheckbox) debugLogsCheckbox.checked = data.aiCmDebugLogs === true;\n      });\n      debugLogsCheckbox && debugLogsCheckbox.addEventListener(\"change\", function() {\n        chrome.storage.local.set({ aiCmDebugLogs: debugLogsCheckbox.checked });\n      });\n      var includeHiddenCheckbox = document.getElementById(\"aiCmIncludeHiddenInExport\");\n      chrome.storage.local.get([\"aiCmIncludeHiddenInExport\"], function(data) {\n        if (includeHiddenCheckbox) includeHiddenCheckbox.checked = !!(data && data.aiCmIncludeHiddenInExport === true);\n      });\n      includeHiddenCheckbox && includeHiddenCheckbox.addEventListener(\"change\", function() {\n        chrome.storage.local.set({ aiCmIncludeHiddenInExport: includeHiddenCheckbox.checked });\n      });\n      try {\n        chrome.storage.onChanged.addListener(function(changes, areaName) {\n          if (areaName !== \"local\") return;\n          if (changes.aiCmIncludeHiddenInExport && includeHiddenCheckbox) {\n            includeHiddenCheckbox.checked = changes.aiCmIncludeHiddenInExport.newValue === true;\n          }\n        });\n      } catch (eHiddenSync) {\n        aiCmPopupDiagLine(\"hidden-sync\", { err: String(eHiddenSync) });\n      }\n      var proactiveCheckbox = document.getElementById(\"aiCmProactive\");\n      var proactiveNotifyCheckbox = document.getElementById(\"aiCmProactiveNotify\");\n      chrome.storage.local.get([\"aiCmProactive\", \"aiCmProactiveNotify\"], function(data) {\n        if (proactiveCheckbox) proactiveCheckbox.checked = !(data && data.aiCmProactive === false);\n        if (proactiveNotifyCheckbox) proactiveNotifyCheckbox.checked = !!(data && data.aiCmProactiveNotify === true);\n      });\n      proactiveCheckbox && proactiveCheckbox.addEventListener(\"change\", function() {\n        chrome.storage.local.set({ aiCmProactive: proactiveCheckbox.checked });\n      });\n      proactiveNotifyCheckbox && proactiveNotifyCheckbox.addEventListener(\"change\", function() {\n        chrome.storage.local.set({ aiCmProactiveNotify: proactiveNotifyCheckbox.checked });\n      });\n      try {\n        chrome.storage.onChanged.addListener(function(changes, areaName) {\n          if (areaName !== \"local\") return;\n          if (changes.aiCmProactive && proactiveCheckbox) {\n            proactiveCheckbox.checked = changes.aiCmProactive.newValue !== false;\n          }\n          if (changes.aiCmProactiveNotify && proactiveNotifyCheckbox) {\n            proactiveNotifyCheckbox.checked = changes.aiCmProactiveNotify.newValue === true;\n          }\n        });\n      } catch (e) {\n        aiCmPopupDiagLine(\"proactive-changed\", { err: String(e) });\n      }\n      var thrLowInput = document.getElementById(\"aiCmProactiveLow\");\n      var thrMedInput = document.getElementById(\"aiCmProactiveMedium\");\n      var thrHighInput = document.getElementById(\"aiCmProactiveHigh\");\n      var PROACTIVE_THRESHOLDS_DEFAULT = [70, 85, 95];\n      function validProactiveThresholds(arr) {\n        try {\n          if (!Array.isArray(arr) || arr.length < 3) return null;\n          var out = [];\n          for (var i = 0; i < 3; i++) {\n            var n = parseInt(arr[i], 10);\n            if (isNaN(n) || n < 1 || n > 100) return null;\n            out.push(n);\n          }\n          if (!(out[0] < out[1] && out[1] < out[2])) return null;\n          return out;\n        } catch (e) {\n          return null;\n        }\n      }\n      function readProactiveThresholdInputs() {\n        return [\n          thrLowInput ? thrLowInput.value : void 0,\n          thrMedInput ? thrMedInput.value : void 0,\n          thrHighInput ? thrHighInput.value : void 0\n        ];\n      }\n      function fillProactiveThresholdInputs(arr) {\n        if (!arr || arr.length < 3) return;\n        if (thrLowInput) thrLowInput.value = arr[0];\n        if (thrMedInput) thrMedInput.value = arr[1];\n        if (thrHighInput) thrHighInput.value = arr[2];\n      }\n      function applyProactiveThresholdInputs() {\n        try {\n          var raw = readProactiveThresholdInputs();\n          var t = validProactiveThresholds(raw);\n          if (!t) {\n            console.warn(\"[AI CM][thresholds] \\u0431\\u0438\\u0442\\u044B\\u0439 \\u0432\\u0432\\u043E\\u0434 \\u043F\\u043E\\u0440\\u043E\\u0433\\u043E\\u0432 \\u2192 \\u0444\\u043E\\u043B\\u0431\\u044D\\u043A [70,85,95]\", raw);\n            t = PROACTIVE_THRESHOLDS_DEFAULT;\n          }\n          fillProactiveThresholdInputs(t);\n          chrome.storage.local.set({ aiCmProactiveThresholds: t });\n        } catch (eP) {\n          aiCmPopupDiagLine(\"applyProactiveThresholdInputs\", { err: String(eP) });\n        }\n      }\n      try {\n        chrome.storage.local.get([\"aiCmProactiveThresholds\"], function(data) {\n          try {\n            var hasStored = data && data.aiCmProactiveThresholds !== void 0;\n            var t = validProactiveThresholds(hasStored ? data.aiCmProactiveThresholds : null);\n            if (hasStored && !t) {\n              console.warn(\"[AI CM][thresholds] \\u0431\\u0438\\u0442\\u044B\\u0435 \\u0441\\u043E\\u0445\\u0440\\u0430\\u043D\\u0451\\u043D\\u043D\\u044B\\u0435 aiCmProactiveThresholds \\u2192 \\u0434\\u0435\\u0444\\u043E\\u043B\\u0442 [70,85,95]\", data.aiCmProactiveThresholds);\n            }\n            fillProactiveThresholdInputs(t || PROACTIVE_THRESHOLDS_DEFAULT);\n          } catch (eInit) {\n            aiCmPopupDiagLine(\"thresholds-init\", { err: String(eInit) });\n          }\n        });\n      } catch (eLoad) {\n        aiCmPopupDiagLine(\"thresholds-load\", { err: String(eLoad) });\n      }\n      [thrLowInput, thrMedInput, thrHighInput].forEach(function(el) {\n        if (!el) return;\n        el.addEventListener(\"change\", applyProactiveThresholdInputs);\n        el.addEventListener(\"blur\", applyProactiveThresholdInputs);\n      });\n      try {\n        chrome.storage.onChanged.addListener(function(changes, areaName) {\n          if (areaName === \"local\" && changes.aiCmProactiveThresholds) {\n            var t2 = validProactiveThresholds(changes.aiCmProactiveThresholds.newValue);\n            if (!t2) return;\n            if (document.activeElement === thrLowInput || document.activeElement === thrMedInput || document.activeElement === thrHighInput) return;\n            fillProactiveThresholdInputs(t2);\n          }\n        });\n      } catch (e) {\n        aiCmPopupDiagLine(\"thresholds-changed\", { err: String(e) });\n      }\n      apiKeyInput && apiKeyInput.addEventListener(\"input\", function() {\n        aiCmSaveByokKey(apiKeyInput.value);\n        aiCmRenderApiKeyStatus(!!apiKeyInput.value);\n        aiCmSyncExactCountWithByok(!!apiKeyInput.value);\n      });\n      removeApiKeyBtn && removeApiKeyBtn.addEventListener(\"click\", function() {\n        try {\n          if (chrome.storage && chrome.storage.session && typeof chrome.storage.session.remove === \"function\") {\n            chrome.storage.session.remove([AI_CM_BYOK_SESSION_KEY]);\n          }\n        } catch (eRm) {\n          console.warn(\"[AI CM][catch] removeApiKey:\", eRm);\n        }\n        aiCmPurgeLegacyByokKeys();\n        if (apiKeyInput) apiKeyInput.value = \"\";\n        aiCmRenderApiKeyStatus(false);\n        aiCmSyncExactCountWithByok(false);\n      });\n      toggleApiKeyBtn && toggleApiKeyBtn.addEventListener(\"click\", function() {\n        if (apiKeyInput.type === \"password\") {\n          apiKeyInput.type = \"text\";\n          toggleApiKeyBtn.textContent = \"\\u{1F648}\";\n        } else {\n          apiKeyInput.type = \"password\";\n          toggleApiKeyBtn.textContent = \"\\u{1F441}\";\n        }\n        toggleApiKeyBtn.setAttribute(\"aria-pressed\", String(apiKeyInput.type === \"text\"));\n      });\n      exactCountCheckbox && exactCountCheckbox.addEventListener(\"change\", function() {\n        chrome.storage.local.set({ ai_cm_exact_token_count: exactCountCheckbox.checked });\n        if (aiCmByokHasKeyState === false && exactCountCheckbox.checked) {\n          aiCmSyncExactCountWithByok(false);\n        } else {\n          aiCmRenderExactCountWarning(false);\n        }\n      });\n      var autoExportCheckbox = document.getElementById(\"aiCmAutoExport\");\n      var autoExportPctInput = document.getElementById(\"aiCmAutoExportPct\");\n      var autoExportFmtSelect = document.getElementById(\"aiCmAutoExportFmt\");\n      function normalizeAutoExportFmt(v) {\n        return v === \"md\" || v === \"json\" ? v : \"txt\";\n      }\n      function clampAutoExportPct(v) {\n        var n = parseInt(v, 10);\n        if (isNaN(n)) return null;\n        if (n < 1) n = 1;\n        if (n > 100) n = 100;\n        return n;\n      }\n      var AI_CM_AUTO_EXPORT_PCT_DEFAULT = 90;\n      function aiCmAutoExportWriteFull() {\n        try {\n          var pctFull = clampAutoExportPct(autoExportPctInput.value);\n          pctFull = pctFull === null ? AI_CM_AUTO_EXPORT_PCT_DEFAULT : pctFull;\n          autoExportPctInput.value = pctFull;\n          chrome.storage.local.set({\n            aiCmAutoExport: autoExportCheckbox.checked === true,\n            aiCmAutoExportPct: pctFull,\n            aiCmAutoExportFmt: normalizeAutoExportFmt(autoExportFmtSelect.value)\n          });\n        } catch (eFull) {\n          aiCmPopupDiagLine(\"aiCmAutoExportWriteFull\", { err: String(eFull) });\n        }\n      }\n      try {\n        chrome.storage.local.get([\"aiCmAutoExport\", \"aiCmAutoExportPct\", \"aiCmAutoExportFmt\"], function(data) {\n          try {\n            data = data || {};\n            if (autoExportCheckbox) autoExportCheckbox.checked = data.aiCmAutoExport === true;\n            var pctInit = clampAutoExportPct(data.aiCmAutoExportPct);\n            if (autoExportPctInput) autoExportPctInput.value = pctInit === null ? AI_CM_AUTO_EXPORT_PCT_DEFAULT : pctInit;\n            if (autoExportFmtSelect) autoExportFmtSelect.value = normalizeAutoExportFmt(data.aiCmAutoExportFmt);\n            var needsNormalize = typeof data.aiCmAutoExport !== \"boolean\" || pctInit === null || normalizeAutoExportFmt(data.aiCmAutoExportFmt) !== data.aiCmAutoExportFmt;\n            if (needsNormalize) aiCmAutoExportWriteFull();\n          } catch (eInit) {\n            aiCmPopupDiagLine(\"autoexport-init\", { err: String(eInit) });\n          }\n        });\n      } catch (eLoad) {\n        aiCmPopupDiagLine(\"autoexport-load\", { err: String(eLoad) });\n      }\n      autoExportCheckbox && autoExportCheckbox.addEventListener(\"change\", aiCmAutoExportWriteFull);\n      autoExportPctInput && autoExportPctInput.addEventListener(\"change\", aiCmAutoExportWriteFull);\n      autoExportPctInput && autoExportPctInput.addEventListener(\"blur\", aiCmAutoExportWriteFull);\n      autoExportFmtSelect && autoExportFmtSelect.addEventListener(\"change\", aiCmAutoExportWriteFull);\n      try {\n        chrome.storage.onChanged.addListener(function(changes, areaName) {\n          if (areaName === \"local\" && changes.aiCmDebugLogs) {\n            debugLogsCheckbox.checked = changes.aiCmDebugLogs.newValue === true;\n          }\n          if (areaName === \"local\" && changes.aiCmAutoExportPct && autoExportPctInput && document.activeElement !== autoExportPctInput) {\n            var pct = clampAutoExportPct(changes.aiCmAutoExportPct.newValue);\n            autoExportPctInput.value = pct === null ? 90 : pct;\n          }\n        });\n      } catch (e) {\n        aiCmPopupDiagLine(\"autoexport-changed\", { err: String(e) });\n      }\n      document.getElementById(\"reset-limit\") && document.getElementById(\"reset-limit\").addEventListener(\"click\", function() {\n        aiCmCancelCustomLimitWrite();\n        customLimit.value = \"\";\n        customLimit.placeholder = aiCmI18nMessage(\"options_limit_placeholder\", \"\\u0410\\u0432\\u0442\\u043E\");\n        chrome.storage.sync.set({ customLimit: null });\n      });\n      var chatDialogPathBySite = {\n        \"chatgpt\": /\\/(c|g|share)\\//,\n        \"gemini\": /\\/app\\//,\n        \"claude\": /\\/chat\\//,\n        \"perplexity\": /\\/(search|follow)\\//,\n        \"deepseek\": /\\/a\\//\n      };\n      function detectChatSite(hostname) {\n        if (!hostname) return null;\n        var host = String(hostname).toLowerCase();\n        if (host.indexOf(\"chatgpt.com\") !== -1) return \"chatgpt\";\n        if (host.indexOf(\"gemini.google.com\") !== -1) return \"gemini\";\n        if (host.indexOf(\"claude.ai\") !== -1) return \"claude\";\n        if (host.indexOf(\"perplexity.ai\") !== -1) return \"perplexity\";\n        if (host.indexOf(\"chat.deepseek.com\") !== -1) return \"deepseek\";\n        return null;\n      }\n      function isChatHome(hostname, pathname) {\n        var site = detectChatSite(hostname);\n        if (!site) return false;\n        return chatDialogPathBySite[site].test(String(pathname || \"\"));\n      }\n      function updateStatsFromState(state, tabHost, tabPath, fromCache) {\n        siteEl.textContent = siteLabels[state.site] || state.site || \"\\u2014\";\n        modelEl.textContent = state.model || \"\\u2014\";\n        tokensEl.textContent = typeof state.tokens === \"number\" ? state.tokens.toLocaleString() : \"\\u2014\";\n        limitEl.textContent = typeof state.limit === \"number\" ? state.limit.toLocaleString() : \"\\u2014\";\n        var p = state.percent || 0;\n        percentEl.textContent = p + \"%\";\n        percentEl.style.color = percentColor(p);\n        if (sourceEl) {\n          sourceEl.textContent = fromCache ? aiCmI18nMessage(\"options_source_cache\", \"\\u043A\\u044D\\u0448 (\\u043F\\u0440\\u043E\\u0448\\u043B\\u0430\\u044F \\u0431\\u0435\\u0441\\u0435\\u0434\\u0430)\") : state.sourceLabel || \"\\u2014\";\n        }\n        updateStaleWarning(state, tabHost, tabPath);\n      }\n      function updateStaleWarning(state, tabHost, tabPath) {\n        if (!staleWarningEl) return;\n        var showStale = !!(state && state.stale === true && isChatHome(tabHost, tabPath));\n        if (showStale) {\n          var siteLabel = siteLabels[state.site] || state.site || aiCmI18nMessage(\"options_stale_site_fallback\", \"\\u0441\\u0430\\u0439\\u0442\\u043E\\u043C\");\n          staleWarningEl.textContent = aiCmI18nMessage(\"options_stale_warning\", \"\\u0418\\u043D\\u0442\\u0435\\u0433\\u0440\\u0430\\u0446\\u0438\\u044F \\u0441 \" + siteLabel + \" \\u043C\\u043E\\u0433\\u043B\\u0430 \\u0443\\u0441\\u0442\\u0430\\u0440\\u0435\\u0442\\u044C: \\u0441\\u0430\\u0439\\u0442 \\u043D\\u0435 \\u043E\\u0442\\u0434\\u0430\\u0451\\u0442 \\u0434\\u0430\\u043D\\u043D\\u044B\\u0435 \\u0434\\u0438\\u0430\\u043B\\u043E\\u0433\\u0430. \\u041F\\u0440\\u043E\\u0432\\u0435\\u0440\\u044C\\u0442\\u0435 \\u043E\\u0431\\u043D\\u043E\\u0432\\u043B\\u0435\\u043D\\u0438\\u0435 \\u0440\\u0430\\u0441\\u0448\\u0438\\u0440\\u0435\\u043D\\u0438\\u044F.\", [siteLabel]);\n          staleWarningEl.style.display = \"block\";\n        } else {\n          staleWarningEl.style.display = \"none\";\n          staleWarningEl.textContent = \"\";\n        }\n      }\n      function aiCmPopupDiagLine(tag, fields) {\n        try {\n          if (typeof aiCmDiagLine === \"function\") return aiCmDiagLine(tag, fields);\n          var on = false;\n          try {\n            on = !!(typeof sessionStorage !== \"undefined\" && sessionStorage && sessionStorage.getItem(\"aiCmDebug\") === \"1\");\n          } catch (eSess) {\n            on = false;\n          }\n          if (!on) {\n            try {\n              on = window.__aiCmDebugLogs === true;\n            } catch (eWin) {\n              return false;\n            }\n          }\n          if (!on) return false;\n          var parts = [];\n          var f = fields || {};\n          for (var k in f) {\n            if (!Object.prototype.hasOwnProperty.call(f, k)) continue;\n            var v = f[k];\n            parts.push(k + \"=\" + (v === void 0 || v === null ? \"-\" : String(v)));\n          }\n          console.log(\"[AI CM][diag] \" + tag + \" \" + parts.join(\" \"));\n          return true;\n        } catch (eDiag) {\n          return false;\n        }\n      }\n      function showNoData(message) {\n        try {\n          aiCmPopupDiagLine(\"qwen-badge\", {\n            ts: Date.now(),\n            event: \"showNoData\",\n            reason: String(message || \"-\"),\n            url: String(typeof location !== \"undefined\" && location && location.href || \"\")\n          });\n        } catch (eQnd) {\n          aiCmPopupDiagLine(\"showNoData\", { err: String(eQnd) });\n        }\n        siteEl.textContent = message || aiCmI18nMessage(\"options_no_data\", \"\\u041D\\u0435\\u0442 \\u0434\\u0430\\u043D\\u043D\\u044B\\u0445\");\n        modelEl.textContent = \"\\u2014\";\n        tokensEl.textContent = \"\\u2014\";\n        limitEl.textContent = \"\\u2014\";\n        percentEl.textContent = \"\\u2014\";\n        percentEl.style.color = \"#8888aa\";\n      }\n      function formatTime(ts) {\n        try {\n          var d = new Date(ts);\n          return (\"0\" + d.getHours()).slice(-2) + \":\" + (\"0\" + d.getMinutes()).slice(-2);\n        } catch (e) {\n          return \"??:??\";\n        }\n      }\n      var cachedState = null;\n      function loadStats() {\n        try {\n          chrome.tabs.query({ active: true, currentWindow: true }, function(tabs) {\n            var tab = tabs && tabs[0];\n            if (!tab || !tab.url) {\n              showNoData(aiCmI18nMessage(\"options_no_active_tab\", \"\\u041D\\u0435\\u0442 \\u0430\\u043A\\u0442\\u0438\\u0432\\u043D\\u043E\\u0439 \\u0432\\u043A\\u043B\\u0430\\u0434\\u043A\\u0438\"));\n              return;\n            }\n            if (tab.url.indexOf(\"chrome://\") === 0 || tab.url.indexOf(\"chrome-extension://\") === 0) {\n              showNoData(aiCmI18nMessage(\"options_open_supported_site\", \"\\u041E\\u0442\\u043A\\u0440\\u043E\\u0439\\u0442\\u0435 \\u043F\\u043E\\u0434\\u0434\\u0435\\u0440\\u0436\\u0438\\u0432\\u0430\\u0435\\u043C\\u044B\\u0439 \\u0441\\u0430\\u0439\\u0442\"));\n              return;\n            }\n            var tabHost = \"\";\n            var tabPath = \"\";\n            try {\n              var activeTabUrl = new URL(tab.url);\n              tabHost = activeTabUrl.hostname;\n              tabPath = activeTabUrl.pathname;\n            } catch (e) {\n              aiCmPopupDiagLine(\"loadStats-tab-url\", { err: String(e) });\n            }\n            chrome.storage.local.get([\"aiCmState\", \"aiCmState:\" + tabHost], function(data) {\n              var state = data[\"aiCmState:\" + tabHost] || null;\n              if (!state && data.aiCmState && data.aiCmState.host === tabHost) {\n                state = data.aiCmState;\n              }\n              if (state) {\n                cachedState = state;\n                updateStatsFromState(state, tabHost, tabPath);\n                updateExportButtons();\n              } else if (cachedState && cachedState.host === tabHost) {\n                updateStatsFromState(cachedState, tabHost, tabPath, true);\n                var cachedAt = formatTime(cachedState.updatedAt);\n                siteEl.textContent += aiCmI18nMessage(\"options_data_from\", \" \\xB7 \\u0434\\u0430\\u043D\\u043D\\u044B\\u0435 \\u043E\\u0442 \" + cachedAt, [cachedAt]);\n              } else {\n                showNoData(aiCmI18nMessage(\"options_open_supported_site\", \"\\u041E\\u0442\\u043A\\u0440\\u043E\\u0439\\u0442\\u0435 \\u043F\\u043E\\u0434\\u0434\\u0435\\u0440\\u0436\\u0438\\u0432\\u0430\\u0435\\u043C\\u044B\\u0439 \\u0441\\u0430\\u0439\\u0442\"));\n              }\n            });\n          });\n        } catch (e) {\n          showNoData(aiCmI18nMessage(\"options_reload_page\", \"\\u041E\\u0431\\u043D\\u043E\\u0432\\u0438\\u0442\\u0435 \\u0441\\u0442\\u0440\\u0430\\u043D\\u0438\\u0446\\u0443\"));\n        }\n      }\n      try {\n        chrome.storage.onChanged.addListener(function(changes, areaName) {\n          if (areaName !== \"local\") return;\n          var candidates = [];\n          if (changes.aiCmState && changes.aiCmState.newValue) candidates.push(changes.aiCmState.newValue);\n          for (var key in changes) {\n            if (key.indexOf(\"aiCmState:\") === 0 && changes[key] && changes[key].newValue) {\n              candidates.push(changes[key].newValue);\n            }\n          }\n          if (!candidates.length) {\n            var removedForTab = false;\n            chrome.tabs.query({ active: true, currentWindow: true }, function(tabs) {\n              var tab = tabs && tabs[0];\n              var tabHost = \"\";\n              try {\n                if (tab && tab.url) tabHost = new URL(tab.url).hostname;\n              } catch (e) {\n                aiCmPopupDiagLine(\"stats-changed-removed\", { err: String(e) });\n              }\n              removedForTab = !tabHost && (!!changes.aiCmState || !!changes[\"aiCmState:\" + tabHost]) || !!tabHost && (!!changes[\"aiCmState:\" + tabHost] || !!changes.aiCmState && !!(changes.aiCmState.oldValue && changes.aiCmState.oldValue.host === tabHost));\n              if (!removedForTab) return;\n              cachedState = null;\n              showNoData(aiCmI18nMessage(\"options_open_supported_site\", \"\\u041E\\u0442\\u043A\\u0440\\u043E\\u0439\\u0442\\u0435 \\u043F\\u043E\\u0434\\u0434\\u0435\\u0440\\u0436\\u0438\\u0432\\u0430\\u0435\\u043C\\u044B\\u0439 \\u0441\\u0430\\u0439\\u0442\"));\n              updateStaleWarning(null, tabHost, \"\");\n              updateExportButtons();\n            });\n            return;\n          }\n          chrome.tabs.query({ active: true, currentWindow: true }, function(tabs) {\n            var tab = tabs && tabs[0];\n            var tabHost = \"\";\n            var tabPath = \"\";\n            try {\n              if (tab && tab.url) {\n                var activeTabUrl = new URL(tab.url);\n                tabHost = activeTabUrl.hostname;\n                tabPath = activeTabUrl.pathname;\n              }\n            } catch (e) {\n              aiCmPopupDiagLine(\"stats-changed-live\", { err: String(e) });\n            }\n            var best = null;\n            for (var i = 0; i < candidates.length; i++) {\n              var s = candidates[i];\n              if (s.host === tabHost && (!best || (s.updatedAt || 0) > (best.updatedAt || 0))) best = s;\n            }\n            if (best) {\n              cachedState = best;\n              updateStatsFromState(best, tabHost, tabPath);\n              updateExportButtons();\n            }\n          });\n        });\n      } catch (e) {\n        aiCmPopupDiagLine(\"stats-changed\", { err: String(e) });\n      }\n      var cachedHistory = null;\n      var currentTabHost = \"\";\n      function getActiveTabHost(cb) {\n        try {\n          chrome.tabs.query({ active: true, currentWindow: true }, function(tabs) {\n            var tab = tabs && tabs[0];\n            var host = \"\";\n            if (tab && tab.url) {\n              try {\n                host = new URL(tab.url).hostname;\n              } catch (e) {\n                host = \"\";\n              }\n            }\n            currentTabHost = host;\n            cb(host);\n          });\n        } catch (e) {\n          cb(\"\");\n        }\n      }\n      function updateExportButtons() {\n        if (!exportMdBtn || !exportJsonBtn || !exportPdfBtn) return;\n        var enabled = !!(cachedHistory && cachedHistory.host === currentTabHost);\n        var netMsgs = cachedState && cachedState.host === currentTabHost && typeof cachedState.netBaseMsgs === \"number\" ? cachedState.netBaseMsgs : 0;\n        if (!enabled && netMsgs > 0) enabled = true;\n        exportMdBtn.disabled = !enabled;\n        exportJsonBtn.disabled = !enabled;\n        exportPdfBtn.disabled = !enabled;\n        if (exportTxtBtn) exportTxtBtn.disabled = !enabled;\n        if (exportHintEl) {\n          if (enabled) {\n            var hintAt = cachedHistory && cachedHistory.host === currentTabHost ? cachedHistory.updatedAt : cachedState ? cachedState.updatedAt : 0;\n            var exportAt = formatTime(hintAt);\n            exportHintEl.textContent = aiCmI18nMessage(\"options_ready_to_export\", \"\\u0413\\u043E\\u0442\\u043E\\u0432\\u043E \\u043A \\u044D\\u043A\\u0441\\u043F\\u043E\\u0440\\u0442\\u0443 \\xB7 \\u0434\\u0430\\u043D\\u043D\\u044B\\u0435 \\u043E\\u0442 \" + exportAt, [exportAt]);\n          } else {\n            exportHintEl.textContent = aiCmI18nMessage(\"options_open_supported_site\", \"\\u041E\\u0442\\u043A\\u0440\\u043E\\u0439\\u0442\\u0435 \\u043F\\u043E\\u0434\\u0434\\u0435\\u0440\\u0436\\u0438\\u0432\\u0430\\u0435\\u043C\\u044B\\u0439 \\u0441\\u0430\\u0439\\u0442\");\n          }\n        }\n      }\n      function buildTxtText(hist) {\n        return window.AiCmExportBuilders ? window.AiCmExportBuilders.buildTxtFromHistory(hist || cachedHistory) : \"\";\n      }\n      function refreshExportState() {\n        getActiveTabHost(function(host) {\n          chrome.storage.local.get([\"aiCmHistory\", \"aiCmHistory:\" + host], function(data) {\n            var hist = data[\"aiCmHistory:\" + host] || null;\n            if (!hist && data.aiCmHistory && data.aiCmHistory.host === host) {\n              hist = data.aiCmHistory;\n            }\n            cachedHistory = hist;\n            updateExportButtons();\n          });\n        });\n      }\n      function pad2(n) {\n        return (n < 10 ? \"0\" : \"\") + n;\n      }\n      function buildFileName(ext, hist) {\n        hist = hist || cachedHistory;\n        var d = /* @__PURE__ */ new Date();\n        var stamp = d.getFullYear() + \"-\" + pad2(d.getMonth() + 1) + \"-\" + pad2(d.getDate()) + \"-\" + pad2(d.getHours()) + \"-\" + pad2(d.getMinutes());\n        var site = hist && hist.site || \"chat\";\n        var model = hist && hist.model || \"model\";\n        var safeSite = String(site).replace(/[^a-zA-Z0-9_-]+/g, \"-\").replace(/^-+|-+$/g, \"\") || \"chat\";\n        var safeModel = String(model).replace(/[^a-zA-Z0-9_.-]+/g, \"-\").replace(/^-+|-+$/g, \"\") || \"model\";\n        var lowConfPrefix = hist && hist.isLowConfidenceBase === true ? \"[LOW CONFIDENCE]_\" : \"\";\n        return lowConfPrefix + \"ai-context-monitor-\" + safeSite + \"-\" + safeModel + \"-\" + stamp + \".\" + ext;\n      }\n      function downloadBlob(content, fileName, mimeType, trigger) {\n        if (window.AiCmExportBuilders && window.AiCmExportBuilders.downloadBlob) {\n          window.AiCmExportBuilders.downloadBlob(content, fileName, mimeType, trigger || \"options\");\n        }\n      }\n      function getPlatform(hist) {\n        hist = hist || cachedHistory;\n        var site = hist && hist.site;\n        return siteLabels[site] || site || \"AI Chat\";\n      }\n      function buildJsonText(hist) {\n        hist = hist || cachedHistory;\n        var exportedAt = (/* @__PURE__ */ new Date()).toISOString();\n        return JSON.stringify({\n          platform: getPlatform(hist),\n          model: hist && hist.model || \"\",\n          exportedAt,\n          tokens: hist && typeof hist.tokens === \"number\" ? hist.tokens : 0,\n          limit: hist && typeof hist.limit === \"number\" ? hist.limit : 0,\n          percent: hist && typeof hist.percent === \"number\" ? hist.percent : 0,\n          messages: hist && Array.isArray(hist.messages) ? hist.messages : []\n        }, null, 2);\n      }\n      function buildMdText(hist) {\n        return window.AiCmExportBuilders ? window.AiCmExportBuilders.buildMdFromHistory(hist || cachedHistory, getPlatform(hist)) : \"\";\n      }\n      function getCurrentConvSnapshot(cb) {\n        try {\n          chrome.tabs.query({ active: true, currentWindow: true }, function(tabs) {\n            var tab = tabs && tabs[0];\n            if (!tab || !tab.id) {\n              cb(null);\n              return;\n            }\n            try {\n              chrome.tabs.sendMessage(tab.id, { type: \"aiCmExportCurrent\" }, function(resp) {\n                if (chrome.runtime.lastError || !resp || !resp.data) {\n                  cb(null);\n                  return;\n                }\n                cb(resp.data);\n              });\n            } catch (eS) {\n              cb(null);\n            }\n          });\n        } catch (eQ) {\n          cb(null);\n        }\n      }\n      function pickExportHistory(snap) {\n        if (snap && (snap.convId || Array.isArray(snap.messages) && snap.messages.length > 0)) return snap;\n        return cachedHistory;\n      }\n      exportMdBtn && exportMdBtn.addEventListener(\"click\", function() {\n        if (exportMdBtn.disabled) return;\n        getCurrentConvSnapshot(function(snap) {\n          var hist = pickExportHistory(snap);\n          if (!hist) return;\n          downloadBlob(buildMdText(hist), buildFileName(\"md\", hist), \"text/markdown\", \"options-md\");\n        });\n      });\n      exportJsonBtn && exportJsonBtn.addEventListener(\"click\", function() {\n        if (exportJsonBtn.disabled) return;\n        getCurrentConvSnapshot(function(snap) {\n          var hist = pickExportHistory(snap);\n          if (!hist) return;\n          downloadBlob(buildJsonText(hist), buildFileName(\"json\", hist), \"application/json\", \"options-json\");\n        });\n      });\n      exportTxtBtn && exportTxtBtn.addEventListener(\"click\", function() {\n        if (exportTxtBtn.disabled) return;\n        getCurrentConvSnapshot(function(snap) {\n          var hist = pickExportHistory(snap);\n          if (!hist) return;\n          var txt = buildTxtText(hist);\n          if (txt.charAt(0) !== \"\\uFEFF\") txt = \"\\uFEFF\" + txt;\n          downloadBlob(txt, buildFileName(\"txt\", hist), \"text/plain;charset=utf-8\", \"options-txt\");\n        });\n      });\n      exportPdfBtn && exportPdfBtn.addEventListener(\"click\", function() {\n        if (exportPdfBtn.disabled) return;\n        getActiveTab(function(tab) {\n          if (!tab || !tab.id) return;\n          var url = chrome.runtime.getURL(\"print/print.html\") + \"?tab=\" + tab.id;\n          try {\n            chrome.tabs.create({ url });\n          } catch (e) {\n            console.warn(\"[export-pdf] \\u043D\\u0435 \\u0443\\u0434\\u0430\\u043B\\u043E\\u0441\\u044C \\u043E\\u0442\\u043A\\u0440\\u044B\\u0442\\u044C \\u043F\\u0435\\u0447\\u0430\\u0442\\u043D\\u0443\\u044E \\u0444\\u043E\\u0440\\u043C\\u0443:\", e);\n          }\n        });\n      });\n      function getActiveTab(cb) {\n        try {\n          chrome.tabs.query({ active: true, currentWindow: true }, function(tabs) {\n            cb(tabs && tabs[0] ? tabs[0] : null);\n          });\n        } catch (e) {\n          cb(null);\n        }\n      }\n      function buildDiagnosticsFileName() {\n        return \"ai-context-monitor-diagnostics-\" + Date.now() + \".json\";\n      }\n      exportDiagBtn && exportDiagBtn.addEventListener(\"click\", function() {\n        getActiveTab(function(tab) {\n          if (!tab || !tab.id) {\n            downloadBlob(JSON.stringify({ error: \"\\u043D\\u0435\\u0442 \\u0430\\u043A\\u0442\\u0438\\u0432\\u043D\\u043E\\u0439 \\u0432\\u043A\\u043B\\u0430\\u0434\\u043A\\u0438\", at: (/* @__PURE__ */ new Date()).toISOString() }, null, 2), buildDiagnosticsFileName(), \"application/json\", \"options-diag\");\n            return;\n          }\n          try {\n            chrome.tabs.sendMessage(tab.id, { type: \"aiCmDiag\" }, function(response) {\n              var payload;\n              if (chrome.runtime.lastError) {\n                payload = {\n                  error: \"content script \\u043D\\u0435 \\u043E\\u0442\\u0432\\u0435\\u0442\\u0438\\u043B: \" + chrome.runtime.lastError.message,\n                  at: (/* @__PURE__ */ new Date()).toISOString()\n                };\n              } else {\n                payload = response && response.diag ? response.diag : { error: \"\\u043F\\u0443\\u0441\\u0442\\u043E\\u0439 \\u043E\\u0442\\u0432\\u0435\\u0442\", response: response || null };\n              }\n              downloadBlob(JSON.stringify(payload, null, 2), buildDiagnosticsFileName(), \"application/json\", \"options-diag\");\n            });\n          } catch (e) {\n            downloadBlob(JSON.stringify({ error: \"sendMessage error: \" + e.message, at: (/* @__PURE__ */ new Date()).toISOString() }, null, 2), buildDiagnosticsFileName(), \"application/json\", \"options-diag\");\n          }\n        });\n      });\n      try {\n        chrome.storage.onChanged.addListener(function(changes, areaName) {\n          if (areaName !== \"local\") return;\n          var hist = null;\n          if (changes.aiCmHistory && changes.aiCmHistory.newValue) hist = changes.aiCmHistory.newValue;\n          for (var key in changes) {\n            if (key.indexOf(\"aiCmHistory:\") === 0 && changes[key] && changes[key].newValue) {\n              var v = changes[key].newValue;\n              if (!hist || (v.updatedAt || 0) > (hist.updatedAt || 0)) hist = v;\n            }\n          }\n          if (!hist) return;\n          getActiveTabHost(function() {\n            if (hist.host === currentTabHost) cachedHistory = hist;\n            updateExportButtons();\n          });\n        });\n      } catch (e) {\n        aiCmPopupDiagLine(\"history-changed\", { err: String(e) });\n      }\n      var archiveFileInput = document.getElementById(\"archive-file\");\n      var archiveImportBtn = document.getElementById(\"archive-import\");\n      var archiveRefreshBtn = document.getElementById(\"archive-refresh\");\n      var archiveStatusEl = document.getElementById(\"archive-status\");\n      var archiveListEl = document.getElementById(\"archive-list\");\n      var AI_ARCHIVE_MAX_FILES = 20;\n      function aiCmArchiveApi() {\n        try {\n          return typeof window !== \"undefined\" && window.AiCmArchiveImport ? window.AiCmArchiveImport : null;\n        } catch (e) {\n          return null;\n        }\n      }\n      function aiCmSetArchiveStatus(text, isError) {\n        if (!archiveStatusEl) return;\n        archiveStatusEl.textContent = text || \"\";\n        archiveStatusEl.style.color = isError ? \"#ef4444\" : \"\";\n      }\n      function buildArchiveStoragePatch(records, fileName) {\n        const API = aiCmArchiveApi();\n        const patch = {};\n        if (!API || !Array.isArray(records)) return patch;\n        records.forEach(function(rec) {\n          if (!rec || !rec.convId) return;\n          patch[API.archiveStorageKey(rec.convId)] = rec;\n          patch[API.convSourceStorageKey(rec.convId)] = API.buildConvSourceRecord(rec, { fileName });\n        });\n        return patch;\n      }\n      function aiCmImportArchiveFiles(files, onDone) {\n        const API = aiCmArchiveApi();\n        if (!API) {\n          onDone(aiCmI18nMessage(\"options_archive_module_missing\", \"\\u043C\\u043E\\u0434\\u0443\\u043B\\u044C \\u0438\\u043C\\u043F\\u043E\\u0440\\u0442\\u0430 \\u043D\\u0435 \\u0437\\u0430\\u0433\\u0440\\u0443\\u0436\\u0435\\u043D (utils/archive-import.js)\"));\n          return;\n        }\n        const list = Array.prototype.slice.call(files || []).filter(function(f) {\n          return !!f;\n        }).slice(0, AI_ARCHIVE_MAX_FILES);\n        if (!list.length) {\n          onDone(aiCmI18nMessage(\"options_archive_no_files\", \"\\u0444\\u0430\\u0439\\u043B\\u044B \\u043D\\u0435 \\u0432\\u044B\\u0431\\u0440\\u0430\\u043D\\u044B\"));\n          return;\n        }\n        const report = {\n          files: 0,\n          conversations: 0,\n          accepted: 0,\n          bytes: 0,\n          skipped: [],\n          errors: [],\n          patch: {}\n        };\n        let idx = 0;\n        function step() {\n          if (idx >= list.length) {\n            onDone(null, report);\n            return;\n          }\n          const file = list[idx++];\n          report.files++;\n          const maxArchiveSize = Number(API.MAX_ARCHIVE_SIZE) || 0;\n          const fileSize = Number(file && file.size) || 0;\n          if (maxArchiveSize > 0 && fileSize > maxArchiveSize) {\n            const limitMb = String(Math.round(maxArchiveSize / (1024 * 1024)));\n            report.errors.push({\n              fileName: file.name,\n              error: \"file-too-large\",\n              size: fileSize,\n              limit: maxArchiveSize,\n              message: aiCmI18nMessage(\n                \"options_archive_file_too_large\",\n                \"\\u0444\\u0430\\u0439\\u043B \\u0441\\u043B\\u0438\\u0448\\u043A\\u043E\\u043C \\u0431\\u043E\\u043B\\u044C\\u0448\\u043E\\u0439 (\\u0431\\u043E\\u043B\\u044C\\u0448\\u0435 \" + limitMb + \" \\u041C\\u0411) \\u2014 \\u0447\\u0442\\u0435\\u043D\\u0438\\u0435 \\u043E\\u0442\\u043C\\u0435\\u043D\\u0435\\u043D\\u043E\",\n                [limitMb]\n              )\n            });\n            step();\n            return;\n          }\n          let reader;\n          try {\n            reader = new FileReader();\n          } catch (eNew) {\n            report.errors.push({ fileName: file.name, error: \"filereader-unavailable\" });\n            step();\n            return;\n          }\n          reader.onerror = function() {\n            report.errors.push({ fileName: file.name, error: \"read-error\" });\n            step();\n          };\n          reader.onload = function() {\n            try {\n              const parsed = API.parseArchiveText(String(reader.result == null ? \"\" : reader.result));\n              if (!parsed.ok) {\n                report.errors.push({ fileName: file.name, error: parsed.error });\n                step();\n                return;\n              }\n              report.conversations += parsed.conversations.length;\n              const plan = API.planArchiveImport(parsed.conversations, { fileName: file.name });\n              (plan.skipped || []).forEach(function(s) {\n                report.skipped.push({ fileName: file.name, convId: s.convId, reason: s.reason });\n              });\n              report.accepted += plan.accepted.length;\n              report.bytes += plan.bytes || 0;\n              Object.assign(report.patch, buildArchiveStoragePatch(plan.accepted, file.name));\n            } catch (eParse) {\n              report.errors.push({ fileName: file.name, error: \"parse-exception\" });\n            }\n            step();\n          };\n          try {\n            reader.readAsText(file);\n          } catch (eRead) {\n            report.errors.push({ fileName: file.name, error: \"read-exception\" });\n            step();\n          }\n        }\n        step();\n      }\n      function formatArchiveReport(report) {\n        if (!report) return \"\";\n        const parts = [];\n        var nFiles = String(report.files);\n        var nConvs = String(report.conversations);\n        var nAccepted = String(report.accepted);\n        parts.push(aiCmI18nMessage(\"options_archive_report_files\", \"\\u0444\\u0430\\u0439\\u043B\\u043E\\u0432: \" + nFiles, [nFiles]));\n        parts.push(aiCmI18nMessage(\"options_archive_report_conversations\", \"\\u0434\\u0438\\u0430\\u043B\\u043E\\u0433\\u043E\\u0432: \" + nConvs, [nConvs]));\n        parts.push(aiCmI18nMessage(\"options_archive_report_imported\", \"\\u0438\\u043C\\u043F\\u043E\\u0440\\u0442\\u0438\\u0440\\u043E\\u0432\\u0430\\u043D\\u043E: \" + nAccepted, [nAccepted]));\n        if (report.bytes) {\n          var kb = String(Math.round(report.bytes / 1024));\n          parts.push(aiCmI18nMessage(\"options_archive_report_kb\", \"\\u2248\" + kb + \" \\u041A\\u0411\", [kb]));\n        }\n        if (report.skipped && report.skipped.length) {\n          const byReason = {};\n          report.skipped.forEach(function(s) {\n            byReason[s.reason] = (byReason[s.reason] || 0) + 1;\n          });\n          var skippedList = Object.keys(byReason).map(function(r) {\n            return r + \"\\xD7\" + byReason[r];\n          }).join(\", \");\n          parts.push(aiCmI18nMessage(\"options_archive_report_skipped\", \"\\u043F\\u0440\\u043E\\u043F\\u0443\\u0449\\u0435\\u043D\\u043E: \" + skippedList, [skippedList]));\n        }\n        if (report.errors && report.errors.length) {\n          var errorList = report.errors.map(function(e) {\n            return e.fileName + \" (\" + (e.message || e.error) + \")\";\n          }).join(\", \");\n          parts.push(aiCmI18nMessage(\"options_archive_report_errors\", \"\\u043E\\u0448\\u0438\\u0431\\u043A\\u0438: \" + errorList, [errorList]));\n        }\n        return parts.join(\" \\xB7 \");\n      }\n      function aiCmListArchiveSourceKeys(cb) {\n        try {\n          if (chrome.storage.local.getKeys) {\n            chrome.storage.local.getKeys(function(keys) {\n              cb((keys || []).filter(function(k) {\n                return k.indexOf(\"aiCmArchive:\") === 0;\n              }).map(function(k) {\n                return k.slice(\"aiCmArchive:\".length);\n              }));\n            });\n            return;\n          }\n        } catch (eKeys) {\n          aiCmPopupDiagLine(\"aiCmListArchiveSourceKeys\", { err: String(eKeys) });\n        }\n        try {\n          chrome.storage.local.get(null, function(all) {\n            cb(Object.keys(all || {}).filter(function(k) {\n              return k.indexOf(\"aiCmArchive:\") === 0;\n            }).map(function(k) {\n              return k.slice(\"aiCmArchive:\".length);\n            }));\n          });\n        } catch (eAll) {\n          cb([]);\n        }\n      }\n      function aiCmRenderArchiveList() {\n        if (!archiveListEl) return;\n        const API = aiCmArchiveApi();\n        if (!API) {\n          archiveListEl.textContent = \"\";\n          return;\n        }\n        aiCmListArchiveSourceKeys(function(convIds) {\n          if (!convIds.length) {\n            archiveListEl.textContent = aiCmI18nMessage(\"options_archive_empty\", \"\\u0410\\u0440\\u0445\\u0438\\u0432\\u044B \\u043D\\u0435 \\u0438\\u043C\\u043F\\u043E\\u0440\\u0442\\u0438\\u0440\\u043E\\u0432\\u0430\\u043D\\u044B.\");\n            return;\n          }\n          const srcKeys = convIds.map(function(cid) {\n            return API.convSourceStorageKey(cid);\n          });\n          chrome.storage.local.get(srcKeys, function(data) {\n            archiveListEl.textContent = \"\";\n            convIds.forEach(function(cid) {\n              const rec = (data || {})[API.convSourceStorageKey(cid)] || null;\n              const row = document.createElement(\"div\");\n              row.className = \"archive-item\";\n              const info = document.createElement(\"span\");\n              info.className = \"archive-info\";\n              const label = rec ? rec.label || API.describeSource(rec) : aiCmI18nMessage(\"options_archive_fallback\", \"\\u0430\\u0440\\u0445\\u0438\\u0432\");\n              const when = rec && rec.importedAt ? \" \\xB7 \" + formatTime(rec.importedAt) : \"\";\n              const file = rec && rec.fileName ? \" \\xB7 \" + rec.fileName : \"\";\n              info.textContent = cid.slice(0, 8) + aiCmI18nMessage(\"options_info_separator\", \"\\xA0\\u2014\\xA0\") + label + when + file;\n              row.appendChild(info);\n              const del = document.createElement(\"button\");\n              del.className = \"btn-reset archive-del\";\n              del.type = \"button\";\n              del.textContent = aiCmI18nMessage(\"options_archive_delete\", \"\\u0423\\u0434\\u0430\\u043B\\u0438\\u0442\\u044C\");\n              del.setAttribute(\"data-conv-id\", cid);\n              del.addEventListener(\"click\", function() {\n                aiCmDeleteArchive(cid);\n              });\n              row.appendChild(del);\n              archiveListEl.appendChild(row);\n            });\n          });\n        });\n      }\n      function aiCmDeleteArchive(convId) {\n        const API = aiCmArchiveApi();\n        if (!API || !convId) return;\n        try {\n          chrome.storage.local.remove([API.archiveStorageKey(convId), API.convSourceStorageKey(convId)], function() {\n            var shortId = String(convId).slice(0, 8);\n            aiCmSetArchiveStatus(aiCmI18nMessage(\"options_archive_deleted\", \"\\u0430\\u0440\\u0445\\u0438\\u0432 \" + shortId + \" \\u0443\\u0434\\u0430\\u043B\\u0451\\u043D\", [shortId]));\n            aiCmRenderArchiveList();\n          });\n        } catch (eDel) {\n          var delErr = String(eDel && eDel.message || eDel);\n          aiCmSetArchiveStatus(aiCmI18nMessage(\"options_archive_delete_error\", \"\\u043D\\u0435 \\u0443\\u0434\\u0430\\u043B\\u043E\\u0441\\u044C \\u0443\\u0434\\u0430\\u043B\\u0438\\u0442\\u044C \\u0430\\u0440\\u0445\\u0438\\u0432: \" + delErr, [delErr]), true);\n        }\n      }\n      function aiCmApplyArchiveImport() {\n        const files = archiveFileInput && archiveFileInput.files;\n        aiCmSetArchiveStatus(aiCmI18nMessage(\"options_archive_reading\", \"\\u0447\\u0442\\u0435\\u043D\\u0438\\u0435 \\u0444\\u0430\\u0439\\u043B\\u043E\\u0432\\u2026\"));\n        aiCmImportArchiveFiles(files, function(err, report) {\n          if (err) {\n            aiCmSetArchiveStatus(err, true);\n            return;\n          }\n          const keys = Object.keys(report.patch);\n          if (!keys.length) {\n            var nothingReport = formatArchiveReport(report);\n            aiCmSetArchiveStatus(aiCmI18nMessage(\"options_archive_nothing\", \"\\u043D\\u0438\\u0447\\u0435\\u0433\\u043E \\u043D\\u0435 \\u0438\\u043C\\u043F\\u043E\\u0440\\u0442\\u0438\\u0440\\u043E\\u0432\\u0430\\u043D\\u043E \\xB7 \" + nothingReport, [nothingReport]), true);\n            aiCmRenderArchiveList();\n            return;\n          }\n          try {\n            chrome.storage.local.set(report.patch, function() {\n              var doneReport = formatArchiveReport(report);\n              aiCmSetArchiveStatus(aiCmI18nMessage(\"options_archive_done\", \"\\u0433\\u043E\\u0442\\u043E\\u0432\\u043E \\xB7 \" + doneReport, [doneReport]));\n              aiCmRenderArchiveList();\n            });\n          } catch (eSet) {\n            var setErr = String(eSet && eSet.message || eSet);\n            aiCmSetArchiveStatus(aiCmI18nMessage(\"options_archive_set_error\", \"\\u043E\\u0448\\u0438\\u0431\\u043A\\u0430 \\u0437\\u0430\\u043F\\u0438\\u0441\\u0438 \\u0432 \\u0445\\u0440\\u0430\\u043D\\u0438\\u043B\\u0438\\u0449\\u0435: \" + setErr, [setErr]), true);\n          }\n        });\n      }\n      archiveImportBtn && archiveImportBtn.addEventListener(\"click\", aiCmApplyArchiveImport);\n      archiveRefreshBtn && archiveRefreshBtn.addEventListener(\"click\", function() {\n        aiCmSetArchiveStatus(\"\");\n        aiCmRenderArchiveList();\n      });\n      try {\n        chrome.storage.onChanged.addListener(function(changes, areaName) {\n          if (areaName !== \"local\") return;\n          for (var k in changes) {\n            if (k.indexOf(\"aiCmArchive:\") === 0) {\n              aiCmRenderArchiveList();\n              return;\n            }\n          }\n        });\n      } catch (eArcCh) {\n        aiCmPopupDiagLine(\"archive-changed\", { err: String(eArcCh) });\n      }\n      document.addEventListener(\"DOMContentLoaded\", function() {\n        loadStats();\n        refreshExportState();\n        aiCmRenderArchiveList();\n      });\n      if (typeof module !== \"undefined\" && module.exports) {\n        module.exports = {\n          isChatHome,\n          buildArchiveStoragePatch,\n          aiCmImportArchiveFiles,\n          formatArchiveReport\n        };\n      }\n    }\n  });\n  require_entry_options();\n})();\n//# sourceMappingURL=options.js.map\n\n</script>\n\n</html>";
+  var OPTIONS_HTML = "<!DOCTYPE html>\n<html lang=\"ru\">\n\n<head>\n<script>window.__AI_CM_OPTIONS_FRAME__=true;</script>\n  <meta charset=\"UTF-8\">\n  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n  <title data-i18n=\"options_page_title\">AI Context Monitor</title>\n  <style>\n* {\n  margin: 0;\n  padding: 0;\n  box-sizing: border-box;\n}\n\nbody {\n  /* Minor-B (#19, WCAG 1.4.10): фиксированные 300px убраны — раскладка тянется по окну.\n     Потокобезопасность на 320px: `overflow-wrap: anywhere` обнуляет min-content текста,\n     поэтому длинные RU/EN-подписи переносятся, а не выпирают за вьюпорт. */\n  min-width: 0;\n  max-width: 100%;\n  overflow-wrap: anywhere;\n  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;\n  background: #1a1a2e;\n  color: #e0e0e0;\n}\n\n.popup {\n  /* Minor-B (#19): колонка контента без фиксированной ширины (max-width — не фикс). */\n  padding: 16px;\n  max-width: 720px;\n}\n\n.header {\n  display: flex;\n  align-items: center;\n  gap: 8px;\n  margin-bottom: 16px;\n  padding-bottom: 12px;\n  border-bottom: 1px solid #2a2a4a;\n}\n\n.logo {\n  font-size: 24px;\n}\n\nh1 {\n  font-size: 16px;\n  font-weight: 600;\n  color: #ffffff;\n}\n\n.stats {\n  background: #16213e;\n  border-radius: 10px;\n  padding: 12px;\n  margin-bottom: 16px;\n}\n\n.stat-row {\n  display: flex;\n  justify-content: space-between;\n  padding: 4px 0;\n  font-size: 13px;\n}\n\n.stat-row.highlight {\n  margin-top: 4px;\n  padding-top: 8px;\n  border-top: 1px solid #2a2a4a;\n  font-weight: 600;\n}\n\n.stat-label {\n  color: #8b8bad;\n}\n\n.stat-value {\n  color: #ffffff;\n  font-variant-numeric: tabular-nums;\n}\n\n.section {\n  margin-bottom: 12px;\n}\n\n.label {\n  display: block;\n  font-size: 12px;\n  color: #8b8bad;\n  margin-bottom: 4px;\n}\n\nselect, input {\n  width: 100%;\n  padding: 8px 10px;\n  border-radius: 8px;\n  border: 1px solid #2a2a4a;\n  background: #16213e;\n  color: #ffffff;\n  font-size: 13px;\n}\n\nselect:focus, input:focus {\n  border-color: #7c3aed;\n}\n\n/* v1.20 (M-3): видимый фокус для клавиатуры. Прежняя смена border-color на :focus\n   сохранена выше как дополнение; outline больше не подавляется.\n   Кнопки/ссылки получили обводку впервые — раньше у них не было :focus-стилей вовсе. */\nbutton:focus-visible,\nselect:focus-visible,\ninput:focus-visible,\na:focus-visible,\n[tabindex]:focus-visible {\n  outline: 2px solid #a78bfa;\n  outline-offset: 2px;\n}\n\n/* v1.20 (M-1): смысловые группы (role=\"group\") — обычные .section-контейнеры:\n   ни рамки, ни собственных отступов, поэтому раскладка остаётся прежней. */\n[role=\"group\"].section {\n  border: none;\n  margin: 0 0 12px 0;\n  padding: 0;\n  min-width: 0;\n}\n\n.hint {\n  display: block;\n  font-size: 10px;\n  color: #8b8bad;\n  margin-top: 4px;\n}\n\n.checkbox-row {\n  display: flex;\n  align-items: center;\n  gap: 8px;\n}\n\n/* O-7: тумблер сырого режима экспорта — внутри секции «Экспорт истории»,\n   после ряда кнопок; раскладку прочих секций не трогает. */\n.export-hidden-row {\n  margin-top: 8px;\n}\n\n\n.checkbox-row input[type=\"checkbox\"] {\n  width: auto;\n  accent-color: #7c3aed;\n}\n\n.checkbox-row label {\n  font-size: 13px;\n  cursor: pointer;\n}\n\n.footer {\n  text-align: center;\n  margin-top: 12px;\n  padding-top: 12px;\n  border-top: 1px solid #2a2a4a;\n}\n\n.version {\n  font-size: 11px;\n  color: #8b8bad;\n}\n\n/* v1.18 (P1): ссылка на политику конфиденциальности в футере */\n#privacy-link {\n  display: inline-block;\n  margin-left: 8px;\n  font-size: 11px;\n  color: #a78bfa;\n  text-decoration: none;\n  cursor: pointer;\n}\n\n#privacy-link:hover {\n  color: #c4b5fd;\n  text-decoration: underline;\n}\n\n/* v1.19 (M-6): ссылка на руководство в футере — стиль как у #privacy-link */\n#help-link {\n  display: inline-block;\n  margin-left: 8px;\n  font-size: 11px;\n  color: #a78bfa;\n  text-decoration: none;\n  cursor: pointer;\n}\n\n#help-link:hover {\n  color: #c4b5fd;\n  text-decoration: underline;\n}\n\n.input-row {\n  display: flex;\n  gap: 6px;\n}\n\n/* v1.8: ряд «Порог, %» — фикс ширины поля, чтобы цифра не заходила под стрелки спиннера */\n#auto-export-section .input-row {\n  gap: 8px;\n  align-items: center;\n}\n#aiCmAutoExportPct {\n  /* Minor-B (#19/#21): размер в ch вместо жёстких 64px; гарантия v1.8 («цифра не заходит\n     под стрелки спиннера») сохранена через min-width: 64px + padding-right: 20px. */\n  inline-size: 6ch !important;\n  min-width: 64px;\n  flex: 0 0 auto;\n  box-sizing: border-box;\n  padding-right: 20px;\n  height: 32px;\n}\n#aiCmAutoExportFmt {\n  flex: 1 1 auto;\n  min-width: 0;\n  height: 32px;\n}\n\n.input-row input {\n  flex: 1;\n  /* Minor-B (#19): flex-ребёнок без min-width: 0 не сжимается ниже min-content инпута. */\n  min-width: 0;\n}\n\n.btn-reset {\n  padding: 8px 12px;\n  border-radius: 8px;\n  border: 1px solid #2a2a4a;\n  background: #16213e;\n  color: #8b8bad;\n  font-size: 12px;\n  cursor: pointer;\n  white-space: nowrap;\n}\n\n.btn-reset:hover {\n  background: #2a2a4a;\n  color: #ffffff;\n}\n\n.api-key-row {\n  display: flex;\n  gap: 4px;\n}\n\n.api-key-row input {\n  flex: 1;\n  /* Minor-B (#19): без min-width: 0 поле ключа не сжимается на 320px. */\n  min-width: 0;\n}\n\n.btn-toggle {\n  padding: 8px 10px;\n  border-radius: 8px;\n  border: 1px solid #2a2a4a;\n  background: #16213e;\n  color: #e0e0e0;\n  font-size: 14px;\n  cursor: pointer;\n  white-space: nowrap;\n}\n\n.btn-toggle:hover {\n  background: #2a2a4a;\n}\n\n.export-row {\n  display: flex;\n  gap: 6px;\n}\n\n.btn-export {\n  flex: 1;\n  padding: 8px 10px;\n  border-radius: 8px;\n  border: 1px solid #2a2a4a;\n  background: #16213e;\n  color: #ffffff;\n  font-size: 12px;\n  cursor: pointer;\n  white-space: nowrap;\n}\n\n.btn-export:hover:not(:disabled) {\n  background: #2a2a4a;\n}\n\n.btn-export:disabled {\n  color: #9a9ab0;\n  cursor: not-allowed;\n}\n\n.stale-warning {\n  background: #3a1f2b;\n  border: 1px solid #7c3aed;\n  border-radius: 10px;\n  padding: 10px 12px;\n  margin-bottom: 12px;\n  font-size: 12px;\n  line-height: 1.45;\n  color: #f0b0c0;\n}\n\n/* T1 (v1.16): секция «Архивы» — первый ярус истории */\n.archive-list {\n  margin-top: 8px;\n  display: flex;\n  flex-direction: column;\n  gap: 4px;\n  font-size: 11px;\n  line-height: 1.4;\n  color: #c8c8e0;\n}\n\n.archive-item {\n  display: flex;\n  align-items: center;\n  justify-content: space-between;\n  gap: 6px;\n  padding: 4px 6px;\n  border: 1px solid #2a2a4a;\n  border-radius: 6px;\n}\n\n.archive-info {\n  overflow: hidden;\n  text-overflow: ellipsis;\n  white-space: nowrap;\n}\n\n.archive-del {\n  flex: 0 0 auto;\n  font-size: 11px;\n  padding: 2px 6px;\n}\n\n.archive-status {\n  display: block;\n  margin-top: 6px;\n}\n\n/* Аудит 1.6 (a11y, WCAG 2.2 target-size): минимальная область нажатия 24×24 px.\n   Блок только добавляющий: прежние объявления и цвета не изменены, раскладка\n   300-пиксельного попапа не затронута (габариты растут только до минимума). */\n.checkbox-row input[type=\"checkbox\"] {\n  min-width: 24px;\n  min-height: 24px;\n}\n\n.archive-del {\n  min-width: 24px;\n  min-height: 24px;\n}\n\n.btn-reset,\n.btn-toggle,\n.btn-export {\n  min-height: 24px;\n}\n\n#privacy-link,\n#help-link {\n  min-height: 24px;\n  line-height: 24px;\n}\n\n/* Major-подбатч 1 (аудит #10): свёрнутая секция «Дополнительно» (<details>/<summary>).\n   Блок только добавляющий: ни одно прежнее правило и ни один цвет не изменены. */\ndetails.section > summary {\n  cursor: pointer;\n  font-size: 12px;\n  color: #8b8bad;\n  padding: 4px 0;\n  margin-bottom: 4px;\n  list-style-position: inside;\n}\n\ndetails.section > summary::marker {\n  color: #a78bfa;\n}\n\ndetails.section > summary:hover {\n  color: #ffffff;\n}\n\n/* Аудит #10: :focus-visible для summary обязателен — подавлять обводку здесь нельзя\n   (это пинится в tests/a11y-options.test.js). Правило намеренно стоит ПОСЛЕ combined-правила\n   выше: a11y-пин берёт первое :focus-visible-правило файла и проверяет по нему\n   селекторы button/select/input/a/[tabindex]. */\nsummary:focus-visible {\n  outline: 2px solid #a78bfa;\n  outline-offset: 2px;\n}\n\n/* =====================================================================================\n * Minor-подбатч B (UI-аудит 2026-09-28, options: находки #19/#20/#21)\n * Блок только добавляющий. Изменены две прежние вещи (обе перечислены в отчёте):\n *   body — снята фикс-ширина 300px (#19);  #aiCmAutoExportPct — width → inline-size (#19).\n * ===================================================================================== */\n\n/* #20: сетка 2×2 для четырёх кнопок экспорта истории (MD / JSON / PDF / TXT).\n   minmax(72px, 1fr) не даёт кнопкам схлопнуться и не переполняет строку даже на 320px. */\n.export-grid {\n  display: grid;\n  grid-template-columns: repeat(2, minmax(72px, 1fr));\n  gap: 6px;\n  min-width: 0;\n}\n\n.export-grid .btn-export {\n  min-width: 0;\n}\n\n/* #20: MD — основной формат (primary); остальные кнопки остаются tonal (.btn-export).\n   Контраст: #ffffff на #7c3aed = 5.70:1; hover #ffffff на #6d28d9 = 7.10:1 (AA ≥ 4.5:1). */\n.export-grid .btn-export--primary {\n  background: #7c3aed;\n  border-color: #7c3aed;\n  color: #ffffff;\n  font-weight: 600;\n}\n\n.export-grid .btn-export--primary:hover:not(:disabled) {\n  background: #6d28d9;\n  border-color: #6d28d9;\n}\n\n/* #20: пока история недоступна, primary-вид не перебивает .btn-export:disabled. */\n.export-grid .btn-export--primary:disabled {\n  background: #16213e;\n  border-color: #2a2a4a;\n  color: #9a9ab0;\n}\n\n/* #21: ряд порогов — суффикс «%» внутри обёртки поля, размер в ch.\n   Число не уходит под стрелки спиннера: спиннер внутри инпута, «%» — снаружи него.\n   #21-polish: поля больше не растягиваются на всю ширину ряда — инпут компактный\n   (~8ch ≈ 55px, хватает под «100»), цифры по центру, «%» сразу за числом. */\n.thresholds-row {\n  gap: 8px;\n  align-items: center;\n}\n\n.threshold-field {\n  display: flex;\n  align-items: center;\n  gap: 2px;\n  flex: 0 0 auto;\n  min-width: 0;\n}\n\n.threshold-field input {\n  flex: 0 0 8ch;\n  min-width: 0;\n  inline-size: 8ch;\n  padding: 4px 2px;\n  font-size: 13px;\n  text-align: center;\n}\n\n.threshold-unit {\n  flex: 0 0 auto;\n  font-size: 11px;\n  color: #8b8bad;\n}\n\n/* #21: визуальная валидация диапазона 1–100 — чистый CSS, без aria-правок в options.js\n   (пин tests/a11y-options.test.js:340-342 допускает в options.js ровно одно aria-).\n   Контраст рамки: #ef4444 на фоне поля #16213e = 4.22:1 (≥ 3:1, WCAG 1.4.11). */\n#aiCmProactiveLow:invalid,\n#aiCmProactiveMedium:invalid,\n#aiCmProactiveHigh:invalid {\n  border-color: #ef4444;\n  outline: 1px solid #ef4444;\n}\n\n</style>\n</head>\n\n<body>\n  <div class=\"popup\">\n    <!-- Аудит 1.6 (a11y): весь контент попапа — ровно один main landmark -->\n    <main>\n    <div class=\"header\">\n      <span class=\"logo\">📊</span>\n      <h1 data-i18n=\"options_header_title\">AI Context Monitor</h1>\n    </div>\n\n    <!-- v1.20 (M-2): регион статистики объявляет изменения вежливо -->\n    <div class=\"stats\" id=\"stats\" aria-live=\"polite\">\n      <div class=\"stat-row\">\n        <span class=\"stat-label\" data-i18n=\"options_stat_site\">Сайт:</span>\n        <span class=\"stat-value\" id=\"stat-site\">—</span>\n      </div>\n      <div class=\"stat-row\">\n        <span class=\"stat-label\" data-i18n=\"options_stat_model\">Модель:</span>\n        <span class=\"stat-value\" id=\"stat-model\">—</span>\n      </div>\n      <div class=\"stat-row\">\n        <span class=\"stat-label\" data-i18n=\"options_stat_tokens\">Токены:</span>\n        <span class=\"stat-value\" id=\"stat-tokens\">—</span>\n      </div>\n      <div class=\"stat-row\">\n        <span class=\"stat-label\" data-i18n=\"options_stat_limit\">Лимит:</span>\n        <span class=\"stat-value\" id=\"stat-limit\">—</span>\n      </div>\n      <div class=\"stat-row highlight\">\n        <span class=\"stat-label\" data-i18n=\"options_stat_fill\">Заполнение:</span>\n        <span class=\"stat-value\" id=\"stat-percent\">—</span>\n      </div>\n      <div class=\"stat-row\">\n        <span class=\"stat-label\" data-i18n=\"options_stat_source\">Источник:</span>\n        <span class=\"stat-value\" id=\"stat-source\">—</span>\n      </div>\n    </div>\n\n    <!-- v1.20 (M-2): предупреждение об устаревших данных — срочное объявление -->\n    <div class=\"stale-warning\" id=\"stale-warning\" role=\"alert\" style=\"display: none;\"></div>\n\n    <div class=\"section\">\n      <!-- v1.20 (M-1): подпись связана с select через for/id -->\n      <label class=\"label\" for=\"model-select\" data-i18n=\"options_model_label\">Модель:</label>\n      <select id=\"model-select\">\n        <option value=\"auto\" data-i18n=\"options_model_auto\">Автоопределение</option>\n        <optgroup label=\"OpenAI\">\n          <option value=\"gpt-4o\">GPT-4o (128K)</option>\n          <option value=\"gpt-4o-mini\">GPT-4o Mini (128K)</option>\n          <option value=\"gpt-4-turbo\">GPT-4 Turbo (128K)</option>\n          <option value=\"gpt-4\">GPT-4 (8K)</option>\n          <option value=\"gpt-3.5-turbo\">GPT-3.5 Turbo (16K)</option>\n        </optgroup>\n        <optgroup label=\"Google\">\n          <option value=\"gemini-2.5-pro\">Gemini 2.5 Pro (1M)</option>\n          <option value=\"gemini-2.5-flash\">Gemini 2.5 Flash (1M)</option>\n          <option value=\"gemini-1.5-pro\">Gemini 1.5 Pro (2M)</option>\n        </optgroup>\n        <optgroup label=\"DeepSeek\">\n          <option value=\"deepseek-v3\">DeepSeek V3 (128K)</option>\n          <option value=\"deepseek-r1\">DeepSeek R1 (128K)</option>\n        </optgroup>\n      </select>\n    </div>\n\n    <div class=\"section\">\n      <label class=\"label\" data-i18n=\"options_limit_label\">Лимит контекста:</label>\n      <div class=\"input-row\">\n        <!-- v1.20 (M-1): поле без видимой текстовой подписи получает имя доступности -->\n        <input type=\"number\" id=\"custom-limit\" aria-label=\"Пользовательский лимит токенов\" data-i18n-aria-label=\"options_limit_aria\" placeholder=\"Авто\" data-i18n-placeholder=\"options_limit_placeholder\" min=\"1\" max=\"100\" step=\"1\">\n        <button id=\"reset-limit\" class=\"btn-reset\" data-i18n=\"options_limit_auto_btn\">Авто</button>\n      </div>\n      <span class=\"hint\" data-i18n=\"options_limit_hint\">Порог в % от Авто-порога: цвета и % считаются от этого порога. 100% = как Авто. Пусто = Авто</span>\n    </div>\n\n    <div class=\"section checkbox-row\">\n      <input type=\"checkbox\" id=\"show-widget\" checked>\n      <label for=\"show-widget\" data-i18n=\"options_show_widget\">Показывать индикатор на странице</label>\n    </div>\n    <!-- Major-подбатч 1 (аудит #10): проактивные пороги остаются видимыми; редкие\n         настройки (логи, автоэкспорт, API-ключ, экспорт, архивы) свёрнуты в Advanced ниже. -->\n    <!-- v1.20 (M-1): смысловая группа «Проактивные пороги» -->\n    <div class=\"section\" id=\"proactive-section\" role=\"group\" aria-labelledby=\"proactive-legend\">\n      <label class=\"label\" id=\"proactive-legend\" data-i18n=\"options_proactive_legend\">Проактивные пороги</label>\n      <div class=\"checkbox-row\">\n        <input type=\"checkbox\" id=\"aiCmProactive\" checked>\n        <label for=\"aiCmProactive\" data-i18n=\"options_proactive_badge\">Бейдж и уведомления о порогах</label>\n      </div>\n      <div class=\"checkbox-row\">\n        <input type=\"checkbox\" id=\"aiCmProactiveNotify\">\n        <label for=\"aiCmProactiveNotify\" data-i18n=\"options_proactive_notify\">Chrome-уведомления</label>\n      </div>\n      <div class=\"input-row\">\n        <label class=\"label\" for=\"aiCmProactiveLow\" data-i18n=\"options_proactive_levels_label\">Пороги уведомлений и бейджа (1–100, возрастающий порядок):</label>\n      </div>\n      <div class=\"input-row thresholds-row\">\n        <!-- v1.20 (M-1): у трёх числовых полей порога — собственные имена доступности (title сохранён) -->\n        <!-- Minor-B (#21): суффикс единицы «%», inputmode=numeric и общая подсказка о диапазоне 1–100.\n             «%» — языконейтральный символ-токен (как MD/JSON/PDF/TXT): литерал без data-i18n,\n             т.к. пин tests/i18n-locales.test.js:187-204 требует, чтобы ЛЮБОЕ совпадение ru/en\n             (кроме брендовых строк и options_info_separator) было переведено. -->\n        <span class=\"threshold-field\">\n          <input type=\"number\" id=\"aiCmProactiveLow\" aria-label=\"Низкий порог процентов\" data-i18n-aria-label=\"options_proactive_low_aria\" inputmode=\"numeric\" min=\"1\" max=\"100\" step=\"1\" value=\"70\" title=\"Низкий порог — зелёный\" data-i18n-title=\"options_proactive_low_title\" aria-describedby=\"proactive-threshold-msg\">\n          <span class=\"threshold-unit\">%</span>\n        </span>\n        <span class=\"threshold-field\">\n          <input type=\"number\" id=\"aiCmProactiveMedium\" aria-label=\"Средний порог процентов\" data-i18n-aria-label=\"options_proactive_medium_aria\" inputmode=\"numeric\" min=\"1\" max=\"100\" step=\"1\" value=\"85\" title=\"Средний порог — жёлтый\" data-i18n-title=\"options_proactive_medium_title\" aria-describedby=\"proactive-threshold-msg\">\n          <span class=\"threshold-unit\">%</span>\n        </span>\n        <span class=\"threshold-field\">\n          <input type=\"number\" id=\"aiCmProactiveHigh\" aria-label=\"Высокий порог процентов\" data-i18n-aria-label=\"options_proactive_high_aria\" inputmode=\"numeric\" min=\"1\" max=\"100\" step=\"1\" value=\"95\" title=\"Высокий порог — красный\" data-i18n-title=\"options_proactive_high_title\" aria-describedby=\"proactive-threshold-msg\">\n          <span class=\"threshold-unit\">%</span>\n        </span>\n      </div>\n      <!-- v2.0.13: кольцо на странице красится ТЕМИ ЖЕ порогами — подсказка переписана -->\n      <span class=\"hint\" data-i18n=\"options_ring_zones_hint\">Цвет кольца на странице — по тем же порогам: зелёный ниже нижнего, жёлтый между нижним и верхним, красный от верхнего. Пороги также управляют уведомлениями и автоэкспортом.</span>\n      <!-- Minor-B (#21): статическое сообщение о диапазоне и фактическом поведении,\n           связано с тремя полями порогов через aria-describedby (инвалидация — CSS :invalid) -->\n      <span class=\"hint\" id=\"proactive-threshold-msg\" data-i18n=\"options_proactive_hint\">Допустимо 1–100. Каждый порог срабатывает один раз на разговор; при неверном значении берётся 70/85/95</span>\n    </div>\n\n    <!-- Major-подбатч 1 (аудит #10): один свёрнутый блок для редких настроек.\n         Без атрибута open — по умолчанию закрыт. -->\n    <details class=\"section\" id=\"advanced-section\">\n      <summary data-i18n=\"options_advanced_summary\">Дополнительно</summary>\n\n      <div class=\"section checkbox-row\">\n        <input type=\"checkbox\" id=\"debugLogs\">\n        <label for=\"debugLogs\" data-i18n=\"options_debug_logs\">Подробные логи</label>\n      </div>\n\n      <!-- v1.20 (M-1): смысловая группа «Автоэкспорт чатов».\n           Выбран role=\"group\" + aria-labelledby (вместо fieldset/legend): имя группы\n           даёт существующая видимая подпись .label, а раскладка .section не меняется. -->\n      <div class=\"section\" id=\"auto-export-section\" role=\"group\" aria-labelledby=\"auto-export-legend\">\n        <label class=\"label\" id=\"auto-export-legend\" data-i18n=\"options_autoexport_legend\">Автоэкспорт чатов (все поддерживаемые платформы)</label>\n        <div class=\"checkbox-row\">\n          <input type=\"checkbox\" id=\"aiCmAutoExport\">\n          <label for=\"aiCmAutoExport\" data-i18n=\"options_autoexport_enable\">Автоэкспорт при пороге</label>\n        </div>\n        <div class=\"input-row\">\n          <label class=\"label\" for=\"aiCmAutoExportPct\" data-i18n=\"options_autoexport_pct_label\">Порог, %:</label>\n          <input type=\"number\" id=\"aiCmAutoExportPct\" min=\"1\" max=\"100\" step=\"1\" value=\"90\">\n          <select id=\"aiCmAutoExportFmt\" aria-label=\"Формат файла автоэкспорта\" data-i18n-aria-label=\"options_autoexport_fmt_aria\">\n            <option value=\"txt\">txt</option>\n            <option value=\"md\">md</option>\n            <option value=\"json\">json</option>\n          </select>\n        </div>\n        <span class=\"hint\" data-i18n=\"options_autoexport_hint\">Один раз скачивает историю чата при достижении порога</span>\n      </div>\n\n      <div class=\"section\">\n        <label class=\"label\" data-i18n=\"options_byok_label\">Gemini API — точный подсчёт токенов</label>\n        <!-- Major-подбатч 1 (аудит #12): у поля ключа появилась видимая подпись label[for] -->\n        <label class=\"label\" for=\"api-key\" data-i18n=\"options_byok_key_label\">API-ключ Google AI Studio</label>\n        <div class=\"api-key-row\">\n          <input type=\"password\" id=\"api-key\" placeholder=\"Введите API-ключ Google AI Studio\" data-i18n-placeholder=\"options_byok_key_placeholder\" autocomplete=\"off\">\n          <button id=\"toggle-api-key\" class=\"btn-toggle\" type=\"button\" aria-pressed=\"false\" title=\"Показать/скрыть ключ\" data-i18n-title=\"options_byok_toggle_title\">👁</button>\n        </div>\n        <span class=\"hint\" data-i18n=\"options_byok_hint\">Ключ хранится только до перезапуска браузера (chrome.storage.session). После перезапуска введите заново.</span>\n        <div class=\"api-key-row\">\n          <span class=\"hint\" id=\"api-key-status\" role=\"status\" data-i18n=\"options_byok_status_unset\">Ключ: не задан</span>\n          <button id=\"api-key-remove\" class=\"btn-toggle\" type=\"button\" data-i18n=\"options_byok_remove\">Убрать ключ</button>\n        </div>\n      </div>\n\n      <div class=\"section\">\n        <div class=\"checkbox-row\">\n          <input type=\"checkbox\" id=\"exact-count\">\n          <label for=\"exact-count\" data-i18n=\"options_exact_count\">Точный подсчёт токенов через Gemini API</label>\n        </div>\n        <!-- BYOK-синхронизация: ключ живёт в session (стирается при перезапуске), флаг — в local.\n             Текст подставляется из локали в options.js; пустой span == предупреждения нет. -->\n        <span class=\"hint\" id=\"exact-count-warning\" role=\"status\"></span>\n      </div>\n\n      <div class=\"section\">\n        <label class=\"label\" data-i18n=\"options_export_legend\">Экспорт истории</label>\n        <!-- Minor-B (#20): сетка 2×2, короткие визуальные подписи MD/JSON/PDF/TXT, доступное имя у каждой кнопки.\n             Локализованные строки действий («Сохранить .md», «Сохранить .txt (эталон)») переехали в title\n             через data-i18n-title: они остаются переводимыми и не дублируют короткую подпись. -->\n        <div class=\"export-grid\" id=\"export-history-grid\">\n          <button id=\"export-md\" class=\"btn-export btn-export--primary\" disabled title=\"Сохранить .md\" data-i18n-title=\"options_export_md\" aria-label=\"MD — сохранить историю в формате Markdown\" data-i18n-aria-label=\"options_export_md_aria\">MD</button>\n          <button id=\"export-json\" class=\"btn-export\" disabled title=\"Сохранить .json\" data-i18n-title=\"options_export_json\" aria-label=\"JSON — сохранить историю в формате JSON\" data-i18n-aria-label=\"options_export_json_aria\">JSON</button>\n          <button id=\"export-pdf\" class=\"btn-export\" disabled title=\"Сохранить .pdf\" data-i18n-title=\"options_export_pdf\" aria-label=\"PDF — сохранить историю в формате PDF\" data-i18n-aria-label=\"options_export_pdf_aria\">PDF</button>\n          <button id=\"export-txt\" class=\"btn-export\" disabled title=\"Сохранить .txt (эталон)\" data-i18n-title=\"options_export_txt\" aria-label=\"TXT — сохранить историю в формате TXT (эталон)\" data-i18n-aria-label=\"options_export_txt_aria\">TXT</button>\n        </div>\n        <div class=\"export-row\">\n          <button id=\"export-diag\" class=\"btn-export\" data-i18n=\"options_export_diag\">Экспорт диагностики</button>\n        </div>\n        <!-- O-7: единственный тумблер сырого режима экспорта (default OFF = текущее поведение) -->\n        <!-- D-O41 (UX): подсказка тумблера — reasoning автоматически попадает в экспорт, если он\n             есть в источнике; принудительное исключение (OFF) действует, когда reasoning в\n             источнике нет (force-exclude). Строки — ключ options_export_hidden_title (ru/en). -->\n        <div class=\"checkbox-row export-hidden-row\">\n          <input type=\"checkbox\" id=\"aiCmIncludeHiddenInExport\" title=\"Reasoning автоматически включается при наличии в источнике; тумблер принудительно исключает\" data-i18n-title=\"options_export_hidden_title\">\n          <label for=\"aiCmIncludeHiddenInExport\" data-i18n=\"options_export_hidden_label\">Включать reasoning и инъекции соседних расширений (DeepSeek++, Better DeepSeek) в экспорт</label>\n        </div>\n        <span class=\"hint\" data-i18n=\"options_export_hidden_hint\">Выключено: в файл попадают только вопросы и ответы, без размышлений и инъекций соседних расширений (DeepSeek++, Better DeepSeek). Включено: размышления и инъекции попадают в экспорт.</span>\n        <span class=\"hint\" id=\"export-hint\" data-i18n=\"options_open_supported_site\">Откройте поддерживаемый сайт</span>\n      </div>\n\n      <div class=\"section\" id=\"archive-section\">\n        <label class=\"label\" data-i18n=\"options_archive_legend\">Архивы (первый ярус истории)</label>\n        <div class=\"input-row\">\n          <input type=\"file\" id=\"archive-file\" accept=\".json,application/json\" multiple aria-label=\"Выбрать файлы архивов\" data-i18n-aria-label=\"options_archive_file_aria\">\n        </div>\n        <div class=\"input-row\">\n          <button id=\"archive-import\" class=\"btn-export\" type=\"button\" data-i18n=\"options_archive_import\">Импортировать</button>\n          <button id=\"archive-refresh\" class=\"btn-reset\" type=\"button\" data-i18n=\"options_archive_refresh\">Обновить список</button>\n        </div>\n        <span class=\"hint\" data-i18n=\"options_archive_hint\">Локальные экспорты: Gemini Takeout (MyActivity.json), ChatGPT conversations.json,\n          Claude conversations.json, Perplexity threads. Файлы читаются в браузере (FileReader) и никуда не отправляются.\n          Архив — первый ярус: он задаёт авторитетный пол истории и даёт терминальную полноту archive-complete.</span>\n        <!-- v1.20 (M-2): статус архива — вежливый live-region -->\n        <div class=\"hint archive-status\" id=\"archive-status\" role=\"status\"></div>\n        <div class=\"archive-list\" id=\"archive-list\"></div>\n      </div>\n    </details>\n\n    <div class=\"footer\">\n      <span class=\"version\"></span>\n      <a href=\"privacy/privacy.html\" id=\"privacy-link\" target=\"_blank\" rel=\"noopener\"><span data-i18n=\"options_footer_privacy\">Политика конфиденциальности</span></a>\n      <!-- v1.19 (M-6): ссылка на руководство docs/index.html (входит в пакет расширения) -->\n      <a href=\"../docs/index.html\" id=\"help-link\" target=\"_blank\" rel=\"noopener\"><span data-i18n=\"options_footer_help\">Помощь</span></a>\n    </div>\n    </main>\n  </div>\n</body>\n<script>\n// Р—Р°РіР»СѓС€РєРё РґР»СЏ Р»РѕРіРіРµСЂР° Рё РѕС‚Р»Р°РґРѕС‡РЅС‹С… С„СѓРЅРєС†РёР№ СЂР°СЃС€РёСЂРµРЅРёСЏ\nif (typeof window.debugLog === 'undefined') {\n  window.debugLog = function(...args) {\n    console.log('[AI CM DEBUG]', ...args);\n  };\n}\nif (typeof window.__aiCmSetDebugLogs === 'undefined') {\n  window.__aiCmSetDebugLogs = function() {};\n}\n\n// Р­РјСѓР»СЏС‚РѕСЂ Chrome API РґР»СЏ Pake / Tauri\n(function() {\n  window.chrome = window.chrome || {};\n\n  var messageListeners = [];\n  var storageListeners = [];\n\n  var onMessageStub = {\n    addListener: function(fn) {\n      if (typeof fn === 'function' && !messageListeners.includes(fn)) {\n        messageListeners.push(fn);\n      }\n    },\n    removeListener: function(fn) {\n      messageListeners = messageListeners.filter(function(l) { return l !== fn; });\n    },\n    hasListener: function(fn) { return messageListeners.includes(fn); }\n  };\n\n  var onChangedStub = {\n    addListener: function(fn) {\n      if (typeof fn === 'function' && !storageListeners.includes(fn)) {\n        storageListeners.push(fn);\n      }\n    },\n    removeListener: function(fn) {\n      storageListeners = storageListeners.filter(function(l) { return l !== fn; });\n    }\n  };\n\n  function createEventStub() {\n    return {\n      addListener: function() {},\n      removeListener: function() {},\n      hasListener: function() { return false; },\n      dispatch: function() {}\n    };\n  }\n\n  // Runtime API\n  window.chrome.runtime = window.chrome.runtime || {};\n  window.chrome.runtime.id = 'pake-ai-context-monitor';\n  window.chrome.runtime.getURL = window.chrome.runtime.getURL || function(path) { return path; };\n  window.chrome.runtime.getManifest = window.chrome.runtime.getManifest || function() {\n    return { version: '2.0.41', manifest_version: 3, name: 'AI Context Monitor' };\n  };\n  window.chrome.runtime.onMessage = onMessageStub;\n  window.chrome.runtime.onInstalled = createEventStub();\n  window.chrome.runtime.onStartup = createEventStub();\n  window.chrome.runtime.lastError = null;\n\n  // РћС‚РїСЂР°РІРєР° СЃРѕРѕР±С‰РµРЅРёР№ РјРµР¶РґСѓ С„РѕРЅРѕРІС‹Рј СЃРµСЂРІРёСЃРѕРј Рё СЃС‚СЂР°РЅРёС†РµР№\n  window.chrome.runtime.sendMessage = function(message, callback) {\n    return new Promise(function(resolve) {\n      var responded = false;\n      var sender = { id: 'pake-ai-context-monitor', tab: { id: 1 } };\n\n      var sendResponse = function(response) {\n        if (!responded) {\n          responded = true;\n          if (callback) callback(response);\n          resolve(response);\n        }\n      };\n\n      var listeners = messageListeners.slice();\n      listeners.forEach(function(listener) {\n        try {\n          listener(message, sender, sendResponse);\n        } catch (e) {\n          console.error('[AI CM Polyfill] РћС€РёР±РєР° РѕР±СЂР°Р±РѕС‚С‡РёРєР°:', e);\n        }\n      });\n\n      if (!responded) {\n        setTimeout(function() {\n          if (!responded) {\n            responded = true;\n            if (callback) callback();\n            resolve();\n          }\n        }, 10);\n      }\n    });\n  };\n\n  // Storage API\n  window.chrome.storage = window.chrome.storage || {};\n  window.chrome.storage.onChanged = onChangedStub;\n\n  // РќР°СЃС‚СЂРѕР№РєРё РѕС‚РєСЂС‹РІР°СЋС‚СЃСЏ РІ iframe РїРѕРІРµСЂС… СЃС‚СЂР°РЅРёС†С‹ (Р°РЅР°Р»РѕРі РёРєРѕРЅРєРё СЂР°СЃС€РёСЂРµРЅРёСЏ).\n  // Р—Р°РїРёСЃСЊ РёР· iframe РґРѕР»Р¶РЅР° СЃСЂР°Р·Сѓ РґРѕС…РѕРґРёС‚СЊ РґРѕ content.js РІ СЂРѕРґРёС‚РµР»СЊСЃРєРѕРј РѕРєРЅРµ.\n  var IS_OPTIONS_FRAME = (typeof window !== 'undefined') && window.__AI_CM_OPTIONS_FRAME__ === true;\n\n  function notifyStorage(changes, area) {\n    storageListeners.forEach(function(listener) {\n      try { listener(changes, area); } catch (e) {}\n    });\n    if (IS_OPTIONS_FRAME) {\n      try { parent.postMessage({ __aiCmStorage: 1, changes: changes, area: area }, '*'); } catch (e) {}\n    }\n  }\n\n  function readStored(store, key) {\n    var raw = store.getItem('ai_cm_' + key);\n    if (raw === null) return undefined;\n    try { return JSON.parse(raw); } catch (e) { return raw; }\n  }\n\n  if (!window.chrome.storage.local) {\n    window.chrome.storage.local = {\n      get: function(keys, callback) {\n        var res = {};\n        var defaults = {\n          showWidget: true,\n          showBadge: true,\n          enabled: true\n          // ai_cm_safe_pct_<site> РќР• Р·Р°РґР°С‘Рј: РєР°Рє Рё РІ Chrome, РїРѕСЂРѕРі РїРѕ СѓРјРѕР»С‡Р°РЅРёСЋ\n          // РЅРµ Р·Р°РґР°РЅ (100% РѕРєРЅР°), РїРѕРєР° РїРѕР»СЊР·РѕРІР°С‚РµР»СЊ СЃР°Рј РЅРµ РІС‹СЃС‚Р°РІРёС‚ РµРіРѕ РІ РїР°РЅРµР»Рё.\n        };\n\n        var keysArr = Array.isArray(keys) ? keys : (typeof keys === 'object' && keys !== null ? Object.keys(keys) : [keys]);\n\n        keysArr.forEach(function(k) {\n          var val = readStored(localStorage, k);\n          if (val !== undefined) {\n            res[k] = val;\n          } else {\n            res[k] = defaults[k] !== undefined ? defaults[k] : true;\n          }\n        });\n\n        if (typeof keys === 'object' && !Array.isArray(keys) && keys !== null) {\n          Object.keys(keys).forEach(function(k) {\n            if (res[k] === undefined) res[k] = keys[k];\n          });\n        }\n\n        if (callback) callback(res);\n        return Promise.resolve(res);\n      },\n      set: function(obj, callback) {\n        var changes = {};\n        if (obj && typeof obj === 'object') {\n          Object.keys(obj).forEach(function(k) {\n            var oldVal = readStored(localStorage, k);\n            var newVal = obj[k];\n            localStorage.setItem('ai_cm_' + k, typeof newVal === 'object' ? JSON.stringify(newVal) : newVal);\n            changes[k] = { oldValue: oldVal, newValue: newVal };\n          });\n        }\n        notifyStorage(changes, 'local');\n        if (callback) callback();\n        return Promise.resolve();\n      },\n      remove: function(keys, callback) {\n        var arr = Array.isArray(keys) ? keys : [keys];\n        var changes = {};\n        arr.forEach(function(k) {\n          var oldVal = readStored(localStorage, k);\n          if (oldVal !== undefined) {\n            localStorage.removeItem('ai_cm_' + k);\n            changes[k] = { oldValue: oldVal, newValue: undefined };\n          }\n        });\n        if (Object.keys(changes).length) notifyStorage(changes, 'local');\n        if (callback) callback();\n        return Promise.resolve();\n      },\n      getKeys: function(callback) {\n        var keys = [];\n        try {\n          for (var i = 0; i < localStorage.length; i++) {\n            var k = localStorage.key(i);\n            if (k && k.indexOf('ai_cm_') === 0) keys.push(k.slice(6));\n          }\n        } catch (e) {}\n        if (callback) callback(keys);\n        return Promise.resolve(keys);\n      }\n    };\n  }\n\n  // session: РєР°Рє РІ Chrome вЂ” РѕС‚РґРµР»СЊРЅРѕРµ С…СЂР°РЅРёР»РёС‰Рµ (BYOK-РєР»СЋС‡Рё РЅРµ РґРѕР»Р¶РЅС‹ РїРѕРїР°РґР°С‚СЊ РІ local)\n  if (!window.chrome.storage.session) {\n    window.chrome.storage.session = {\n      get: function(keys, callback) {\n        var res = {};\n        var keysArr = Array.isArray(keys) ? keys : (typeof keys === 'object' && keys !== null ? Object.keys(keys) : [keys]);\n        keysArr.forEach(function(k) {\n          var val = readStored(sessionStorage, 'sess_' + k);\n          if (val !== undefined) res[k] = val;\n        });\n        if (callback) callback(res);\n        return Promise.resolve(res);\n      },\n      set: function(obj, callback) {\n        var changes = {};\n        if (obj && typeof obj === 'object') {\n          Object.keys(obj).forEach(function(k) {\n            var oldVal = readStored(sessionStorage, 'sess_' + k);\n            var newVal = obj[k];\n            sessionStorage.setItem('ai_cm_sess_' + k, typeof newVal === 'object' ? JSON.stringify(newVal) : newVal);\n            changes[k] = { oldValue: oldVal, newValue: newVal };\n          });\n        }\n        notifyStorage(changes, 'session');\n        if (callback) callback();\n        return Promise.resolve();\n      },\n      remove: function(keys, callback) {\n        var arr = Array.isArray(keys) ? keys : [keys];\n        var changes = {};\n        arr.forEach(function(k) {\n          var oldVal = readStored(sessionStorage, 'sess_' + k);\n          if (oldVal !== undefined) {\n            sessionStorage.removeItem('ai_cm_sess_' + k);\n            changes[k] = { oldValue: oldVal, newValue: undefined };\n          }\n        });\n        if (Object.keys(changes).length) notifyStorage(changes, 'session');\n        if (callback) callback();\n        return Promise.resolve();\n      }\n    };\n  }\n\n  window.chrome.storage.sync = window.chrome.storage.local;\n\n  if (!IS_OPTIONS_FRAME) {\n    try {\n      window.addEventListener('message', function(ev) {\n        var d = ev && ev.data;\n        if (!d || d.__aiCmStorage !== 1 || !d.changes) return;\n        storageListeners.forEach(function(listener) {\n          try { listener(d.changes, d.area || 'local'); } catch (e) {}\n        });\n      });\n    } catch (e) {}\n  }\n\n  // Tabs API\n  window.chrome.tabs = window.chrome.tabs || {};\n  window.chrome.tabs.query = function(q, cb) {\n    var href = (typeof location !== 'undefined' ? location.href : '');\n    var title = (typeof document !== 'undefined' ? document.title : '');\n    // РќР°СЃС‚СЂРѕР№РєРё Р¶РёРІСѓС‚ РІ srcdoc-iframe: Р°РєС‚РёРІРЅР°СЏ \"РІРєР»Р°РґРєР°\" вЂ” СЌС‚Рѕ СЂРѕРґРёС‚РµР»СЊСЃРєР°СЏ СЃС‚СЂР°РЅРёС†Р°.\n    if (IS_OPTIONS_FRAME) {\n      try { if (parent && parent.location) href = parent.location.href; } catch (e) {}\n      try { if (parent && parent.document) title = parent.document.title; } catch (e) {}\n    }\n    var tab = { id: 1, active: true, currentWindow: true, url: href, title: title };\n    if (cb) cb([tab]);\n    return Promise.resolve([tab]);\n  };\n  window.chrome.tabs.sendMessage = function(tabId, message, callback) {\n    return window.chrome.runtime.sendMessage(message, callback);\n  };\n  window.chrome.tabs.create = function(opts, cb) {\n    try { if (opts && opts.url) window.open(opts.url, '_blank'); } catch (e) {}\n    if (cb) cb();\n  };\n  window.chrome.tabs.onUpdated = createEventStub();\n  window.chrome.tabs.onActivated = createEventStub();\n\n  window.chrome.action = window.chrome.action || {\n    setIcon: function() {}, setBadgeText: function() {}, setBadgeBackgroundColor: function() {}\n  };\n})();\n\n\n</script>\n<script>\n(() => {\n  var __getOwnPropNames = Object.getOwnPropertyNames;\n  var __require = /* @__PURE__ */ ((x) => typeof require !== \"undefined\" ? require : typeof Proxy !== \"undefined\" ? new Proxy(x, {\n    get: (a, b) => (typeof require !== \"undefined\" ? require : a)[b]\n  }) : x)(function(x) {\n    if (typeof require !== \"undefined\") return require.apply(this, arguments);\n    throw Error('Dynamic require of \"' + x + '\" is not supported');\n  });\n  var __esm = (fn, res, err) => function __init() {\n    if (err) throw err[0];\n    try {\n      return fn && (res = (0, fn[__getOwnPropNames(fn)[0]])(fn = 0)), res;\n    } catch (e) {\n      throw err = [e], e;\n    }\n  };\n  var __commonJS = (cb, mod) => function __require2() {\n    try {\n      return mod || (0, cb[__getOwnPropNames(cb)[0]])((mod = { exports: {} }).exports, mod), mod.exports;\n    } catch (e) {\n      throw mod = 0, e;\n    }\n  };\n\n  // ../utils/buildReferenceText.js\n  function cleanInline(s) {\n    s = s.replace(/\\[([^\\]]+)\\]\\(([^)\\s]+)\\)/g, \"$1\");\n    s = s.replace(/(\\*\\*|__)/g, \"\");\n    s = s.replace(/(?<![*\\w])\\*([^*\\n]+)\\*(?![\\w*])/g, \"$1\");\n    s = s.replace(/(?<![\\w_])\\_([^_\\n]+)\\_(?![\\w_])/g, \"$1\");\n    s = s.replace(/`/g, \"\");\n    return s;\n  }\n  function cleanLine(line) {\n    var s = String(line == null ? \"\" : line);\n    s = s.replace(/^#{1,6}\\s+/, \"\");\n    s = s.replace(/^>\\s?/, \"\");\n    s = s.replace(/^[-*+]\\s+/, \"\");\n    return s;\n  }\n  function cleanText(text) {\n    var lines = String(text).split(\"\\n\");\n    var out = [];\n    for (var i = 0; i < lines.length; i++) {\n      var line = lines[i];\n      var trimmed = line.trim();\n      if (/^-{3,}$/.test(trimmed)) continue;\n      out.push(cleanInline(cleanLine(line)));\n    }\n    return out.join(\"\\n\");\n  }\n  function buildReferenceText(messages) {\n    var list = Array.isArray(messages) ? messages : [];\n    var parts = [];\n    for (var i = 0; i < list.length; i++) {\n      var msg = list[i] || {};\n      parts.push(cleanText(msg.text == null ? \"\" : msg.text));\n    }\n    return parts.join(\"\\n\\n\");\n  }\n  var init_buildReferenceText = __esm({\n    \"../utils/buildReferenceText.js\"() {\n    }\n  });\n\n  // ../utils/platform.js\n  function aiCmIsFirefox() {\n    try {\n      var api = typeof browser !== \"undefined\" && browser && browser.runtime ? browser : typeof chrome !== \"undefined\" && chrome && chrome.runtime ? chrome : null;\n      if (!api) return false;\n      if (api.runtime && typeof api.runtime.getURL === \"function\") {\n        return String(api.runtime.getURL(\"\")).indexOf(\"moz-extension://\") === 0;\n      }\n      if (typeof api.getURL === \"function\") {\n        return String(api.getURL(\"\")).indexOf(\"moz-extension://\") === 0;\n      }\n      return false;\n    } catch (e) {\n      return false;\n    }\n  }\n  var init_platform = __esm({\n    \"../utils/platform.js\"() {\n    }\n  });\n\n  // entry-options.js\n  var require_entry_options = __commonJS({\n    \"entry-options.js\"(exports, module) {\n      init_buildReferenceText();\n      init_platform();\n      (function() {\n        \"use strict\";\n        var BINDINGS = [\n          { key: \"data-i18n\", target: \"textContent\" },\n          { key: \"data-i18n-placeholder\", target: \"placeholder\" },\n          { key: \"data-i18n-title\", target: \"title\" },\n          { key: \"data-i18n-aria-label\", target: \"aria-label\" },\n          // M-4.4: alt скриншотов руководства и карточек документации.\n          { key: \"data-i18n-alt\", target: \"alt\" }\n        ];\n        function aiCmI18nAvailable() {\n          return typeof chrome !== \"undefined\" && !!chrome.i18n && typeof chrome.i18n.getMessage === \"function\";\n        }\n        function aiCmI18nMessage2(key) {\n          try {\n            if (aiCmI18nAvailable()) {\n              return chrome.i18n.getMessage(key) || \"\";\n            }\n          } catch (eMessage) {\n            return \"\";\n          }\n          return \"\";\n        }\n        function aiCmI18nApply(root) {\n          var scope = root || (typeof document !== \"undefined\" ? document : null);\n          if (!scope || typeof scope.querySelectorAll !== \"function\") return 0;\n          var applied = 0;\n          for (var i = 0; i < BINDINGS.length; i++) {\n            var binding = BINDINGS[i];\n            var nodes = scope.querySelectorAll(\"[\" + binding.key + \"]\");\n            for (var j = 0; j < nodes.length; j++) {\n              var message = aiCmI18nMessage2(nodes[j].getAttribute(binding.key));\n              if (!message) continue;\n              if (binding.target === \"textContent\") nodes[j].textContent = message;\n              else nodes[j].setAttribute(binding.target, message);\n              applied++;\n            }\n          }\n          return applied;\n        }\n        function aiCmI18nBoot() {\n          if (!aiCmI18nAvailable()) return;\n          aiCmI18nApply(document);\n        }\n        if (typeof document !== \"undefined\") {\n          if (document.readyState === \"loading\") {\n            document.addEventListener(\"DOMContentLoaded\", aiCmI18nBoot);\n          } else {\n            aiCmI18nBoot();\n          }\n        }\n        if (typeof module !== \"undefined\" && module.exports) {\n          module.exports = {\n            aiCmI18nApply,\n            aiCmI18nMessage: aiCmI18nMessage2,\n            aiCmI18nAvailable,\n            bindings: BINDINGS\n          };\n        }\n      })();\n      (function() {\n        var CHATGPT_DEFAULT_MODEL = \"gpt-4o\";\n        function getConvIdFromPath(pathname) {\n          try {\n            var m = String(pathname || \"\").match(/\\/c\\/([A-Za-z0-9_-]+)/);\n            return m ? m[1] : \"\";\n          } catch (e) {\n            return \"\";\n          }\n        }\n        function shouldResetChatConversation(prevId, newId) {\n          if (!newId) return false;\n          return prevId !== newId;\n        }\n        function shouldResetConversationOnNav(prevId, newId) {\n          var p = prevId == null ? \"\" : String(prevId);\n          var n = newId == null ? \"\" : String(newId);\n          return p !== n;\n        }\n        function sanitizeChatGPTText(s) {\n          if (typeof s !== \"string\") return s;\n          return String(s).replace(/\\uE200entity\\uE202([^\\uE200\\uE201]*?)\\uE201/g, function(m, payload) {\n            try {\n              var arr = JSON.parse(payload);\n              if (Array.isArray(arr) && arr.length > 1 && typeof arr[1] === \"string\" && arr[1]) return arr[1];\n            } catch (e) {\n              swallowSoft(e, \"chatgpt-utils:sanitizeChatGPTText-entity\");\n            }\n            try {\n              var mt = String(payload).match(/\"([^\"]+)\"/g);\n              if (mt && mt.length > 1) {\n                var v = mt[1].replace(/^\"|\"$/g, \"\");\n                if (v) return v;\n              }\n            } catch (e2) {\n            }\n            return \"\";\n          }).replace(/\\uE200(?:cite|image_group)\\uE202[^\\uE200\\uE201]*?\\uE201/g, \"\").replace(/[\\uE000-\\uF8FF]/g, \"\").replace(/\\[entity\\](?:\\[[^\\]]*\\])+/g, \"\").replace(/\\[entity\\]/g, \"\").replace(/\\[cite:[^\\]]*\\]/g, \"\").replace(/[ \\t]{2,}/g, \" \");\n        }\n        function orderChatGPTMapping(mapping) {\n          var keys = Object.keys(mapping || {});\n          if (!keys.length) return [];\n          var byId = {};\n          for (var i = 0; i < keys.length; i++) {\n            var k = keys[i];\n            var n = mapping[k];\n            var nid = n && n.id != null ? String(n.id) : k;\n            byId[nid] = k;\n          }\n          var hasParent = false;\n          var hasChildren = false;\n          for (var p = 0; p < keys.length; p++) {\n            var np = mapping[keys[p]];\n            if (np && np.parent !== void 0) hasParent = true;\n            if (np && Array.isArray(np.children) && np.children.length) hasChildren = true;\n          }\n          var childrenOf = {};\n          for (var c0 = 0; c0 < keys.length; c0++) childrenOf[keys[c0]] = [];\n          var roots = [];\n          for (var m = 0; m < keys.length; m++) {\n            var kk = keys[m];\n            var nn = mapping[kk];\n            var pid = nn && nn.parent != null ? String(nn.parent) : null;\n            var pk = pid ? byId[pid] || pid : null;\n            if (pk) {\n              if (childrenOf[pk]) childrenOf[pk].push(kk);\n            } else if (hasParent) {\n              roots.push(kk);\n            }\n          }\n          if (!hasParent) {\n            if (hasChildren) {\n              var isChild = {};\n              for (var c1 = 0; c1 < keys.length; c1++) {\n                var n1 = mapping[keys[c1]];\n                if (n1 && Array.isArray(n1.children)) {\n                  for (var c2 = 0; c2 < n1.children.length; c2++) {\n                    var cid = String(n1.children[c2]);\n                    isChild[byId[cid] || cid] = true;\n                  }\n                }\n              }\n              roots = keys.filter(function(k2) {\n                return !isChild[k2];\n              });\n              if (!roots.length) roots = [keys[0]];\n            } else {\n              return keys.slice().sort(function(a, b) {\n                var ca = mapping[a] && mapping[a].message && mapping[a].message.create_time || 0;\n                var cb = mapping[b] && mapping[b].message && mapping[b].message.create_time || 0;\n                return ca - cb;\n              });\n            }\n          }\n          roots.sort(function(a, b) {\n            var ca = mapping[a] && mapping[a].message && mapping[a].message.create_time || 0;\n            var cb = mapping[b] && mapping[b].message && mapping[b].message.create_time || 0;\n            return ca - cb;\n          });\n          var out = [];\n          var visited = {};\n          function walk(k2) {\n            if (!k2 || visited[k2] || mapping[k2] === void 0) return;\n            visited[k2] = true;\n            out.push(k2);\n            var ch = childrenOf[k2] || [];\n            if (mapping[k2] && Array.isArray(mapping[k2].children) && mapping[k2].children.length) {\n              ch = mapping[k2].children.map(function(cid2) {\n                return byId[String(cid2)] || String(cid2);\n              });\n            }\n            for (var w = 0; w < ch.length; w++) walk(ch[w]);\n          }\n          for (var r = 0; r < roots.length; r++) walk(roots[r]);\n          for (var u = 0; u < keys.length; u++) if (!visited[keys[u]]) out.push(keys[u]);\n          return out;\n        }\n        function parseChatGPTConversation(json) {\n          var messages = [];\n          var model = \"\";\n          var tokens = 0;\n          try {\n            if (!json || typeof json !== \"object\") {\n              return { messages: [], model: CHATGPT_DEFAULT_MODEL, tokens: 0 };\n            }\n            if (json.model_slug) model = json.model_slug;\n            if (typeof json.tokens === \"number\") tokens = json.tokens;\n            var mapping = json.mapping || {};\n            var keys = orderChatGPTMapping(mapping);\n            for (var i = 0; i < keys.length; i++) {\n              var node = mapping[keys[i]];\n              var msg = node && node.message;\n              if (!msg || !msg.content) continue;\n              var role = msg.author && msg.author.role;\n              if (role === \"system\" || role === \"tool\") continue;\n              var parts = msg.content.parts || [];\n              var contentPieces = [];\n              for (var j = 0; j < parts.length; j++) {\n                if (typeof parts[j] === \"string\") {\n                  contentPieces.push(sanitizeChatGPTText(parts[j]));\n                } else if (parts[j] && typeof parts[j] === \"object\" && typeof parts[j].text === \"string\") {\n                  contentPieces.push(sanitizeChatGPTText(parts[j].text));\n                }\n              }\n              var content = contentPieces.join(\"\\n\").trim();\n              if (content) {\n                messages.push({\n                  role: role === \"assistant\" ? \"assistant\" : \"user\",\n                  content\n                });\n              }\n            }\n          } catch (e) {\n            swallowSoft(e, \"chatgpt-utils:parseChatGPTConversation\");\n          }\n          if (!model) model = CHATGPT_DEFAULT_MODEL;\n          return { messages, model, tokens };\n        }\n        var api = {\n          getConvIdFromPath,\n          shouldResetChatConversation,\n          shouldResetConversationOnNav,\n          orderChatGPTMapping,\n          sanitizeChatGPTText,\n          parseChatGPTConversation\n        };\n        if (typeof window !== \"undefined\") {\n          window.ChatGPTConversationParser = api;\n        }\n        if (typeof module !== \"undefined\" && module.exports) {\n          module.exports = api;\n        }\n      })();\n      (function() {\n        function parsePerplexityThread(json) {\n          function getTrim(obj, name) {\n            if (!obj || typeof obj !== \"object\") return void 0;\n            var keys = Object.keys(obj);\n            for (var i2 = 0; i2 < keys.length; i2++) {\n              if (keys[i2].trim() === name) return obj[keys[i2]];\n            }\n            return void 0;\n          }\n          var model = \"\";\n          var pieces = [];\n          var ids = [];\n          var count = 0;\n          var lastText = \"\";\n          var messages = [];\n          try {\n            var entries = getTrim(json, \"entries\");\n            if (!Array.isArray(entries)) entries = [];\n            for (var i = 0; i < entries.length; i++) {\n              var entry = entries[i];\n              if (!entry || typeof entry !== \"object\") continue;\n              var queryStr = getTrim(entry, \"query_str\") || \"\";\n              var displayModel = getTrim(entry, \"display_model\") || \"\";\n              var userSelectedModel = getTrim(entry, \"user_selected_model\") || \"\";\n              var threadUrlSlug = getTrim(entry, \"thread_url_slug\") || \"\";\n              var entryModel = displayModel || userSelectedModel || \"\";\n              if (entryModel) model = entryModel;\n              var entryId = threadUrlSlug || \"entry\" + i;\n              if (queryStr && typeof queryStr === \"string\" && queryStr.trim()) {\n                pieces.push(queryStr.trim());\n                ids.push(entryId + \"_user\");\n                count++;\n                lastText = queryStr.trim();\n                messages.push({ role: \"user\", text: queryStr.trim() });\n              }\n              var blocks = getTrim(entry, \"blocks\");\n              var assistantPushed = false;\n              if (Array.isArray(blocks)) {\n                var assistantTextParts = [];\n                for (var j = 0; j < blocks.length; j++) {\n                  var block = blocks[j];\n                  if (!block || typeof block !== \"object\") continue;\n                  var wfBlock = getTrim(block, \"workflow_block\");\n                  if (wfBlock && typeof wfBlock === \"object\") {\n                    var steps = getTrim(wfBlock, \"steps\");\n                    if (Array.isArray(steps)) {\n                      for (var s = 0; s < steps.length; s++) {\n                        var step = steps[s];\n                        if (!step || typeof step !== \"object\") continue;\n                        var items = getTrim(step, \"items\");\n                        if (Array.isArray(items)) {\n                          for (var it = 0; it < items.length; it++) {\n                            var item = items[it];\n                            if (!item || typeof item !== \"object\") continue;\n                            if (getTrim(item, \"type\") === \"WORKFLOW_ITEM_TEXT\") {\n                              var payload = getTrim(item, \"payload\");\n                              if (payload && typeof payload === \"object\") {\n                                var textPayload = getTrim(payload, \"text_payload\");\n                                if (textPayload && typeof textPayload === \"object\") {\n                                  var text = getTrim(textPayload, \"text\");\n                                  if (typeof text === \"string\" && text.trim()) {\n                                    assistantTextParts.push(text.trim());\n                                  }\n                                }\n                              }\n                            }\n                          }\n                        }\n                      }\n                    }\n                  }\n                  var wrBlock = getTrim(block, \"web_result_block\");\n                  if (wrBlock && typeof wrBlock === \"object\") {\n                    var webResults = getTrim(wrBlock, \"web_results\");\n                    if (Array.isArray(webResults)) {\n                      for (var w = 0; w < webResults.length; w++) {\n                        var wr = webResults[w];\n                        if (!wr || typeof wr !== \"object\") continue;\n                        var wrName = getTrim(wr, \"name\") || \"\";\n                        var wrSnippet = getTrim(wr, \"snippet\") || \"\";\n                        if (wrName || wrSnippet) {\n                          var wrText = (wrName ? wrName + \": \" : \"\") + (wrSnippet || \"\");\n                          if (wrText.trim()) assistantTextParts.push(\"[source] \" + wrText.trim());\n                        }\n                      }\n                    }\n                  }\n                }\n                if (assistantTextParts.length > 0) {\n                  var assistantText = assistantTextParts.join(\"\\n\").trim();\n                  if (assistantText) {\n                    pieces.push(assistantText);\n                    ids.push(entryId + \"_assistant\");\n                    count++;\n                    lastText = assistantText;\n                    messages.push({ role: \"assistant\", text: assistantText });\n                    assistantPushed = true;\n                  }\n                }\n              }\n              if (!assistantPushed) {\n                var entryText = getTrim(entry, \"text\");\n                if (typeof entryText === \"string\" && entryText.trim()) {\n                  var stepsJson = null;\n                  try {\n                    stepsJson = JSON.parse(entryText);\n                  } catch (e1) {\n                    stepsJson = null;\n                  }\n                  var stepItems = null;\n                  if (Array.isArray(stepsJson)) stepItems = stepsJson;\n                  else if (stepsJson && typeof stepsJson === \"object\") {\n                    stepItems = Object.keys(stepsJson).map(function(k) {\n                      return stepsJson[k];\n                    });\n                  }\n                  var answerText = \"\";\n                  if (stepItems) {\n                    for (var si = 0; si < stepItems.length; si++) {\n                      var stepItem = stepItems[si];\n                      if (!stepItem || typeof stepItem !== \"object\") continue;\n                      if (getTrim(stepItem, \"step_type\") !== \"FINAL\") continue;\n                      var stepContent = getTrim(stepItem, \"content\");\n                      var contentObj = null;\n                      if (typeof stepContent === \"string\") {\n                        try {\n                          contentObj = JSON.parse(stepContent);\n                        } catch (e2) {\n                          contentObj = null;\n                        }\n                      } else if (stepContent && typeof stepContent === \"object\") {\n                        contentObj = stepContent;\n                      }\n                      if (!contentObj) continue;\n                      var answerRaw = getTrim(contentObj, \"answer\");\n                      if (typeof answerRaw === \"string\" && answerRaw.trim()) {\n                        var answerObj = null;\n                        try {\n                          answerObj = JSON.parse(answerRaw);\n                        } catch (e3) {\n                          answerObj = null;\n                        }\n                        if (answerObj && typeof answerObj === \"object\") {\n                          var answerField = getTrim(answerObj, \"answer\");\n                          if (typeof answerField === \"string\") answerText = answerField;\n                        } else if (typeof answerObj === \"string\") {\n                          answerText = answerObj;\n                        }\n                      } else if (answerRaw && typeof answerRaw === \"object\") {\n                        var answerField2 = getTrim(answerRaw, \"answer\");\n                        if (typeof answerField2 === \"string\") answerText = answerField2;\n                      }\n                      if (answerText) break;\n                    }\n                  }\n                  answerText = answerText.trim();\n                  if (answerText) {\n                    pieces.push(answerText);\n                    ids.push(entryId + \"_assistant\");\n                    count++;\n                    lastText = answerText;\n                    messages.push({ role: \"assistant\", text: answerText });\n                  }\n                }\n              }\n            }\n          } catch (e) {\n            swallowSoft(e, \"perplexity-utils:parsePerplexityThread\");\n          }\n          return {\n            text: pieces.join(\"\\n\"),\n            count,\n            lastText,\n            modelSlug: model,\n            pieces,\n            ids,\n            messages,\n            model\n          };\n        }\n        function stripPerplexityHistoryTruncation(urlStr) {\n          var src = String(urlStr || \"\");\n          if (!src) return src;\n          var hash = \"\";\n          var h = src.indexOf(\"#\");\n          if (h !== -1) {\n            hash = src.slice(h);\n            src = src.slice(0, h);\n          }\n          var q = src.indexOf(\"?\");\n          if (q === -1) return src + hash;\n          var base = src.slice(0, q);\n          var parts = src.slice(q + 1).split(\"&\");\n          var kept = [];\n          for (var i = 0; i < parts.length; i++) {\n            if (!parts[i]) continue;\n            var name = parts[i].split(\"=\")[0];\n            if (name === \"limit\" || name === \"offset\" || name === \"from_first\") continue;\n            kept.push(parts[i]);\n          }\n          return base + (kept.length ? \"?\" + kept.join(\"&\") : \"\") + hash;\n        }\n        if (typeof window !== \"undefined\") {\n          window.parsePerplexityThread = parsePerplexityThread;\n          window.stripPerplexityHistoryTruncation = stripPerplexityHistoryTruncation;\n        }\n        if (typeof module !== \"undefined\" && module.exports) {\n          module.exports = {\n            parsePerplexityThread,\n            stripPerplexityHistoryTruncation\n          };\n        }\n      })();\n      (function() {\n        \"use strict\";\n        var ARCHIVE_KEY_PREFIX = \"aiCmArchive:\";\n        var CONV_SOURCE_KEY_PREFIX = \"aiCmConvSource:\";\n        var SOURCE_ARCHIVE = \"archive\";\n        var SOURCE_LIVE = \"live\";\n        var ARCHIVE_RECORD_VERSION = 1;\n        var FORMATS = {\n          GEMINI_TAKEOUT: \"gemini-takeout\",\n          CHATGPT_CONVERSATIONS: \"chatgpt-conversations\",\n          CLAUDE_CONVERSATIONS: \"claude-conversations\",\n          PERPLEXITY_THREADS: \"perplexity-threads\"\n        };\n        var SERVICE_BY_FORMAT = {};\n        SERVICE_BY_FORMAT[FORMATS.GEMINI_TAKEOUT] = \"gemini\";\n        SERVICE_BY_FORMAT[FORMATS.CHATGPT_CONVERSATIONS] = \"chatgpt\";\n        SERVICE_BY_FORMAT[FORMATS.CLAUDE_CONVERSATIONS] = \"claude\";\n        SERVICE_BY_FORMAT[FORMATS.PERPLEXITY_THREADS] = \"perplexity\";\n        var FORMAT_LABEL = {};\n        FORMAT_LABEL[FORMATS.GEMINI_TAKEOUT] = \"Gemini Takeout\";\n        FORMAT_LABEL[FORMATS.CHATGPT_CONVERSATIONS] = \"ChatGPT conversations.json\";\n        FORMAT_LABEL[FORMATS.CLAUDE_CONVERSATIONS] = \"Claude export\";\n        FORMAT_LABEL[FORMATS.PERPLEXITY_THREADS] = \"Perplexity threads\";\n        var MAX_CONVERSATION_BYTES = 2 * 1024 * 1024;\n        var MAX_TOTAL_BYTES = 8 * 1024 * 1024;\n        var MAX_MESSAGES_PER_CONVERSATION = 5e3;\n        var MAX_ARCHIVE_SIZE = 50 * 1024 * 1024;\n        function archiveStorageKey(convId) {\n          return ARCHIVE_KEY_PREFIX + String(convId == null ? \"\" : convId);\n        }\n        function convSourceStorageKey(convId) {\n          return CONV_SOURCE_KEY_PREFIX + String(convId == null ? \"\" : convId);\n        }\n        function normalizeText(v) {\n          if (typeof v !== \"string\") return \"\";\n          return v.replace(/\\r\\n?/g, \"\\n\").replace(/[ \\t]+$/gm, \"\").trim();\n        }\n        function collapseWs(v) {\n          return String(v == null ? \"\" : v).replace(/\\s+/g, \" \").trim();\n        }\n        function hash6(s) {\n          var str = String(s == null ? \"\" : s);\n          var h = 5381;\n          for (var i = 0; i < str.length; i++) {\n            h = (h << 5) + h + str.charCodeAt(i) | 0;\n          }\n          var hex = (h >>> 0).toString(16);\n          while (hex.length < 6) hex = \"0\" + hex;\n          return hex.slice(-6);\n        }\n        function normalizeRole(role) {\n          var r = collapseWs(role).toLowerCase();\n          if (r === \"user\" || r === \"human\" || r === \"me\" || r === \"prompt\" || r === \"you\") return \"user\";\n          if (r === \"assistant\" || r === \"model\" || r === \"bot\" || r === \"ai\" || r === \"gpt\" || r === \"gemini\" || r === \"claude\") return \"assistant\";\n          return \"\";\n        }\n        function toMs(v) {\n          if (typeof v === \"number\" && isFinite(v)) {\n            return v > 1e12 ? Math.round(v) : Math.round(v * 1e3);\n          }\n          if (typeof v === \"string\" && v) {\n            var t = Date.parse(v);\n            if (!isNaN(t)) return t;\n            var trimmed = v.replace(/(\\.\\d{3})\\d+/, \"$1\");\n            if (trimmed !== v) {\n              t = Date.parse(trimmed);\n              if (!isNaN(t)) return t;\n            }\n          }\n          return 0;\n        }\n        function arrayifyConversations(json) {\n          if (Array.isArray(json)) return json;\n          if (!json || typeof json !== \"object\") return [];\n          if (Array.isArray(json.conversations)) return json.conversations;\n          return [json];\n        }\n        function resolveOrderChatGPTMapping(deps) {\n          if (deps && typeof deps.orderChatGPTMapping === \"function\") return deps.orderChatGPTMapping;\n          try {\n            if (typeof __require === \"function\") {\n              var m = __require(\"./chatgpt-conversation-parser.js\");\n              if (m && typeof m.orderChatGPTMapping === \"function\") return m.orderChatGPTMapping;\n            }\n          } catch (eR) {\n          }\n          try {\n            if (typeof window !== \"undefined\" && window.ChatGPTConversationParser && typeof window.ChatGPTConversationParser.orderChatGPTMapping === \"function\") {\n              return window.ChatGPTConversationParser.orderChatGPTMapping;\n            }\n          } catch (eW) {\n          }\n          return null;\n        }\n        function resolveSanitizeChatGPT(deps) {\n          if (deps && typeof deps.sanitizeChatGPTText === \"function\") return deps.sanitizeChatGPTText;\n          try {\n            if (typeof __require === \"function\") {\n              var m = __require(\"./chatgpt-conversation-parser.js\");\n              if (m && typeof m.sanitizeChatGPTText === \"function\") return m.sanitizeChatGPTText;\n            }\n          } catch (eR) {\n          }\n          try {\n            if (typeof window !== \"undefined\" && window.ChatGPTConversationParser && typeof window.ChatGPTConversationParser.sanitizeChatGPTText === \"function\") {\n              return window.ChatGPTConversationParser.sanitizeChatGPTText;\n            }\n          } catch (eW) {\n          }\n          return function(s) {\n            return s;\n          };\n        }\n        function resolveParsePerplexityThread(deps) {\n          if (deps && typeof deps.parsePerplexityThread === \"function\") return deps.parsePerplexityThread;\n          try {\n            if (typeof __require === \"function\") {\n              var m = __require(\"./perplexity-parser.js\");\n              if (m && typeof m.parsePerplexityThread === \"function\") return m.parsePerplexityThread;\n            }\n          } catch (eR) {\n          }\n          try {\n            if (typeof window !== \"undefined\" && typeof window.parsePerplexityThread === \"function\") {\n              return window.parsePerplexityThread;\n            }\n          } catch (eW) {\n          }\n          return null;\n        }\n        function normalizeMessage(raw, ordinal) {\n          if (!raw || typeof raw !== \"object\") return null;\n          var role = normalizeRole(raw.role != null ? raw.role : raw.sender);\n          if (!role) return null;\n          var text = normalizeText(raw.text != null ? raw.text : raw.content);\n          if (!text) return null;\n          return {\n            id: typeof raw.id === \"string\" && raw.id ? raw.id : \"a:\" + (ordinal || 0) + \":\" + hash6(role + \"\\0\" + text),\n            role,\n            text,\n            ts: typeof raw.ts === \"number\" && isFinite(raw.ts) ? raw.ts : toMs(raw.created_at != null ? raw.created_at : raw.time)\n          };\n        }\n        function finalizeConversation(conv) {\n          var messages = [];\n          var textLen = 0;\n          var raw = conv && Array.isArray(conv.messages) ? conv.messages : [];\n          for (var i = 0; i < raw.length; i++) {\n            var m = normalizeMessage(raw[i], messages.length);\n            if (!m) continue;\n            if (messages.length >= MAX_MESSAGES_PER_CONVERSATION) break;\n            messages.push(m);\n            textLen += m.text.length;\n          }\n          var title = normalizeText(conv && conv.title);\n          if (!title) {\n            for (var t = 0; t < messages.length; t++) {\n              if (messages[t].role === \"user\") {\n                title = collapseWs(messages[t].text).slice(0, 80);\n                break;\n              }\n            }\n          }\n          return {\n            convId: String(conv && conv.convId || \"\"),\n            service: conv && conv.service || \"\",\n            format: conv && conv.format || \"\",\n            title,\n            updatedAt: conv && typeof conv.updatedAt === \"number\" && isFinite(conv.updatedAt) ? conv.updatedAt : 0,\n            messages,\n            count: messages.length,\n            textLen\n          };\n        }\n        function looksLikeGeminiActivity(item) {\n          if (!item || typeof item !== \"object\") return false;\n          var url = String(item.titleUrl || item.title_url || \"\");\n          if (/gemini\\.google\\.com\\/app\\//.test(url)) return true;\n          return collapseWs(item.header).toLowerCase() === \"gemini apps\";\n        }\n        function detectArchiveFormat(json) {\n          var items = arrayifyConversations(json);\n          if (!items.length) return null;\n          var limit = Math.min(items.length, 20);\n          for (var i = 0; i < limit; i++) {\n            var it = items[i];\n            if (!it || typeof it !== \"object\") continue;\n            if (it.mapping && typeof it.mapping === \"object\") return FORMATS.CHATGPT_CONVERSATIONS;\n            if (Array.isArray(it.chat_messages)) return FORMATS.CLAUDE_CONVERSATIONS;\n            if (Array.isArray(it.entries) || it.thread && Array.isArray(it.thread.entries)) return FORMATS.PERPLEXITY_THREADS;\n            if (looksLikeGeminiActivity(it)) return FORMATS.GEMINI_TAKEOUT;\n          }\n          return null;\n        }\n        function serviceOfFormat(format) {\n          return SERVICE_BY_FORMAT[format] || \"\";\n        }\n        function messageTextOf(m) {\n          if (!m || typeof m !== \"object\") return \"\";\n          return normalizeText(m.text != null ? m.text : m.content);\n        }\n        function aggregateMessageList(conv) {\n          if (Array.isArray(conv.messages)) return conv.messages;\n          if (Array.isArray(conv.chat_messages)) return conv.chat_messages;\n          if (Array.isArray(conv.entries)) return conv.entries;\n          return [];\n        }\n        function detectFullTextAnomaly(conv) {\n          if (!conv || typeof conv !== \"object\") return null;\n          if (typeof conv.full !== \"string\") return null;\n          var fullText = normalizeText(conv.full);\n          if (!fullText) return null;\n          var raw = aggregateMessageList(conv);\n          var msgsLen = 0;\n          for (var i = 0; i < raw.length; i++) msgsLen += messageTextOf(raw[i]).length;\n          if (fullText.length <= msgsLen) return null;\n          return {\n            convId: String(conv.convId || conv.conversation_id || conv.uuid || conv.id || \"\"),\n            code: \"full-longer-than-messages\",\n            fullLen: fullText.length,\n            msgsLen,\n            over: fullText.length - msgsLen,\n            msgCount: raw.length\n          };\n        }\n        function collectFullTextAnomalies(json) {\n          var items = arrayifyConversations(json);\n          var out = [];\n          for (var i = 0; i < items.length; i++) {\n            var a = detectFullTextAnomaly(items[i]);\n            if (a) out.push(a);\n          }\n          return out;\n        }\n        function reportFullTextAnomalies(json, deps) {\n          var d = deps || {};\n          var warn = typeof d.warn === \"function\" ? d.warn : typeof console !== \"undefined\" && console && typeof console.warn === \"function\" ? function(msg) {\n            console.warn(msg);\n          } : null;\n          var anomalies = collectFullTextAnomalies(json);\n          if (warn) {\n            for (var i = 0; i < anomalies.length; i++) {\n              var a = anomalies[i];\n              warn(\"[AI CM][archive] \\u0430\\u043D\\u043E\\u043C\\u0430\\u043B\\u0438\\u044F full>messages convId=\" + (a.convId || \"-\") + \" full=\" + a.fullLen + \" msgs=\" + a.msgsLen + \" over=\" + a.over + \" msgsCount=\" + a.msgCount);\n            }\n          }\n          return anomalies;\n        }\n        function extractConvIdFromUrl(url) {\n          var m = String(url == null ? \"\" : url).match(/\\/app\\/(?!prompts(?:\\/|$)|new(?:\\/|$)|apikey(?:\\/|$))([A-Za-z0-9_-]+)/);\n          return m ? m[1] : \"\";\n        }\n        var GEMINI_PROMPT_PREFIX = /^(prompted|asked|you asked|said|запрос:?|вы спросили:?|запрос\\s)\\s*/i;\n        var GEMINI_RESPONSE_DETAIL = /^(response|answer|ответ|ответ модели|model response)$/i;\n        function geminiActivityUserText(rec) {\n          var title = normalizeText(rec.title != null ? rec.title : rec.description);\n          if (!title) return \"\";\n          return normalizeText(title.replace(GEMINI_PROMPT_PREFIX, \"\"));\n        }\n        function geminiActivityAssistantText(rec) {\n          var direct = normalizeText(rec.response != null ? rec.response : rec.answer);\n          if (direct) return direct;\n          var details = rec.details;\n          if (!Array.isArray(details)) return \"\";\n          for (var i = 0; i < details.length; i++) {\n            var d = details[i];\n            if (!d || typeof d !== \"object\") continue;\n            if (!GEMINI_RESPONSE_DETAIL.test(collapseWs(d.name))) continue;\n            var val = normalizeText(d.value);\n            if (val) return val;\n          }\n          return \"\";\n        }\n        function parseGeminiTakeout(json) {\n          var items = Array.isArray(json) ? json : json && Array.isArray(json.items) ? json.items : [];\n          var order = [];\n          var byConv = {};\n          var skippedNoConvId = 0;\n          var skippedEmpty = 0;\n          for (var i = 0; i < items.length; i++) {\n            var rec = items[i];\n            if (!rec || typeof rec !== \"object\") {\n              skippedEmpty++;\n              continue;\n            }\n            var convId = extractConvIdFromUrl(rec.titleUrl != null ? rec.titleUrl : rec.title_url);\n            if (!convId) {\n              skippedNoConvId++;\n              continue;\n            }\n            var ts = toMs(rec.time);\n            var userText = geminiActivityUserText(rec);\n            var assistantText = geminiActivityAssistantText(rec);\n            if (!userText && !assistantText) {\n              skippedEmpty++;\n              continue;\n            }\n            if (!byConv[convId]) {\n              byConv[convId] = {\n                convId,\n                service: SERVICE_BY_FORMAT[FORMATS.GEMINI_TAKEOUT],\n                format: FORMATS.GEMINI_TAKEOUT,\n                title: \"\",\n                updatedAt: 0,\n                messages: []\n              };\n              order.push(convId);\n            }\n            var conv = byConv[convId];\n            if (userText) conv.messages.push({ role: \"user\", text: userText, ts });\n            if (assistantText) conv.messages.push({ role: \"assistant\", text: assistantText, ts });\n            if (ts > conv.updatedAt) conv.updatedAt = ts;\n            if (!conv.title && userText) conv.title = collapseWs(userText).slice(0, 80);\n          }\n          var out = [];\n          for (var k = 0; k < order.length; k++) out.push(finalizeConversation(byConv[order[k]]));\n          return { conversations: out, skippedNoConvId, skippedEmpty };\n        }\n        function parseChatGPTArchive(json, deps) {\n          var orderFn = resolveOrderChatGPTMapping(deps);\n          if (!orderFn) return { conversations: [], error: \"chatgpt-parser-unavailable\", skippedNoConvId: 0, skippedEmpty: 0 };\n          var sanitize = resolveSanitizeChatGPT(deps);\n          var items = arrayifyConversations(json);\n          var out = [];\n          var skippedNoConvId = 0;\n          var skippedEmpty = 0;\n          for (var i = 0; i < items.length; i++) {\n            var c = items[i];\n            if (!c || typeof c !== \"object\" || !c.mapping || typeof c.mapping !== \"object\") {\n              skippedEmpty++;\n              continue;\n            }\n            var convId = String(c.conversation_id || c.id || \"\");\n            if (!convId) {\n              skippedNoConvId++;\n              continue;\n            }\n            var keys = orderFn(c.mapping);\n            var messages = [];\n            for (var k = 0; k < keys.length; k++) {\n              var node = c.mapping[keys[k]];\n              var msg = node && node.message;\n              if (!msg || !msg.content) continue;\n              var role = normalizeRole(msg.author && msg.author.role);\n              if (!role) continue;\n              var parts = Array.isArray(msg.content.parts) ? msg.content.parts : [];\n              var pieces = [];\n              for (var p = 0; p < parts.length; p++) {\n                if (typeof parts[p] === \"string\") {\n                  var s = sanitize(parts[p]);\n                  if (normalizeText(s)) pieces.push(normalizeText(s));\n                } else if (parts[p] && typeof parts[p] === \"object\" && typeof parts[p].text === \"string\") {\n                  var s2 = sanitize(parts[p].text);\n                  if (normalizeText(s2)) pieces.push(normalizeText(s2));\n                }\n              }\n              var text = normalizeText(pieces.join(\"\\n\"));\n              if (!text) continue;\n              messages.push({ role, text, ts: toMs(msg.create_time) });\n            }\n            out.push(finalizeConversation({\n              convId,\n              service: SERVICE_BY_FORMAT[FORMATS.CHATGPT_CONVERSATIONS],\n              format: FORMATS.CHATGPT_CONVERSATIONS,\n              title: c.title,\n              updatedAt: toMs(c.update_time != null ? c.update_time : c.create_time),\n              messages\n            }));\n          }\n          return { conversations: out, skippedNoConvId, skippedEmpty };\n        }\n        function claudeMessageText(msg) {\n          var parts = [];\n          if (Array.isArray(msg.content)) {\n            for (var i = 0; i < msg.content.length; i++) {\n              var b = msg.content[i];\n              if (!b || typeof b !== \"object\") continue;\n              if (b.type === \"text\" && typeof b.text === \"string\") {\n                var t = normalizeText(b.text);\n                if (t) parts.push(t);\n              }\n            }\n          }\n          if (!parts.length) {\n            var fallback = normalizeText(msg.text);\n            if (fallback) parts.push(fallback);\n          }\n          return normalizeText(parts.join(\"\\n\"));\n        }\n        function parseClaudeArchive(json) {\n          var items = arrayifyConversations(json);\n          var out = [];\n          var skippedNoConvId = 0;\n          var skippedEmpty = 0;\n          for (var i = 0; i < items.length; i++) {\n            var c = items[i];\n            if (!c || typeof c !== \"object\" || !Array.isArray(c.chat_messages)) {\n              skippedEmpty++;\n              continue;\n            }\n            var convId = String(c.uuid || c.id || \"\");\n            if (!convId) {\n              skippedNoConvId++;\n              continue;\n            }\n            var messages = [];\n            for (var k = 0; k < c.chat_messages.length; k++) {\n              var msg = c.chat_messages[k];\n              if (!msg || typeof msg !== \"object\") continue;\n              var role = normalizeRole(msg.sender);\n              if (!role) continue;\n              var text = claudeMessageText(msg);\n              if (!text) continue;\n              messages.push({\n                id: typeof msg.uuid === \"string\" && msg.uuid ? msg.uuid : void 0,\n                role,\n                text,\n                ts: toMs(msg.created_at)\n              });\n            }\n            var providerDate = String(c.updated_at || c.created_at || \"\");\n            out.push(finalizeConversation({\n              convId,\n              service: SERVICE_BY_FORMAT[FORMATS.CLAUDE_CONVERSATIONS],\n              format: FORMATS.CLAUDE_CONVERSATIONS,\n              title: c.name || c.title,\n              updatedAt: toMs(providerDate),\n              messages\n            }));\n          }\n          return { conversations: out, skippedNoConvId, skippedEmpty };\n        }\n        function parsePerplexityArchive(json, deps) {\n          var parseThread = resolveParsePerplexityThread(deps);\n          if (!parseThread) return { conversations: [], error: \"perplexity-parser-unavailable\", skippedNoConvId: 0, skippedEmpty: 0 };\n          var items = arrayifyConversations(json);\n          var out = [];\n          var skippedNoConvId = 0;\n          var skippedEmpty = 0;\n          for (var i = 0; i < items.length; i++) {\n            var it = items[i];\n            if (!it || typeof it !== \"object\") {\n              skippedEmpty++;\n              continue;\n            }\n            var thread = it.thread && typeof it.thread === \"object\" ? it.thread : it;\n            var entries = Array.isArray(it.entries) ? it.entries : Array.isArray(thread.entries) ? thread.entries : null;\n            if (!entries) {\n              skippedEmpty++;\n              continue;\n            }\n            var convId = String(thread.id || thread.slug || it.id || it.slug || \"\");\n            if (!convId) {\n              skippedNoConvId++;\n              continue;\n            }\n            var parsed = parseThread({ entries }) || {};\n            var msgs = Array.isArray(parsed.messages) ? parsed.messages : [];\n            var messages = [];\n            for (var k = 0; k < msgs.length; k++) {\n              var m = msgs[k];\n              if (!m || typeof m !== \"object\") continue;\n              var role = normalizeRole(m.role);\n              var text = normalizeText(m.text);\n              if (!role || !text) continue;\n              messages.push({ role, text, ts: 0 });\n            }\n            out.push(finalizeConversation({\n              convId,\n              service: SERVICE_BY_FORMAT[FORMATS.PERPLEXITY_THREADS],\n              format: FORMATS.PERPLEXITY_THREADS,\n              title: thread.title || it.title,\n              updatedAt: toMs(thread.updated_at || it.updated_at),\n              messages\n            }));\n          }\n          return { conversations: out, skippedNoConvId, skippedEmpty };\n        }\n        function parseArchive(json, deps) {\n          reportFullTextAnomalies(json, deps);\n          var format = detectArchiveFormat(json);\n          if (!format) {\n            return { ok: false, format: null, service: \"\", error: \"unknown-format\", conversations: [], skippedNoConvId: 0, skippedEmpty: 0 };\n          }\n          var res;\n          if (format === FORMATS.GEMINI_TAKEOUT) res = parseGeminiTakeout(json);\n          else if (format === FORMATS.CHATGPT_CONVERSATIONS) res = parseChatGPTArchive(json, deps);\n          else if (format === FORMATS.CLAUDE_CONVERSATIONS) res = parseClaudeArchive(json);\n          else res = parsePerplexityArchive(json, deps);\n          if (res.error) {\n            return { ok: false, format, service: serviceOfFormat(format), error: res.error, conversations: [], skippedNoConvId: 0, skippedEmpty: 0 };\n          }\n          return {\n            ok: true,\n            format,\n            service: serviceOfFormat(format),\n            error: null,\n            conversations: res.conversations || [],\n            skippedNoConvId: res.skippedNoConvId || 0,\n            skippedEmpty: res.skippedEmpty || 0\n          };\n        }\n        function parseArchiveText(text, deps) {\n          var json = null;\n          try {\n            json = JSON.parse(String(text == null ? \"\" : text));\n          } catch (e) {\n            return { ok: false, format: null, service: \"\", error: \"invalid-json\", conversations: [], skippedNoConvId: 0, skippedEmpty: 0 };\n          }\n          return parseArchive(json, deps);\n        }\n        function buildArchiveRecord(conversation, extra) {\n          var conv = finalizeConversation(conversation);\n          var x = extra || {};\n          return {\n            v: ARCHIVE_RECORD_VERSION,\n            convId: conv.convId,\n            service: conv.service,\n            format: conv.format,\n            title: conv.title,\n            count: conv.count,\n            textLen: conv.textLen,\n            messages: conv.messages,\n            importedAt: typeof x.importedAt === \"number\" ? x.importedAt : Date.now(),\n            fileName: String(x.fileName || \"\")\n          };\n        }\n        function buildConvSourceRecord(archiveRecord, extra) {\n          var r = archiveRecord || {};\n          var x = extra || {};\n          var rec = {\n            kind: SOURCE_ARCHIVE,\n            service: String(r.service || \"\"),\n            format: String(r.format || \"\"),\n            count: typeof r.count === \"number\" ? r.count : 0,\n            textLen: typeof r.textLen === \"number\" ? r.textLen : 0,\n            importedAt: typeof r.importedAt === \"number\" ? r.importedAt : Date.now()\n          };\n          rec.label = describeSource(rec);\n          if (x.fileName) rec.fileName = String(x.fileName);\n          return (\n            /** @type {ArchiveSourceRecord} */\n            rec\n          );\n        }\n        function buildLiveSourceRecord(extra) {\n          var x = extra || {};\n          var rec = {\n            kind: SOURCE_LIVE,\n            service: String(x.service || \"\"),\n            format: \"\",\n            count: typeof x.count === \"number\" ? x.count : 0,\n            textLen: typeof x.textLen === \"number\" ? x.textLen : 0,\n            importedAt: 0\n          };\n          rec.label = describeSource(rec);\n          return (\n            /** @type {ArchiveSourceRecord} */\n            rec\n          );\n        }\n        function describeSource(record) {\n          if (!record || typeof record !== \"object\") return \"\\u2014\";\n          if (record.kind === SOURCE_LIVE) return \"live (\\u0441\\u0435\\u0442\\u044C/DOM)\";\n          if (record.kind !== SOURCE_ARCHIVE) return \"\\u2014\";\n          var fmt = FORMAT_LABEL[record.format] || record.format || \"\\u0430\\u0440\\u0445\\u0438\\u0432\";\n          var n = typeof record.count === \"number\" && record.count > 0 ? \" \\xB7 \" + record.count + \" \\u0441\\u043E\\u043E\\u0431\\u0449.\" : \"\";\n          return \"\\u0430\\u0440\\u0445\\u0438\\u0432: \" + fmt + n;\n        }\n        function sourceBadge(record) {\n          if (!record || typeof record !== \"object\") return \"\";\n          if (record.kind === SOURCE_ARCHIVE) return \"\\u{1F4E6} \\u0430\\u0440\\u0445\\u0438\\u0432\";\n          if (record.kind === SOURCE_LIVE) return \"\\u26A1 live\";\n          return \"\";\n        }\n        function isArchiveRecordFor(record, convId) {\n          if (!record || typeof record !== \"object\") return false;\n          if (!convId) return false;\n          return String(record.convId || \"\") === String(convId);\n        }\n        function recordBytes(rec) {\n          try {\n            return JSON.stringify(rec).length;\n          } catch (e) {\n            return Infinity;\n          }\n        }\n        function planArchiveImport(conversations, opts) {\n          var o = opts || {};\n          var perConv = typeof o.maxConversationBytes === \"number\" ? o.maxConversationBytes : MAX_CONVERSATION_BYTES;\n          var total = typeof o.maxTotalBytes === \"number\" ? o.maxTotalBytes : MAX_TOTAL_BYTES;\n          var fileName = o.fileName || \"\";\n          var importedAt = typeof o.importedAt === \"number\" ? o.importedAt : Date.now();\n          var accepted = [];\n          var skipped = [];\n          var used = 0;\n          var list = Array.isArray(conversations) ? conversations : [];\n          for (var i = 0; i < list.length; i++) {\n            var conv = list[i];\n            if (!conv || !conv.convId) {\n              skipped.push({ convId: \"\", reason: \"no-conv-id\", bytes: 0 });\n              continue;\n            }\n            if (!conv.messages || !conv.messages.length) {\n              skipped.push({ convId: conv.convId, reason: \"empty\", bytes: 0 });\n              continue;\n            }\n            var rec = buildArchiveRecord(conv, { fileName, importedAt });\n            var bytes = recordBytes(rec);\n            if (bytes > perConv) {\n              skipped.push({ convId: conv.convId, reason: \"too-large\", bytes });\n              continue;\n            }\n            if (used + bytes > total) {\n              skipped.push({ convId: conv.convId, reason: \"budget-exceeded\", bytes });\n              continue;\n            }\n            used += bytes;\n            accepted.push(rec);\n          }\n          return { accepted, skipped, bytes: used };\n        }\n        var Api = {\n          ARCHIVE_KEY_PREFIX,\n          CONV_SOURCE_KEY_PREFIX,\n          ARCHIVE_RECORD_VERSION,\n          FORMATS,\n          SERVICE_BY_FORMAT,\n          FORMAT_LABEL,\n          SOURCE_ARCHIVE,\n          SOURCE_LIVE,\n          MAX_CONVERSATION_BYTES,\n          MAX_TOTAL_BYTES,\n          MAX_MESSAGES_PER_CONVERSATION,\n          MAX_ARCHIVE_SIZE,\n          archiveStorageKey,\n          convSourceStorageKey,\n          normalizeText,\n          normalizeRole,\n          normalizeMessage,\n          hash6,\n          toMs,\n          detectArchiveFormat,\n          serviceOfFormat,\n          detectFullTextAnomaly,\n          collectFullTextAnomalies,\n          reportFullTextAnomalies,\n          extractConvIdFromUrl,\n          parseGeminiTakeout,\n          parseChatGPTArchive,\n          parseClaudeArchive,\n          parsePerplexityArchive,\n          parseArchive,\n          parseArchiveText,\n          buildArchiveRecord,\n          buildConvSourceRecord,\n          buildLiveSourceRecord,\n          describeSource,\n          sourceBadge,\n          isArchiveRecordFor,\n          recordBytes,\n          planArchiveImport\n        };\n        if (typeof window !== \"undefined\") window.AiCmArchiveImport = Api;\n        if (typeof module !== \"undefined\" && module.exports) module.exports = Api;\n      })();\n      (function() {\n        \"use strict\";\n        function aiCmI18nMessage2(key, fallback, substitutions) {\n          try {\n            if (typeof chrome !== \"undefined\" && chrome.i18n && typeof chrome.i18n.getMessage === \"function\") {\n              var message = substitutions ? chrome.i18n.getMessage(key, substitutions) : chrome.i18n.getMessage(key);\n              if (message) return message;\n            }\n          } catch (eMessage) {\n          }\n          return fallback;\n        }\n        var REASONING_SECTION_TAG = \"[REASONING]\";\n        var ANSWER_SECTION_TAG = \"[ANSWER]\";\n        function reasoningOfMessage(msg) {\n          if (!msg || typeof msg !== \"object\") return \"\";\n          var r = msg.reasoning;\n          return typeof r === \"string\" ? r : \"\";\n        }\n        function withReasoningSections(text, reasoning) {\n          var t = typeof text === \"string\" ? text : \"\";\n          var r = typeof reasoning === \"string\" ? reasoning : \"\";\n          if (!r) return t;\n          if (t.indexOf(r) !== -1) return t;\n          return REASONING_SECTION_TAG + \"\\n\" + r + \"\\n\\n\" + ANSWER_SECTION_TAG + \"\\n\" + t;\n        }\n        function messageTextWithReasoning(msg) {\n          if (!msg || typeof msg !== \"object\") return \"\";\n          return withReasoningSections(msg.text, reasoningOfMessage(msg));\n        }\n        function reasoningOfMessageForExport(msg, useHidden) {\n          var r = reasoningOfMessage(msg);\n          if (r) return r;\n          if (useHidden !== true || !msg || typeof msg !== \"object\") return \"\";\n          return typeof msg.hiddenReasoning === \"string\" ? msg.hiddenReasoning : \"\";\n        }\n        function markersMessageTextWithReasoning(msg, useHidden) {\n          return withReasoningSections(\n            messageTextForMarkers(msg),\n            reasoningOfMessageForExport(msg, useHidden)\n          );\n        }\n        var TXT_ROLE_MARKER_SITES = [\"qwen\"];\n        function isTxtRoleMarkerHistory(history) {\n          try {\n            var site = String(history && history.site || \"\").toLowerCase();\n            return TXT_ROLE_MARKER_SITES.indexOf(site) !== -1;\n          } catch (e) {\n            return false;\n          }\n        }\n        function txtRoleMarker(role) {\n          return role === \"user\" ? \"USER:\" : \"ASSISTANT:\";\n        }\n        function mdRoleMarker(role) {\n          return role === \"user\" ? \"### USER\" : \"### ASSISTANT\";\n        }\n        var CONTAINER_MIN_CONTAINED = 2;\n        var CONTAINER_COVER_MIN = 0.8;\n        function messageTextForMarkers(msg) {\n          if (!msg || typeof msg !== \"object\") return \"\";\n          if (typeof msg.text === \"string\" && msg.text) return msg.text;\n          if (typeof msg.content === \"string\") return msg.content;\n          return typeof msg.text === \"string\" ? msg.text : \"\";\n        }\n        function dropContainerMessages(list) {\n          var src = Array.isArray(list) ? list : [];\n          var texts = [];\n          for (var t = 0; t < src.length; t++) texts.push(messageTextForMarkers(src[t]));\n          var keep = [];\n          for (var c = 0; c < src.length; c++) {\n            var candidate = texts[c];\n            var contained = 0;\n            var covered = 0;\n            var longest = 0;\n            if (candidate) {\n              for (var j = 0; j < texts.length; j++) {\n                var other = texts[j];\n                if (j === c || !other || other.length >= candidate.length) continue;\n                if (candidate.indexOf(other) === -1) continue;\n                contained++;\n                covered += other.length;\n                if (other.length > longest) longest = other.length;\n              }\n            }\n            var isContainer = contained >= CONTAINER_MIN_CONTAINED && covered >= CONTAINER_COVER_MIN * candidate.length && candidate.length >= 2 * longest;\n            if (!isContainer) keep.push(src[c]);\n          }\n          return keep;\n        }\n        function diagTxtRoleStructure(list, totalCount) {\n          if (!diagOn()) return false;\n          try {\n            var kept = Array.isArray(list) ? list.length : -1;\n            var total = typeof totalCount === \"number\" ? totalCount : kept;\n            var first = Array.isArray(list) && list.length > 0 ? list[0] : null;\n            var text = messageTextForMarkers(first);\n            var kind = \"\\u043D\\u0435\\u0442\";\n            if (first && typeof first === \"object\") {\n              if (typeof first.text === \"string\") kind = \"text\";\n              else if (typeof first.content === \"string\") kind = \"content\";\n            }\n            console.log(DIAG_PREFIX + \" txt-roles site=qwen isArray=\" + Array.isArray(list) + \" msgs=\" + total + \" kept=\" + kept + \" dropped-containers=\" + (kept >= 0 && total >= kept ? total - kept : 0) + \" first.role=\" + (first && first.role !== void 0 && first.role !== null ? String(first.role) : \"(\\u043D\\u0435\\u0442)\") + \" first.kind=\" + kind + \" first.len=\" + text.length + \" first.head=\" + (diagHead(text, 60) || \"\\u043F\\u0443\\u0441\\u0442\\u043E\"));\n          } catch (eLogRoles) {\n          }\n          return true;\n        }\n        function renderReferenceText(list) {\n          return buildReferenceText(list);\n        }\n        function renderReferenceTextWithRoleMarkers(list) {\n          var src = Array.isArray(list) ? list : [];\n          var parts = [];\n          for (var i = 0; i < src.length; i++) {\n            var m = src[i] || {};\n            var text = renderReferenceText([{ role: m.role, text: messageTextForMarkers(m) }]);\n            if (text === null) return null;\n            if (!String(text).trim()) continue;\n            parts.push(txtRoleMarker(m.role) + \"\\n\" + text);\n          }\n          return parts.join(\"\\n\\n\");\n        }\n        function buildTxtFromHistory(history) {\n          var hist = history || {};\n          var site = typeof hist.site === \"string\" ? hist.site : \"\";\n          var messages = history && Array.isArray(history.messages) ? history.messages : [];\n          var marked = isTxtRoleMarkerHistory(history);\n          var kept = marked ? dropContainerMessages(messages) : messages;\n          var forTxt = kept.map(function(m) {\n            var text = marked ? markersMessageTextWithReasoning(m, true) : messageTextWithReasoning(m);\n            if (!m || typeof m !== \"object\" || text === m.text) return m;\n            var copy = {};\n            for (var k in m) {\n              if (Object.prototype.hasOwnProperty.call(m, k)) copy[k] = m[k];\n            }\n            copy.text = text;\n            return copy;\n          });\n          var out;\n          if (marked) {\n            diagTxtRoleStructure(forTxt, messages.length);\n            out = renderReferenceTextWithRoleMarkers(forTxt);\n          } else {\n            out = renderReferenceText(forTxt);\n          }\n          if (site === \"gemini\" && hist.sourceTier && out) out = hist.sourceTier + \"\\n\\n\" + out;\n          return out === null ? \"\" : out;\n        }\n        function exportTokenSnapshot(history) {\n          var h = history || {};\n          var tokens = typeof h.tokens === \"number\" ? h.tokens : 0;\n          var limit = typeof h.limit === \"number\" ? h.limit : 0;\n          var percent = typeof h.percent === \"number\" ? h.percent : 0;\n          if (limit > 0) {\n            var calc = Math.round(tokens / limit * 1e3) / 10;\n            if (calc !== percent) percent = calc;\n          }\n          return { tokens, limit, percent };\n        }\n        function buildMdFromHistory(history, platform) {\n          var h = history || {};\n          var site = typeof h.site === \"string\" ? h.site : \"\";\n          var lines = [];\n          lines.push(aiCmI18nMessage2(\"export_md_title\", \"# AI Context Monitor \\u2014 \\u044D\\u043A\\u0441\\u043F\\u043E\\u0440\\u0442 \\u0438\\u0441\\u0442\\u043E\\u0440\\u0438\\u0438\"));\n          lines.push(\"\");\n          lines.push(aiCmI18nMessage2(\"export_md_platform\", \"\\u041F\\u043B\\u0430\\u0442\\u0444\\u043E\\u0440\\u043C\\u0430: \" + (platform || \"AI Chat\"), [platform || \"AI Chat\"]));\n          lines.push(aiCmI18nMessage2(\"export_md_model\", \"\\u041C\\u043E\\u0434\\u0435\\u043B\\u044C: \" + (h.model || \"\\u2014\"), [h.model || \"\\u2014\"]));\n          var exportedAt = (/* @__PURE__ */ new Date()).toISOString();\n          lines.push(aiCmI18nMessage2(\"export_md_date\", \"\\u0414\\u0430\\u0442\\u0430 \\u044D\\u043A\\u0441\\u043F\\u043E\\u0440\\u0442\\u0430: \" + exportedAt, [exportedAt]));\n          var snap = exportTokenSnapshot(h);\n          var tokens = snap.tokens;\n          var limit = snap.limit;\n          var percent = snap.percent;\n          if (tokens === 0 && limit === 0) {\n            lines.push(\"\\u0422\\u043E\\u043A\\u0435\\u043D\\u044B: \\u043D/\\u0434 (\" + percent + \"%)\");\n          } else {\n            lines.push(aiCmI18nMessage2(\"export_md_tokens\", \"\\u0422\\u043E\\u043A\\u0435\\u043D\\u044B: \" + tokens + \" / \" + limit + \" (\" + percent + \"%)\", [String(tokens), String(limit), String(percent)]));\n          }\n          lines.push(\"\");\n          if (site === \"gemini\" && h.sourceTier) {\n            lines.push(h.sourceTier, \"\");\n          }\n          var mdMarked = isTxtRoleMarkerHistory(h);\n          var messages = Array.isArray(h.messages) ? h.messages : [];\n          if (mdMarked) messages = dropContainerMessages(messages);\n          for (var i = 0; i < messages.length; i++) {\n            var msg = messages[i] || {};\n            if (typeof aiCmDiagLine === \"function\") {\n              aiCmDiagLine(\"claude-role-builder\", { msgRole: msg.role, mdMarked });\n            }\n            var title = mdMarked ? mdRoleMarker(msg.role) : msg.role === \"user\" || msg.role === \"human\" ? aiCmI18nMessage2(\"export_md_role_user\", \"## \\u041F\\u043E\\u043B\\u044C\\u0437\\u043E\\u0432\\u0430\\u0442\\u0435\\u043B\\u044C\") : aiCmI18nMessage2(\"export_md_role_assistant\", \"## \\u0410\\u0441\\u0441\\u0438\\u0441\\u0442\\u0435\\u043D\\u0442\");\n            lines.push(title);\n            lines.push(\"\");\n            lines.push(mdMarked ? markersMessageTextWithReasoning(msg, true) : messageTextWithReasoning(msg));\n            lines.push(\"\");\n          }\n          return lines.join(\"\\n\");\n        }\n        function buildJsonFromHistory(history, platform) {\n          var h = history || {};\n          return JSON.stringify({\n            platform: platform || \"AI Chat\",\n            model: h.model || \"\",\n            exportedAt: (/* @__PURE__ */ new Date()).toISOString(),\n            tokens: typeof h.tokens === \"number\" ? h.tokens : 0,\n            limit: typeof h.limit === \"number\" ? h.limit : 0,\n            percent: typeof h.percent === \"number\" ? h.percent : 0,\n            // Two-Tier (v89): аддитивное поле метаданных. undefined → JSON.stringify ключ НЕ\n            // добавляет, поэтому у прочих платформ и у Gemini без метки байты прежние.\n            sourceTier: h.sourceTier,\n            messages: Array.isArray(h.messages) ? h.messages : []\n          }, null, 2);\n        }\n        var DIAG_PREFIX = \"[AI CM][diag]\";\n        function diagOn() {\n          try {\n            if (typeof sessionStorage !== \"undefined\" && sessionStorage && sessionStorage.getItem(\"aiCmDebug\") === \"1\") return true;\n          } catch (eSess) {\n          }\n          try {\n            if (typeof window !== \"undefined\" && window && window.__aiCmDebugLogs === true) return true;\n          } catch (eWin) {\n          }\n          return false;\n        }\n        function diagHead(v, n) {\n          try {\n            var lim = typeof n === \"number\" && n > 0 ? n : 100;\n            if (v === void 0 || v === null) return \"\";\n            var s = String(v);\n            if (!s) return \"\";\n            var flat = s.replace(/\\s+/g, \" \").trim();\n            if (!flat) return \"\";\n            return flat.length > lim ? flat.slice(0, lim) + \"\\u2026\" : flat;\n          } catch (eHead) {\n            return \"\";\n          }\n        }\n        function diagStack() {\n          try {\n            var lines = String(new Error().stack || \"\").split(\"\\n\");\n            var out = [];\n            for (var i = 1; i < lines.length && out.length < 4; i++) {\n              var s = String(lines[i] || \"\").replace(/\\s+/g, \" \").trim();\n              if (!s || s.indexOf(\"diag\") !== -1) continue;\n              out.push(s);\n            }\n            return out.join(\" <- \");\n          } catch (eStack) {\n            return \"\";\n          }\n        }\n        function diagDownload(trigger, content, fileName, extra) {\n          try {\n            if (typeof aiCmDiagDownload === \"function\") return aiCmDiagDownload(trigger, content, fileName, extra);\n          } catch (eGlobal) {\n          }\n          if (!diagOn()) return false;\n          try {\n            var e = extra || {};\n            var url = \"\";\n            try {\n              url = String(typeof location !== \"undefined\" && location && location.href || \"\");\n            } catch (eUrl) {\n            }\n            console.log(DIAG_PREFIX + \" download trigger=\" + (trigger || \"(\\u043D\\u0435\\u0442)\") + \" file=\" + (fileName === void 0 || fileName === null || String(fileName) === \"\" ? \"\\u043F\\u0443\\u0441\\u0442\\u043E\\u0435\" : String(fileName)) + \" bytes100=\" + (diagHead(content, 100) || \"\\u043F\\u0443\\u0441\\u0442\\u043E\") + \" len=\" + (content === void 0 || content === null ? 0 : String(content).length) + \" mime=\" + (e.mime === void 0 ? \"(\\u043D\\u0435\\u0442)\" : e.mime) + \" url=\" + url + \" threadId=\" + (e.threadId === void 0 || e.threadId === \"\" ? \"(\\u043D\\u0435\\u0442)\" : e.threadId) + \" site=\" + (e.site === void 0 ? \"\" : e.site) + \" reason=\" + (e.reason === void 0 ? \"\" : e.reason) + \" src=\" + diagStack());\n          } catch (eLog) {\n          }\n          return true;\n        }\n        var XSSI_PREFIX_LEN = 4;\n        function startsWithXssiPrefix(content) {\n          try {\n            if (content === void 0 || content === null) return false;\n            var s = String(content);\n            if (s.length < XSSI_PREFIX_LEN) return false;\n            return s.charCodeAt(0) === 41 && s.charCodeAt(1) === 93 && s.charCodeAt(2) === 125 && s.charCodeAt(3) === 39;\n          } catch (eXssi) {\n            return false;\n          }\n        }\n        function downloadBlockReason(content, fileName) {\n          if (startsWithXssiPrefix(content)) return \"xssi-prefix\";\n          if (fileName === void 0 || fileName === null || String(fileName).trim() === \"\") return \"empty-name\";\n          return null;\n        }\n        function diagDownloadBlocked(trigger, content, fileName, reason, extra) {\n          try {\n            if (typeof aiCmDiagDownloadBlocked === \"function\") {\n              return aiCmDiagDownloadBlocked(trigger, content, fileName, reason, extra);\n            }\n          } catch (eGlobalBlocked) {\n          }\n          if (!diagOn()) return false;\n          try {\n            var e = extra || {};\n            var url = \"\";\n            try {\n              url = String(typeof location !== \"undefined\" && location && location.href || \"\");\n            } catch (eUrlB) {\n            }\n            console.log(DIAG_PREFIX + \" download-blocked reason=\" + (reason || \"(\\u043D\\u0435\\u0442)\") + \" trigger=\" + (trigger || \"(\\u043D\\u0435\\u0442)\") + \" file=\" + (fileName === void 0 || fileName === null || String(fileName) === \"\" ? \"\\u043F\\u0443\\u0441\\u0442\\u043E\\u0435\" : String(fileName)) + \" bytes100=\" + (diagHead(content, 100) || \"\\u043F\\u0443\\u0441\\u0442\\u043E\") + \" len=\" + (content === void 0 || content === null ? 0 : String(content).length) + \" mime=\" + (e.mime === void 0 ? \"(\\u043D\\u0435\\u0442)\" : e.mime) + \" url=\" + url + \" threadId=\" + (e.threadId === void 0 || e.threadId === \"\" ? \"(\\u043D\\u0435\\u0442)\" : e.threadId) + \" site=\" + (e.site === void 0 ? \"\" : e.site) + \" src=\" + diagStack());\n          } catch (eLogBlocked) {\n          }\n          return true;\n        }\n        function downloadBlob2(content, fileName, mimeType, trigger, extra) {\n          var ex = extra || {};\n          var blockReason = downloadBlockReason(content, fileName);\n          if (blockReason) {\n            try {\n              diagDownloadBlocked(\n                trigger || \"builder-download\",\n                content,\n                fileName,\n                blockReason,\n                { mime: mimeType, threadId: ex.threadId, site: ex.site }\n              );\n            } catch (eDiagBlocked) {\n            }\n            return false;\n          }\n          try {\n            diagDownload(\n              trigger || \"builder-download\",\n              content,\n              fileName,\n              { mime: mimeType, threadId: ex.threadId, site: ex.site, reason: ex.reason }\n            );\n          } catch (eDiag) {\n          }\n          try {\n            var blob = new Blob([content], { type: mimeType });\n            var url = URL.createObjectURL(blob);\n            var a = document.createElement(\"a\");\n            a.href = url;\n            a.download = fileName;\n            document.body.appendChild(a);\n            a.click();\n            a.remove();\n            setTimeout(function() {\n              URL.revokeObjectURL(url);\n            }, 1e3);\n          } catch (e) {\n            console.warn(\"[export] \\u043D\\u0435 \\u0443\\u0434\\u0430\\u043B\\u043E\\u0441\\u044C \\u0441\\u043A\\u0430\\u0447\\u0430\\u0442\\u044C \\u0444\\u0430\\u0439\\u043B:\", e);\n          }\n          return true;\n        }\n        var Api = {\n          buildTxtFromHistory,\n          buildMdFromHistory,\n          buildJsonFromHistory,\n          downloadBlob: downloadBlob2,\n          // O-27 (защитный фикс): причина отказа точки скачивания (null — выдача разрешена) и\n          // сама точка отказа наружу — для пинов тестов и переиспользования вызывающим кодом.\n          aiCmDownloadBlockReason: downloadBlockReason,\n          aiCmDiagDownloadBlocked: diagDownloadBlocked,\n          // O-27/O-32: диагностические хелперы наружу (content.js/export-manager.js зовут их\n          // через window.AiCmExportBuilders, если глобальный utils/debug.js не подключён).\n          aiCmDiagOn: diagOn,\n          aiCmDiagHead: diagHead,\n          aiCmDiagDownload: diagDownload,\n          // O-35: рендер reasoning контрактом DeepSeek — чистая функция наружу (пины тестов\n          // и переиспользование; на боевом пути вызывается только двумя сборщиками выше).\n          aiCmMessageTextWithReasoning: messageTextWithReasoning,\n          aiCmWithReasoningSections: withReasoningSections,\n          // O-37 (C): источник размышления для маркерного пути (reasoning, иначе поле захвата\n          // hiddenReasoning) и композиция «текст сообщения + секции» — чистые функции наружу;\n          // на боевом пути их зовут только buildTxtFromHistory/buildMdFromHistory выше.\n          aiCmReasoningOfMessageForExport: reasoningOfMessageForExport,\n          aiCmMarkersMessageTextWithReasoning: markersMessageTextWithReasoning,\n          // O-36 (D2): маркеры ролей txt-экспорта — чистые предикаты наружу (пины тестов;\n          // на боевом пути вызываются только сборщиком buildTxtFromHistory выше).\n          aiCmTxtRoleMarker: txtRoleMarker,\n          aiCmIsTxtRoleMarkerHistory: isTxtRoleMarkerHistory,\n          aiCmTxtRoleMarkerSites: TXT_ROLE_MARKER_SITES,\n          // O-36 (D2.1): маркер роли md (Qwen Studio), текст сообщения для маркерного пути\n          // (с фолбэком на .content) и контейнер-чистка — чистые функции наружу для пинов\n          // и переиспользования; на боевом пути их зовут только два сборщика выше.\n          aiCmMdRoleMarker: mdRoleMarker,\n          aiCmMessageTextForMarkers: messageTextForMarkers,\n          aiCmDropContainerMessages: dropContainerMessages,\n          aiCmDiagTxtRoleStructure: diagTxtRoleStructure,\n          aiCmContainerRules: { minContained: CONTAINER_MIN_CONTAINED, coverMin: CONTAINER_COVER_MIN }\n        };\n        if (typeof module !== \"undefined\" && module.exports) module.exports = Api;\n        if (typeof window !== \"undefined\") window.AiCmExportBuilders = Api;\n      })();\n      console.log(\"AI Context Monitor: \\u041D\\u0430\\u0441\\u0442\\u0440\\u043E\\u0439\\u043A\\u0438 \\u0437\\u0430\\u0433\\u0440\\u0443\\u0436\\u0435\\u043D\\u044B\");\n      var siteEl = document.getElementById(\"stat-site\");\n      var modelEl = document.getElementById(\"stat-model\");\n      var tokensEl = document.getElementById(\"stat-tokens\");\n      var limitEl = document.getElementById(\"stat-limit\");\n      var percentEl = document.getElementById(\"stat-percent\");\n      var modelSelect = document.getElementById(\"model-select\");\n      var customLimit = document.getElementById(\"custom-limit\");\n      var showWidget = document.getElementById(\"show-widget\");\n      var apiKeyInput = document.getElementById(\"api-key\");\n      var toggleApiKeyBtn = document.getElementById(\"toggle-api-key\");\n      var exactCountCheckbox = document.getElementById(\"exact-count\");\n      var exactCountWarningEl = document.getElementById(\"exact-count-warning\");\n      var aiCmByokUiDisabled = aiCmIsFirefox();\n      var versionEl = document.querySelector(\".version\");\n      var exportMdBtn = document.getElementById(\"export-md\");\n      var exportJsonBtn = document.getElementById(\"export-json\");\n      var exportPdfBtn = document.getElementById(\"export-pdf\");\n      var exportTxtBtn = document.getElementById(\"export-txt\");\n      var exportHintEl = document.getElementById(\"export-hint\");\n      var staleWarningEl = document.getElementById(\"stale-warning\");\n      var exportDiagBtn = document.getElementById(\"export-diag\");\n      var sourceEl = document.getElementById(\"stat-source\");\n      function percentColor(p) {\n        if (p < 50) return \"#22c55e\";\n        if (p < 80) return \"#eab308\";\n        return \"#ef4444\";\n      }\n      try {\n        manifest = chrome.runtime.getManifest();\n        if (versionEl && manifest.version) versionEl.textContent = \"v\" + manifest.version;\n      } catch (e) {\n        aiCmPopupDiagLine(\"manifest-version\", { err: String(e) });\n      }\n      var manifest;\n      var privacyLink = document.getElementById(\"privacy-link\");\n      privacyLink && privacyLink.addEventListener(\"click\", function(e) {\n        e.preventDefault();\n        try {\n          chrome.tabs.create({ url: chrome.runtime.getURL(\"privacy/privacy.html\") });\n        } catch (ePrivacy) {\n          console.warn(\"[privacy] \\u043D\\u0435 \\u0443\\u0434\\u0430\\u043B\\u043E\\u0441\\u044C \\u043E\\u0442\\u043A\\u0440\\u044B\\u0442\\u044C \\u043F\\u043E\\u043B\\u0438\\u0442\\u0438\\u043A\\u0443 \\u043A\\u043E\\u043D\\u0444\\u0438\\u0434\\u0435\\u043D\\u0446\\u0438\\u0430\\u043B\\u044C\\u043D\\u043E\\u0441\\u0442\\u0438:\", ePrivacy);\n        }\n      });\n      var helpLink = document.getElementById(\"help-link\");\n      helpLink && helpLink.addEventListener(\"click\", function(e) {\n        e.preventDefault();\n        try {\n          chrome.tabs.create({ url: chrome.runtime.getURL(\"docs/index.html\") });\n        } catch (eHelp) {\n          console.warn(\"[help] \\u043D\\u0435 \\u0443\\u0434\\u0430\\u043B\\u043E\\u0441\\u044C \\u043E\\u0442\\u043A\\u0440\\u044B\\u0442\\u044C \\u0440\\u0443\\u043A\\u043E\\u0432\\u043E\\u0434\\u0441\\u0442\\u0432\\u043E:\", eHelp);\n        }\n      });\n      var siteLabels = {\n        \"chatgpt\": \"ChatGPT\",\n        \"gemini\": \"Gemini\",\n        \"aistudio\": \"Google AI Studio\",\n        \"google_search\": \"Google Search AI\",\n        \"deepseek\": \"DeepSeek\",\n        \"claude\": \"Claude\",\n        \"perplexity\": \"Perplexity\"\n      };\n      chrome.storage.sync.get([\"selectedModel\", \"customLimit\", \"showWidget\"], function(data) {\n        if (data.selectedModel) modelSelect.value = data.selectedModel;\n        if (data.customLimit) customLimit.value = data.customLimit;\n        if (data.showWidget !== void 0) showWidget.checked = data.showWidget;\n      });\n      var AI_CM_BYOK_SESSION_KEY = \"aiCmApiKeySession\";\n      var AI_CM_BYOK_LEGACY_KEYS = [\n        \"ai_cm_gemini_api_key\",\n        \"ai_cm_api_key\",\n        \"ai_cm_byok_key\",\n        \"aiCmGeminiApiKey\",\n        \"aiCmApiKey\",\n        \"gemini_api_key\"\n      ];\n      var apiKeyStatusEl = document.getElementById(\"api-key-status\");\n      var removeApiKeyBtn = document.getElementById(\"api-key-remove\");\n      function aiCmFirstLegacyByokKey(data) {\n        for (var iLk = 0; iLk < AI_CM_BYOK_LEGACY_KEYS.length; iLk++) {\n          var vLk = data ? data[AI_CM_BYOK_LEGACY_KEYS[iLk]] : null;\n          if (typeof vLk === \"string\" && vLk) return vLk;\n        }\n        return \"\";\n      }\n      function aiCmPurgeLegacyByokKeys() {\n        try {\n          if (!chrome.storage || !chrome.storage.local || typeof chrome.storage.local.remove !== \"function\") return;\n          chrome.storage.local.remove(AI_CM_BYOK_LEGACY_KEYS);\n        } catch (ePurge) {\n          console.warn(\"[AI CM][catch] aiCmPurgeLegacyByokKeys:\", ePurge);\n        }\n      }\n      function aiCmI18nMessage(key, fallback, substitutions) {\n        try {\n          if (typeof chrome !== \"undefined\" && chrome.i18n && typeof chrome.i18n.getMessage === \"function\") {\n            var message = substitutions ? chrome.i18n.getMessage(key, substitutions) : chrome.i18n.getMessage(key);\n            if (message) return message;\n          }\n        } catch (eMessage) {\n          aiCmPopupDiagLine(\"aiCmI18nMessage\", { err: String(eMessage) });\n        }\n        return fallback;\n      }\n      function aiCmRenderApiKeyStatus(hasKey) {\n        if (!apiKeyStatusEl) return;\n        apiKeyStatusEl.textContent = hasKey ? aiCmI18nMessage(\"options_byok_status_set\", \"\\u041A\\u043B\\u044E\\u0447: \\u0437\\u0430\\u0434\\u0430\\u043D\") : aiCmI18nMessage(\"options_byok_status_unset\", \"\\u041A\\u043B\\u044E\\u0447: \\u043D\\u0435 \\u0437\\u0430\\u0434\\u0430\\u043D\");\n      }\n      function aiCmSaveByokKey(value) {\n        try {\n          if (chrome.storage && chrome.storage.session && typeof chrome.storage.session.set === \"function\") {\n            var patch = {};\n            patch[AI_CM_BYOK_SESSION_KEY] = value;\n            chrome.storage.session.set(patch);\n          }\n        } catch (eSet) {\n          console.warn(\"[AI CM][catch] aiCmSaveByokKey:\", eSet);\n        }\n        aiCmPurgeLegacyByokKeys();\n      }\n      var aiCmByokHasKeyState = null;\n      function aiCmRenderExactCountWarning(show) {\n        if (!exactCountWarningEl) return;\n        exactCountWarningEl.textContent = show ? aiCmI18nMessage(\n          \"options_exact_count_nokey\",\n          \"\\u041A\\u043B\\u044E\\u0447 API \\u043D\\u0435 \\u043D\\u0430\\u0439\\u0434\\u0435\\u043D. \\u0412\\u0432\\u0435\\u0434\\u0438\\u0442\\u0435 \\u043A\\u043B\\u044E\\u0447 \\u0437\\u0430\\u043D\\u043E\\u0432\\u043E, \\u0447\\u0442\\u043E\\u0431\\u044B \\u0432\\u043A\\u043B\\u044E\\u0447\\u0438\\u0442\\u044C \\u0442\\u043E\\u0447\\u043D\\u044B\\u0439 \\u043F\\u043E\\u0434\\u0441\\u0447\\u0451\\u0442\"\n        ) : \"\";\n      }\n      function aiCmSyncExactCountWithByok(hasKey) {\n        if (hasKey !== true && hasKey !== false) return;\n        aiCmByokHasKeyState = hasKey;\n        if (hasKey || !exactCountCheckbox || !exactCountCheckbox.checked) {\n          aiCmRenderExactCountWarning(false);\n          return;\n        }\n        exactCountCheckbox.checked = false;\n        aiCmRenderExactCountWarning(true);\n        try {\n          chrome.storage.local.set({ ai_cm_exact_token_count: false });\n        } catch (eSync) {\n          console.warn(\"[AI CM][catch] aiCmSyncExactCountWithByok:\", eSync);\n        }\n      }\n      function aiCmLoadByokKey() {\n        try {\n          let onSession = function(data) {\n            if (handled) return;\n            handled = true;\n            var key = data ? data[AI_CM_BYOK_SESSION_KEY] : \"\";\n            if (typeof key === \"string\" && key) {\n              if (apiKeyInput) apiKeyInput.value = key;\n              aiCmRenderApiKeyStatus(true);\n              aiCmSyncExactCountWithByok(true);\n              return;\n            }\n            aiCmRenderApiKeyStatus(false);\n            aiCmSyncExactCountWithByok(false);\n            try {\n              chrome.storage.local.get(AI_CM_BYOK_LEGACY_KEYS, function(dl) {\n                var legacy = aiCmFirstLegacyByokKey(dl);\n                if (!legacy) return;\n                aiCmSaveByokKey(legacy);\n                if (apiKeyInput) apiKeyInput.value = legacy;\n                aiCmRenderApiKeyStatus(true);\n                aiCmSyncExactCountWithByok(true);\n                console.log(\"[AI CM][byok] migrated plaintext\\u2192session\");\n              });\n            } catch (eLeg) {\n              aiCmPopupDiagLine(\"aiCmLoadByokKey\", { err: String(eLeg) });\n            }\n          };\n          if (!chrome.storage || !chrome.storage.session || typeof chrome.storage.session.get !== \"function\") {\n            aiCmRenderApiKeyStatus(false);\n            return;\n          }\n          var handled = false;\n          var maybePromise = chrome.storage.session.get([AI_CM_BYOK_SESSION_KEY], onSession);\n          if (maybePromise && typeof maybePromise.then === \"function\") {\n            maybePromise.then(onSession, function() {\n              if (!handled) {\n                handled = true;\n                aiCmRenderApiKeyStatus(false);\n                aiCmSyncExactCountWithByok(false);\n              }\n            });\n          }\n        } catch (eLoad) {\n          aiCmRenderApiKeyStatus(false);\n        }\n      }\n      chrome.storage.local.get([\"ai_cm_exact_token_count\"], function(data) {\n        if (aiCmByokUiDisabled) {\n          [apiKeyInput, exactCountCheckbox].forEach(function(el) {\n            var section = el && el.closest ? el.closest(\".section\") : null;\n            if (section) {\n              section.hidden = true;\n              section.style.display = \"none\";\n            }\n          });\n          if (data.ai_cm_exact_token_count) chrome.storage.local.set({ ai_cm_exact_token_count: false });\n          return;\n        }\n        if (data.ai_cm_exact_token_count === void 0) return;\n        exactCountCheckbox.checked = !!data.ai_cm_exact_token_count;\n        if (aiCmByokHasKeyState === false) aiCmSyncExactCountWithByok(false);\n      });\n      if (!aiCmByokUiDisabled) aiCmLoadByokKey();\n      modelSelect && modelSelect.addEventListener(\"change\", function() {\n        chrome.storage.sync.set({ selectedModel: modelSelect.value });\n      });\n      var CUSTOM_LIMIT_DEBOUNCE_MS = 500;\n      var customLimitWriteTimer = null;\n      function aiCmCancelCustomLimitWrite() {\n        if (customLimitWriteTimer !== null) {\n          clearTimeout(customLimitWriteTimer);\n          customLimitWriteTimer = null;\n        }\n      }\n      customLimit && customLimit.addEventListener(\"input\", function() {\n        aiCmCancelCustomLimitWrite();\n        customLimitWriteTimer = setTimeout(function() {\n          customLimitWriteTimer = null;\n          var value = customLimit.value ? parseInt(customLimit.value) : null;\n          chrome.storage.sync.set({ customLimit: value });\n        }, CUSTOM_LIMIT_DEBOUNCE_MS);\n      });\n      customLimit && customLimit.addEventListener(\"change\", function() {\n        if (!customLimit.value) {\n          aiCmCancelCustomLimitWrite();\n          customLimit.placeholder = aiCmI18nMessage(\"options_limit_placeholder\", \"\\u0410\\u0432\\u0442\\u043E\");\n          chrome.storage.sync.set({ customLimit: null });\n        }\n      });\n      showWidget && showWidget.addEventListener(\"change\", function() {\n        chrome.storage.sync.set({ showWidget: showWidget.checked });\n      });\n      var debugLogsCheckbox = document.getElementById(\"debugLogs\");\n      chrome.storage.local.get([\"aiCmDebugLogs\"], function(data) {\n        if (debugLogsCheckbox) debugLogsCheckbox.checked = data.aiCmDebugLogs === true;\n      });\n      debugLogsCheckbox && debugLogsCheckbox.addEventListener(\"change\", function() {\n        chrome.storage.local.set({ aiCmDebugLogs: debugLogsCheckbox.checked });\n      });\n      var includeHiddenCheckbox = document.getElementById(\"aiCmIncludeHiddenInExport\");\n      chrome.storage.local.get([\"aiCmIncludeHiddenInExport\"], function(data) {\n        if (includeHiddenCheckbox) includeHiddenCheckbox.checked = !!(data && data.aiCmIncludeHiddenInExport === true);\n      });\n      includeHiddenCheckbox && includeHiddenCheckbox.addEventListener(\"change\", function() {\n        chrome.storage.local.set({ aiCmIncludeHiddenInExport: includeHiddenCheckbox.checked });\n      });\n      try {\n        chrome.storage.onChanged.addListener(function(changes, areaName) {\n          if (areaName !== \"local\") return;\n          if (changes.aiCmIncludeHiddenInExport && includeHiddenCheckbox) {\n            includeHiddenCheckbox.checked = changes.aiCmIncludeHiddenInExport.newValue === true;\n          }\n        });\n      } catch (eHiddenSync) {\n        aiCmPopupDiagLine(\"hidden-sync\", { err: String(eHiddenSync) });\n      }\n      var proactiveCheckbox = document.getElementById(\"aiCmProactive\");\n      var proactiveNotifyCheckbox = document.getElementById(\"aiCmProactiveNotify\");\n      chrome.storage.local.get([\"aiCmProactive\", \"aiCmProactiveNotify\"], function(data) {\n        if (proactiveCheckbox) proactiveCheckbox.checked = !(data && data.aiCmProactive === false);\n        if (proactiveNotifyCheckbox) proactiveNotifyCheckbox.checked = !!(data && data.aiCmProactiveNotify === true);\n      });\n      proactiveCheckbox && proactiveCheckbox.addEventListener(\"change\", function() {\n        chrome.storage.local.set({ aiCmProactive: proactiveCheckbox.checked });\n      });\n      proactiveNotifyCheckbox && proactiveNotifyCheckbox.addEventListener(\"change\", function() {\n        chrome.storage.local.set({ aiCmProactiveNotify: proactiveNotifyCheckbox.checked });\n      });\n      try {\n        chrome.storage.onChanged.addListener(function(changes, areaName) {\n          if (areaName !== \"local\") return;\n          if (changes.aiCmProactive && proactiveCheckbox) {\n            proactiveCheckbox.checked = changes.aiCmProactive.newValue !== false;\n          }\n          if (changes.aiCmProactiveNotify && proactiveNotifyCheckbox) {\n            proactiveNotifyCheckbox.checked = changes.aiCmProactiveNotify.newValue === true;\n          }\n        });\n      } catch (e) {\n        aiCmPopupDiagLine(\"proactive-changed\", { err: String(e) });\n      }\n      var thrLowInput = document.getElementById(\"aiCmProactiveLow\");\n      var thrMedInput = document.getElementById(\"aiCmProactiveMedium\");\n      var thrHighInput = document.getElementById(\"aiCmProactiveHigh\");\n      var PROACTIVE_THRESHOLDS_DEFAULT = [70, 85, 95];\n      function validProactiveThresholds(arr) {\n        try {\n          if (!Array.isArray(arr) || arr.length < 3) return null;\n          var out = [];\n          for (var i = 0; i < 3; i++) {\n            var n = parseInt(arr[i], 10);\n            if (isNaN(n) || n < 1 || n > 100) return null;\n            out.push(n);\n          }\n          if (!(out[0] < out[1] && out[1] < out[2])) return null;\n          return out;\n        } catch (e) {\n          return null;\n        }\n      }\n      function readProactiveThresholdInputs() {\n        return [\n          thrLowInput ? thrLowInput.value : void 0,\n          thrMedInput ? thrMedInput.value : void 0,\n          thrHighInput ? thrHighInput.value : void 0\n        ];\n      }\n      function fillProactiveThresholdInputs(arr) {\n        if (!arr || arr.length < 3) return;\n        if (thrLowInput) thrLowInput.value = arr[0];\n        if (thrMedInput) thrMedInput.value = arr[1];\n        if (thrHighInput) thrHighInput.value = arr[2];\n      }\n      function applyProactiveThresholdInputs() {\n        try {\n          var raw = readProactiveThresholdInputs();\n          var t = validProactiveThresholds(raw);\n          if (!t) {\n            console.warn(\"[AI CM][thresholds] \\u0431\\u0438\\u0442\\u044B\\u0439 \\u0432\\u0432\\u043E\\u0434 \\u043F\\u043E\\u0440\\u043E\\u0433\\u043E\\u0432 \\u2192 \\u0444\\u043E\\u043B\\u0431\\u044D\\u043A [70,85,95]\", raw);\n            t = PROACTIVE_THRESHOLDS_DEFAULT;\n          }\n          fillProactiveThresholdInputs(t);\n          chrome.storage.local.set({ aiCmProactiveThresholds: t });\n        } catch (eP) {\n          aiCmPopupDiagLine(\"applyProactiveThresholdInputs\", { err: String(eP) });\n        }\n      }\n      try {\n        chrome.storage.local.get([\"aiCmProactiveThresholds\"], function(data) {\n          try {\n            var hasStored = data && data.aiCmProactiveThresholds !== void 0;\n            var t = validProactiveThresholds(hasStored ? data.aiCmProactiveThresholds : null);\n            if (hasStored && !t) {\n              console.warn(\"[AI CM][thresholds] \\u0431\\u0438\\u0442\\u044B\\u0435 \\u0441\\u043E\\u0445\\u0440\\u0430\\u043D\\u0451\\u043D\\u043D\\u044B\\u0435 aiCmProactiveThresholds \\u2192 \\u0434\\u0435\\u0444\\u043E\\u043B\\u0442 [70,85,95]\", data.aiCmProactiveThresholds);\n            }\n            fillProactiveThresholdInputs(t || PROACTIVE_THRESHOLDS_DEFAULT);\n          } catch (eInit) {\n            aiCmPopupDiagLine(\"thresholds-init\", { err: String(eInit) });\n          }\n        });\n      } catch (eLoad) {\n        aiCmPopupDiagLine(\"thresholds-load\", { err: String(eLoad) });\n      }\n      [thrLowInput, thrMedInput, thrHighInput].forEach(function(el) {\n        if (!el) return;\n        el.addEventListener(\"change\", applyProactiveThresholdInputs);\n        el.addEventListener(\"blur\", applyProactiveThresholdInputs);\n      });\n      try {\n        chrome.storage.onChanged.addListener(function(changes, areaName) {\n          if (areaName === \"local\" && changes.aiCmProactiveThresholds) {\n            var t2 = validProactiveThresholds(changes.aiCmProactiveThresholds.newValue);\n            if (!t2) return;\n            if (document.activeElement === thrLowInput || document.activeElement === thrMedInput || document.activeElement === thrHighInput) return;\n            fillProactiveThresholdInputs(t2);\n          }\n        });\n      } catch (e) {\n        aiCmPopupDiagLine(\"thresholds-changed\", { err: String(e) });\n      }\n      apiKeyInput && apiKeyInput.addEventListener(\"input\", function() {\n        aiCmSaveByokKey(apiKeyInput.value);\n        aiCmRenderApiKeyStatus(!!apiKeyInput.value);\n        aiCmSyncExactCountWithByok(!!apiKeyInput.value);\n      });\n      removeApiKeyBtn && removeApiKeyBtn.addEventListener(\"click\", function() {\n        try {\n          if (chrome.storage && chrome.storage.session && typeof chrome.storage.session.remove === \"function\") {\n            chrome.storage.session.remove([AI_CM_BYOK_SESSION_KEY]);\n          }\n        } catch (eRm) {\n          console.warn(\"[AI CM][catch] removeApiKey:\", eRm);\n        }\n        aiCmPurgeLegacyByokKeys();\n        if (apiKeyInput) apiKeyInput.value = \"\";\n        aiCmRenderApiKeyStatus(false);\n        aiCmSyncExactCountWithByok(false);\n      });\n      toggleApiKeyBtn && toggleApiKeyBtn.addEventListener(\"click\", function() {\n        if (apiKeyInput.type === \"password\") {\n          apiKeyInput.type = \"text\";\n          toggleApiKeyBtn.textContent = \"\\u{1F648}\";\n        } else {\n          apiKeyInput.type = \"password\";\n          toggleApiKeyBtn.textContent = \"\\u{1F441}\";\n        }\n        toggleApiKeyBtn.setAttribute(\"aria-pressed\", String(apiKeyInput.type === \"text\"));\n      });\n      exactCountCheckbox && exactCountCheckbox.addEventListener(\"change\", function() {\n        chrome.storage.local.set({ ai_cm_exact_token_count: exactCountCheckbox.checked });\n        if (aiCmByokHasKeyState === false && exactCountCheckbox.checked) {\n          aiCmSyncExactCountWithByok(false);\n        } else {\n          aiCmRenderExactCountWarning(false);\n        }\n      });\n      var autoExportCheckbox = document.getElementById(\"aiCmAutoExport\");\n      var autoExportPctInput = document.getElementById(\"aiCmAutoExportPct\");\n      var autoExportFmtSelect = document.getElementById(\"aiCmAutoExportFmt\");\n      function normalizeAutoExportFmt(v) {\n        return v === \"md\" || v === \"json\" ? v : \"txt\";\n      }\n      function clampAutoExportPct(v) {\n        var n = parseInt(v, 10);\n        if (isNaN(n)) return null;\n        if (n < 1) n = 1;\n        if (n > 100) n = 100;\n        return n;\n      }\n      var AI_CM_AUTO_EXPORT_PCT_DEFAULT = 90;\n      function aiCmAutoExportWriteFull() {\n        try {\n          var pctFull = clampAutoExportPct(autoExportPctInput.value);\n          pctFull = pctFull === null ? AI_CM_AUTO_EXPORT_PCT_DEFAULT : pctFull;\n          autoExportPctInput.value = pctFull;\n          chrome.storage.local.set({\n            aiCmAutoExport: autoExportCheckbox.checked === true,\n            aiCmAutoExportPct: pctFull,\n            aiCmAutoExportFmt: normalizeAutoExportFmt(autoExportFmtSelect.value)\n          });\n        } catch (eFull) {\n          aiCmPopupDiagLine(\"aiCmAutoExportWriteFull\", { err: String(eFull) });\n        }\n      }\n      try {\n        chrome.storage.local.get([\"aiCmAutoExport\", \"aiCmAutoExportPct\", \"aiCmAutoExportFmt\"], function(data) {\n          try {\n            data = data || {};\n            if (autoExportCheckbox) autoExportCheckbox.checked = data.aiCmAutoExport === true;\n            var pctInit = clampAutoExportPct(data.aiCmAutoExportPct);\n            if (autoExportPctInput) autoExportPctInput.value = pctInit === null ? AI_CM_AUTO_EXPORT_PCT_DEFAULT : pctInit;\n            if (autoExportFmtSelect) autoExportFmtSelect.value = normalizeAutoExportFmt(data.aiCmAutoExportFmt);\n            var needsNormalize = typeof data.aiCmAutoExport !== \"boolean\" || pctInit === null || normalizeAutoExportFmt(data.aiCmAutoExportFmt) !== data.aiCmAutoExportFmt;\n            if (needsNormalize) aiCmAutoExportWriteFull();\n          } catch (eInit) {\n            aiCmPopupDiagLine(\"autoexport-init\", { err: String(eInit) });\n          }\n        });\n      } catch (eLoad) {\n        aiCmPopupDiagLine(\"autoexport-load\", { err: String(eLoad) });\n      }\n      autoExportCheckbox && autoExportCheckbox.addEventListener(\"change\", aiCmAutoExportWriteFull);\n      autoExportPctInput && autoExportPctInput.addEventListener(\"change\", aiCmAutoExportWriteFull);\n      autoExportPctInput && autoExportPctInput.addEventListener(\"blur\", aiCmAutoExportWriteFull);\n      autoExportFmtSelect && autoExportFmtSelect.addEventListener(\"change\", aiCmAutoExportWriteFull);\n      try {\n        chrome.storage.onChanged.addListener(function(changes, areaName) {\n          if (areaName === \"local\" && changes.aiCmDebugLogs) {\n            debugLogsCheckbox.checked = changes.aiCmDebugLogs.newValue === true;\n          }\n          if (areaName === \"local\" && changes.aiCmAutoExportPct && autoExportPctInput && document.activeElement !== autoExportPctInput) {\n            var pct = clampAutoExportPct(changes.aiCmAutoExportPct.newValue);\n            autoExportPctInput.value = pct === null ? 90 : pct;\n          }\n        });\n      } catch (e) {\n        aiCmPopupDiagLine(\"autoexport-changed\", { err: String(e) });\n      }\n      document.getElementById(\"reset-limit\") && document.getElementById(\"reset-limit\").addEventListener(\"click\", function() {\n        aiCmCancelCustomLimitWrite();\n        customLimit.value = \"\";\n        customLimit.placeholder = aiCmI18nMessage(\"options_limit_placeholder\", \"\\u0410\\u0432\\u0442\\u043E\");\n        chrome.storage.sync.set({ customLimit: null });\n      });\n      var chatDialogPathBySite = {\n        \"chatgpt\": /\\/(c|g|share)\\//,\n        \"gemini\": /\\/app\\//,\n        \"claude\": /\\/chat\\//,\n        \"perplexity\": /\\/(search|follow)\\//,\n        \"deepseek\": /\\/a\\//\n      };\n      function detectChatSite(hostname) {\n        if (!hostname) return null;\n        var host = String(hostname).toLowerCase();\n        if (host.indexOf(\"chatgpt.com\") !== -1) return \"chatgpt\";\n        if (host.indexOf(\"gemini.google.com\") !== -1) return \"gemini\";\n        if (host.indexOf(\"claude.ai\") !== -1) return \"claude\";\n        if (host.indexOf(\"perplexity.ai\") !== -1) return \"perplexity\";\n        if (host.indexOf(\"chat.deepseek.com\") !== -1) return \"deepseek\";\n        return null;\n      }\n      function isChatHome(hostname, pathname) {\n        var site = detectChatSite(hostname);\n        if (!site) return false;\n        return chatDialogPathBySite[site].test(String(pathname || \"\"));\n      }\n      function updateStatsFromState(state, tabHost, tabPath, fromCache) {\n        siteEl.textContent = siteLabels[state.site] || state.site || \"\\u2014\";\n        modelEl.textContent = state.model || \"\\u2014\";\n        tokensEl.textContent = typeof state.tokens === \"number\" ? state.tokens.toLocaleString() : \"\\u2014\";\n        limitEl.textContent = typeof state.limit === \"number\" ? state.limit.toLocaleString() : \"\\u2014\";\n        var p = state.percent || 0;\n        percentEl.textContent = p + \"%\";\n        percentEl.style.color = percentColor(p);\n        if (sourceEl) {\n          sourceEl.textContent = fromCache ? aiCmI18nMessage(\"options_source_cache\", \"\\u043A\\u044D\\u0448 (\\u043F\\u0440\\u043E\\u0448\\u043B\\u0430\\u044F \\u0431\\u0435\\u0441\\u0435\\u0434\\u0430)\") : state.sourceLabel || \"\\u2014\";\n        }\n        updateStaleWarning(state, tabHost, tabPath);\n      }\n      function updateStaleWarning(state, tabHost, tabPath) {\n        if (!staleWarningEl) return;\n        var showStale = !!(state && state.stale === true && isChatHome(tabHost, tabPath));\n        if (showStale) {\n          var siteLabel = siteLabels[state.site] || state.site || aiCmI18nMessage(\"options_stale_site_fallback\", \"\\u0441\\u0430\\u0439\\u0442\\u043E\\u043C\");\n          staleWarningEl.textContent = aiCmI18nMessage(\"options_stale_warning\", \"\\u0418\\u043D\\u0442\\u0435\\u0433\\u0440\\u0430\\u0446\\u0438\\u044F \\u0441 \" + siteLabel + \" \\u043C\\u043E\\u0433\\u043B\\u0430 \\u0443\\u0441\\u0442\\u0430\\u0440\\u0435\\u0442\\u044C: \\u0441\\u0430\\u0439\\u0442 \\u043D\\u0435 \\u043E\\u0442\\u0434\\u0430\\u0451\\u0442 \\u0434\\u0430\\u043D\\u043D\\u044B\\u0435 \\u0434\\u0438\\u0430\\u043B\\u043E\\u0433\\u0430. \\u041F\\u0440\\u043E\\u0432\\u0435\\u0440\\u044C\\u0442\\u0435 \\u043E\\u0431\\u043D\\u043E\\u0432\\u043B\\u0435\\u043D\\u0438\\u0435 \\u0440\\u0430\\u0441\\u0448\\u0438\\u0440\\u0435\\u043D\\u0438\\u044F.\", [siteLabel]);\n          staleWarningEl.style.display = \"block\";\n        } else {\n          staleWarningEl.style.display = \"none\";\n          staleWarningEl.textContent = \"\";\n        }\n      }\n      function aiCmPopupDiagLine(tag, fields) {\n        try {\n          if (typeof aiCmDiagLine === \"function\") return aiCmDiagLine(tag, fields);\n          var on = false;\n          try {\n            on = !!(typeof sessionStorage !== \"undefined\" && sessionStorage && sessionStorage.getItem(\"aiCmDebug\") === \"1\");\n          } catch (eSess) {\n            on = false;\n          }\n          if (!on) {\n            try {\n              on = window.__aiCmDebugLogs === true;\n            } catch (eWin) {\n              return false;\n            }\n          }\n          if (!on) return false;\n          var parts = [];\n          var f = fields || {};\n          for (var k in f) {\n            if (!Object.prototype.hasOwnProperty.call(f, k)) continue;\n            var v = f[k];\n            parts.push(k + \"=\" + (v === void 0 || v === null ? \"-\" : String(v)));\n          }\n          console.log(\"[AI CM][diag] \" + tag + \" \" + parts.join(\" \"));\n          return true;\n        } catch (eDiag) {\n          return false;\n        }\n      }\n      function showNoData(message) {\n        try {\n          aiCmPopupDiagLine(\"qwen-badge\", {\n            ts: Date.now(),\n            event: \"showNoData\",\n            reason: String(message || \"-\"),\n            url: String(typeof location !== \"undefined\" && location && location.href || \"\")\n          });\n        } catch (eQnd) {\n          aiCmPopupDiagLine(\"showNoData\", { err: String(eQnd) });\n        }\n        siteEl.textContent = message || aiCmI18nMessage(\"options_no_data\", \"\\u041D\\u0435\\u0442 \\u0434\\u0430\\u043D\\u043D\\u044B\\u0445\");\n        modelEl.textContent = \"\\u2014\";\n        tokensEl.textContent = \"\\u2014\";\n        limitEl.textContent = \"\\u2014\";\n        percentEl.textContent = \"\\u2014\";\n        percentEl.style.color = \"#8888aa\";\n      }\n      function formatTime(ts) {\n        try {\n          var d = new Date(ts);\n          return (\"0\" + d.getHours()).slice(-2) + \":\" + (\"0\" + d.getMinutes()).slice(-2);\n        } catch (e) {\n          return \"??:??\";\n        }\n      }\n      var cachedState = null;\n      function loadStats() {\n        try {\n          chrome.tabs.query({ active: true, currentWindow: true }, function(tabs) {\n            var tab = tabs && tabs[0];\n            if (!tab || !tab.url) {\n              showNoData(aiCmI18nMessage(\"options_no_active_tab\", \"\\u041D\\u0435\\u0442 \\u0430\\u043A\\u0442\\u0438\\u0432\\u043D\\u043E\\u0439 \\u0432\\u043A\\u043B\\u0430\\u0434\\u043A\\u0438\"));\n              return;\n            }\n            if (tab.url.indexOf(\"chrome://\") === 0 || tab.url.indexOf(\"chrome-extension://\") === 0) {\n              showNoData(aiCmI18nMessage(\"options_open_supported_site\", \"\\u041E\\u0442\\u043A\\u0440\\u043E\\u0439\\u0442\\u0435 \\u043F\\u043E\\u0434\\u0434\\u0435\\u0440\\u0436\\u0438\\u0432\\u0430\\u0435\\u043C\\u044B\\u0439 \\u0441\\u0430\\u0439\\u0442\"));\n              return;\n            }\n            var tabHost = \"\";\n            var tabPath = \"\";\n            try {\n              var activeTabUrl = new URL(tab.url);\n              tabHost = activeTabUrl.hostname;\n              tabPath = activeTabUrl.pathname;\n            } catch (e) {\n              aiCmPopupDiagLine(\"loadStats-tab-url\", { err: String(e) });\n            }\n            chrome.storage.local.get([\"aiCmState\", \"aiCmState:\" + tabHost], function(data) {\n              var state = data[\"aiCmState:\" + tabHost] || null;\n              if (!state && data.aiCmState && data.aiCmState.host === tabHost) {\n                state = data.aiCmState;\n              }\n              if (state) {\n                cachedState = state;\n                updateStatsFromState(state, tabHost, tabPath);\n                updateExportButtons();\n              } else if (cachedState && cachedState.host === tabHost) {\n                updateStatsFromState(cachedState, tabHost, tabPath, true);\n                var cachedAt = formatTime(cachedState.updatedAt);\n                siteEl.textContent += aiCmI18nMessage(\"options_data_from\", \" \\xB7 \\u0434\\u0430\\u043D\\u043D\\u044B\\u0435 \\u043E\\u0442 \" + cachedAt, [cachedAt]);\n              } else {\n                showNoData(aiCmI18nMessage(\"options_open_supported_site\", \"\\u041E\\u0442\\u043A\\u0440\\u043E\\u0439\\u0442\\u0435 \\u043F\\u043E\\u0434\\u0434\\u0435\\u0440\\u0436\\u0438\\u0432\\u0430\\u0435\\u043C\\u044B\\u0439 \\u0441\\u0430\\u0439\\u0442\"));\n              }\n            });\n          });\n        } catch (e) {\n          showNoData(aiCmI18nMessage(\"options_reload_page\", \"\\u041E\\u0431\\u043D\\u043E\\u0432\\u0438\\u0442\\u0435 \\u0441\\u0442\\u0440\\u0430\\u043D\\u0438\\u0446\\u0443\"));\n        }\n      }\n      try {\n        chrome.storage.onChanged.addListener(function(changes, areaName) {\n          if (areaName !== \"local\") return;\n          var candidates = [];\n          if (changes.aiCmState && changes.aiCmState.newValue) candidates.push(changes.aiCmState.newValue);\n          for (var key in changes) {\n            if (key.indexOf(\"aiCmState:\") === 0 && changes[key] && changes[key].newValue) {\n              candidates.push(changes[key].newValue);\n            }\n          }\n          if (!candidates.length) {\n            var removedForTab = false;\n            chrome.tabs.query({ active: true, currentWindow: true }, function(tabs) {\n              var tab = tabs && tabs[0];\n              var tabHost = \"\";\n              try {\n                if (tab && tab.url) tabHost = new URL(tab.url).hostname;\n              } catch (e) {\n                aiCmPopupDiagLine(\"stats-changed-removed\", { err: String(e) });\n              }\n              removedForTab = !tabHost && (!!changes.aiCmState || !!changes[\"aiCmState:\" + tabHost]) || !!tabHost && (!!changes[\"aiCmState:\" + tabHost] || !!changes.aiCmState && !!(changes.aiCmState.oldValue && changes.aiCmState.oldValue.host === tabHost));\n              if (!removedForTab) return;\n              cachedState = null;\n              showNoData(aiCmI18nMessage(\"options_open_supported_site\", \"\\u041E\\u0442\\u043A\\u0440\\u043E\\u0439\\u0442\\u0435 \\u043F\\u043E\\u0434\\u0434\\u0435\\u0440\\u0436\\u0438\\u0432\\u0430\\u0435\\u043C\\u044B\\u0439 \\u0441\\u0430\\u0439\\u0442\"));\n              updateStaleWarning(null, tabHost, \"\");\n              updateExportButtons();\n            });\n            return;\n          }\n          chrome.tabs.query({ active: true, currentWindow: true }, function(tabs) {\n            var tab = tabs && tabs[0];\n            var tabHost = \"\";\n            var tabPath = \"\";\n            try {\n              if (tab && tab.url) {\n                var activeTabUrl = new URL(tab.url);\n                tabHost = activeTabUrl.hostname;\n                tabPath = activeTabUrl.pathname;\n              }\n            } catch (e) {\n              aiCmPopupDiagLine(\"stats-changed-live\", { err: String(e) });\n            }\n            var best = null;\n            for (var i = 0; i < candidates.length; i++) {\n              var s = candidates[i];\n              if (s.host === tabHost && (!best || (s.updatedAt || 0) > (best.updatedAt || 0))) best = s;\n            }\n            if (best) {\n              cachedState = best;\n              updateStatsFromState(best, tabHost, tabPath);\n              updateExportButtons();\n            }\n          });\n        });\n      } catch (e) {\n        aiCmPopupDiagLine(\"stats-changed\", { err: String(e) });\n      }\n      var cachedHistory = null;\n      var currentTabHost = \"\";\n      function getActiveTabHost(cb) {\n        try {\n          chrome.tabs.query({ active: true, currentWindow: true }, function(tabs) {\n            var tab = tabs && tabs[0];\n            var host = \"\";\n            if (tab && tab.url) {\n              try {\n                host = new URL(tab.url).hostname;\n              } catch (e) {\n                host = \"\";\n              }\n            }\n            currentTabHost = host;\n            cb(host);\n          });\n        } catch (e) {\n          cb(\"\");\n        }\n      }\n      function updateExportButtons() {\n        if (!exportMdBtn || !exportJsonBtn || !exportPdfBtn) return;\n        var enabled = !!(cachedHistory && cachedHistory.host === currentTabHost);\n        var netMsgs = cachedState && cachedState.host === currentTabHost && typeof cachedState.netBaseMsgs === \"number\" ? cachedState.netBaseMsgs : 0;\n        if (!enabled && netMsgs > 0) enabled = true;\n        exportMdBtn.disabled = !enabled;\n        exportJsonBtn.disabled = !enabled;\n        exportPdfBtn.disabled = !enabled;\n        if (exportTxtBtn) exportTxtBtn.disabled = !enabled;\n        if (exportHintEl) {\n          if (enabled) {\n            var hintAt = cachedHistory && cachedHistory.host === currentTabHost ? cachedHistory.updatedAt : cachedState ? cachedState.updatedAt : 0;\n            var exportAt = formatTime(hintAt);\n            exportHintEl.textContent = aiCmI18nMessage(\"options_ready_to_export\", \"\\u0413\\u043E\\u0442\\u043E\\u0432\\u043E \\u043A \\u044D\\u043A\\u0441\\u043F\\u043E\\u0440\\u0442\\u0443 \\xB7 \\u0434\\u0430\\u043D\\u043D\\u044B\\u0435 \\u043E\\u0442 \" + exportAt, [exportAt]);\n          } else {\n            exportHintEl.textContent = aiCmI18nMessage(\"options_open_supported_site\", \"\\u041E\\u0442\\u043A\\u0440\\u043E\\u0439\\u0442\\u0435 \\u043F\\u043E\\u0434\\u0434\\u0435\\u0440\\u0436\\u0438\\u0432\\u0430\\u0435\\u043C\\u044B\\u0439 \\u0441\\u0430\\u0439\\u0442\");\n          }\n        }\n      }\n      function buildTxtText(hist) {\n        return window.AiCmExportBuilders ? window.AiCmExportBuilders.buildTxtFromHistory(hist || cachedHistory) : \"\";\n      }\n      function refreshExportState() {\n        getActiveTabHost(function(host) {\n          chrome.storage.local.get([\"aiCmHistory\", \"aiCmHistory:\" + host], function(data) {\n            var hist = data[\"aiCmHistory:\" + host] || null;\n            if (!hist && data.aiCmHistory && data.aiCmHistory.host === host) {\n              hist = data.aiCmHistory;\n            }\n            cachedHistory = hist;\n            updateExportButtons();\n          });\n        });\n      }\n      function pad2(n) {\n        return (n < 10 ? \"0\" : \"\") + n;\n      }\n      function buildFileName(ext, hist) {\n        hist = hist || cachedHistory;\n        var d = /* @__PURE__ */ new Date();\n        var stamp = d.getFullYear() + \"-\" + pad2(d.getMonth() + 1) + \"-\" + pad2(d.getDate()) + \"-\" + pad2(d.getHours()) + \"-\" + pad2(d.getMinutes());\n        var site = hist && hist.site || \"chat\";\n        var model = hist && hist.model || \"model\";\n        var safeSite = String(site).replace(/[^a-zA-Z0-9_-]+/g, \"-\").replace(/^-+|-+$/g, \"\") || \"chat\";\n        var safeModel = String(model).replace(/[^a-zA-Z0-9_.-]+/g, \"-\").replace(/^-+|-+$/g, \"\") || \"model\";\n        var lowConfPrefix = hist && hist.isLowConfidenceBase === true ? \"[LOW CONFIDENCE]_\" : \"\";\n        return lowConfPrefix + \"ai-context-monitor-\" + safeSite + \"-\" + safeModel + \"-\" + stamp + \".\" + ext;\n      }\n      function downloadBlob(content, fileName, mimeType, trigger) {\n        if (window.AiCmExportBuilders && window.AiCmExportBuilders.downloadBlob) {\n          window.AiCmExportBuilders.downloadBlob(content, fileName, mimeType, trigger || \"options\");\n        }\n      }\n      function getPlatform(hist) {\n        hist = hist || cachedHistory;\n        var site = hist && hist.site;\n        return siteLabels[site] || site || \"AI Chat\";\n      }\n      function buildJsonText(hist) {\n        hist = hist || cachedHistory;\n        var exportedAt = (/* @__PURE__ */ new Date()).toISOString();\n        return JSON.stringify({\n          platform: getPlatform(hist),\n          model: hist && hist.model || \"\",\n          exportedAt,\n          tokens: hist && typeof hist.tokens === \"number\" ? hist.tokens : 0,\n          limit: hist && typeof hist.limit === \"number\" ? hist.limit : 0,\n          percent: hist && typeof hist.percent === \"number\" ? hist.percent : 0,\n          messages: hist && Array.isArray(hist.messages) ? hist.messages : []\n        }, null, 2);\n      }\n      function buildMdText(hist) {\n        return window.AiCmExportBuilders ? window.AiCmExportBuilders.buildMdFromHistory(hist || cachedHistory, getPlatform(hist)) : \"\";\n      }\n      function getCurrentConvSnapshot(cb) {\n        try {\n          chrome.tabs.query({ active: true, currentWindow: true }, function(tabs) {\n            var tab = tabs && tabs[0];\n            if (!tab || !tab.id) {\n              cb(null);\n              return;\n            }\n            try {\n              chrome.tabs.sendMessage(tab.id, { type: \"aiCmExportCurrent\" }, function(resp) {\n                if (chrome.runtime.lastError || !resp || !resp.data) {\n                  cb(null);\n                  return;\n                }\n                cb(resp.data);\n              });\n            } catch (eS) {\n              cb(null);\n            }\n          });\n        } catch (eQ) {\n          cb(null);\n        }\n      }\n      function pickExportHistory(snap) {\n        if (snap && (snap.convId || Array.isArray(snap.messages) && snap.messages.length > 0)) return snap;\n        return cachedHistory;\n      }\n      exportMdBtn && exportMdBtn.addEventListener(\"click\", function() {\n        if (exportMdBtn.disabled) return;\n        getCurrentConvSnapshot(function(snap) {\n          var hist = pickExportHistory(snap);\n          if (!hist) return;\n          downloadBlob(buildMdText(hist), buildFileName(\"md\", hist), \"text/markdown\", \"options-md\");\n        });\n      });\n      exportJsonBtn && exportJsonBtn.addEventListener(\"click\", function() {\n        if (exportJsonBtn.disabled) return;\n        getCurrentConvSnapshot(function(snap) {\n          var hist = pickExportHistory(snap);\n          if (!hist) return;\n          downloadBlob(buildJsonText(hist), buildFileName(\"json\", hist), \"application/json\", \"options-json\");\n        });\n      });\n      exportTxtBtn && exportTxtBtn.addEventListener(\"click\", function() {\n        if (exportTxtBtn.disabled) return;\n        getCurrentConvSnapshot(function(snap) {\n          var hist = pickExportHistory(snap);\n          if (!hist) return;\n          var txt = buildTxtText(hist);\n          if (txt.charAt(0) !== \"\\uFEFF\") txt = \"\\uFEFF\" + txt;\n          downloadBlob(txt, buildFileName(\"txt\", hist), \"text/plain;charset=utf-8\", \"options-txt\");\n        });\n      });\n      exportPdfBtn && exportPdfBtn.addEventListener(\"click\", function() {\n        if (exportPdfBtn.disabled) return;\n        getActiveTab(function(tab) {\n          if (!tab || !tab.id) return;\n          var url = chrome.runtime.getURL(\"print/print.html\") + \"?tab=\" + tab.id;\n          try {\n            chrome.tabs.create({ url });\n          } catch (e) {\n            console.warn(\"[export-pdf] \\u043D\\u0435 \\u0443\\u0434\\u0430\\u043B\\u043E\\u0441\\u044C \\u043E\\u0442\\u043A\\u0440\\u044B\\u0442\\u044C \\u043F\\u0435\\u0447\\u0430\\u0442\\u043D\\u0443\\u044E \\u0444\\u043E\\u0440\\u043C\\u0443:\", e);\n          }\n        });\n      });\n      function getActiveTab(cb) {\n        try {\n          chrome.tabs.query({ active: true, currentWindow: true }, function(tabs) {\n            cb(tabs && tabs[0] ? tabs[0] : null);\n          });\n        } catch (e) {\n          cb(null);\n        }\n      }\n      function buildDiagnosticsFileName() {\n        return \"ai-context-monitor-diagnostics-\" + Date.now() + \".json\";\n      }\n      exportDiagBtn && exportDiagBtn.addEventListener(\"click\", function() {\n        getActiveTab(function(tab) {\n          if (!tab || !tab.id) {\n            downloadBlob(JSON.stringify({ error: \"\\u043D\\u0435\\u0442 \\u0430\\u043A\\u0442\\u0438\\u0432\\u043D\\u043E\\u0439 \\u0432\\u043A\\u043B\\u0430\\u0434\\u043A\\u0438\", at: (/* @__PURE__ */ new Date()).toISOString() }, null, 2), buildDiagnosticsFileName(), \"application/json\", \"options-diag\");\n            return;\n          }\n          try {\n            chrome.tabs.sendMessage(tab.id, { type: \"aiCmDiag\" }, function(response) {\n              var payload;\n              if (chrome.runtime.lastError) {\n                payload = {\n                  error: \"content script \\u043D\\u0435 \\u043E\\u0442\\u0432\\u0435\\u0442\\u0438\\u043B: \" + chrome.runtime.lastError.message,\n                  at: (/* @__PURE__ */ new Date()).toISOString()\n                };\n              } else {\n                payload = response && response.diag ? response.diag : { error: \"\\u043F\\u0443\\u0441\\u0442\\u043E\\u0439 \\u043E\\u0442\\u0432\\u0435\\u0442\", response: response || null };\n              }\n              downloadBlob(JSON.stringify(payload, null, 2), buildDiagnosticsFileName(), \"application/json\", \"options-diag\");\n            });\n          } catch (e) {\n            downloadBlob(JSON.stringify({ error: \"sendMessage error: \" + e.message, at: (/* @__PURE__ */ new Date()).toISOString() }, null, 2), buildDiagnosticsFileName(), \"application/json\", \"options-diag\");\n          }\n        });\n      });\n      try {\n        chrome.storage.onChanged.addListener(function(changes, areaName) {\n          if (areaName !== \"local\") return;\n          var hist = null;\n          if (changes.aiCmHistory && changes.aiCmHistory.newValue) hist = changes.aiCmHistory.newValue;\n          for (var key in changes) {\n            if (key.indexOf(\"aiCmHistory:\") === 0 && changes[key] && changes[key].newValue) {\n              var v = changes[key].newValue;\n              if (!hist || (v.updatedAt || 0) > (hist.updatedAt || 0)) hist = v;\n            }\n          }\n          if (!hist) return;\n          getActiveTabHost(function() {\n            if (hist.host === currentTabHost) cachedHistory = hist;\n            updateExportButtons();\n          });\n        });\n      } catch (e) {\n        aiCmPopupDiagLine(\"history-changed\", { err: String(e) });\n      }\n      var archiveFileInput = document.getElementById(\"archive-file\");\n      var archiveImportBtn = document.getElementById(\"archive-import\");\n      var archiveRefreshBtn = document.getElementById(\"archive-refresh\");\n      var archiveStatusEl = document.getElementById(\"archive-status\");\n      var archiveListEl = document.getElementById(\"archive-list\");\n      var AI_ARCHIVE_MAX_FILES = 20;\n      function aiCmArchiveApi() {\n        try {\n          return typeof window !== \"undefined\" && window.AiCmArchiveImport ? window.AiCmArchiveImport : null;\n        } catch (e) {\n          return null;\n        }\n      }\n      function aiCmSetArchiveStatus(text, isError) {\n        if (!archiveStatusEl) return;\n        archiveStatusEl.textContent = text || \"\";\n        archiveStatusEl.style.color = isError ? \"#ef4444\" : \"\";\n      }\n      function buildArchiveStoragePatch(records, fileName) {\n        const API = aiCmArchiveApi();\n        const patch = {};\n        if (!API || !Array.isArray(records)) return patch;\n        records.forEach(function(rec) {\n          if (!rec || !rec.convId) return;\n          patch[API.archiveStorageKey(rec.convId)] = rec;\n          patch[API.convSourceStorageKey(rec.convId)] = API.buildConvSourceRecord(rec, { fileName });\n        });\n        return patch;\n      }\n      function aiCmImportArchiveFiles(files, onDone) {\n        const API = aiCmArchiveApi();\n        if (!API) {\n          onDone(aiCmI18nMessage(\"options_archive_module_missing\", \"\\u043C\\u043E\\u0434\\u0443\\u043B\\u044C \\u0438\\u043C\\u043F\\u043E\\u0440\\u0442\\u0430 \\u043D\\u0435 \\u0437\\u0430\\u0433\\u0440\\u0443\\u0436\\u0435\\u043D (utils/archive-import.js)\"));\n          return;\n        }\n        const list = Array.prototype.slice.call(files || []).filter(function(f) {\n          return !!f;\n        }).slice(0, AI_ARCHIVE_MAX_FILES);\n        if (!list.length) {\n          onDone(aiCmI18nMessage(\"options_archive_no_files\", \"\\u0444\\u0430\\u0439\\u043B\\u044B \\u043D\\u0435 \\u0432\\u044B\\u0431\\u0440\\u0430\\u043D\\u044B\"));\n          return;\n        }\n        const report = {\n          files: 0,\n          conversations: 0,\n          accepted: 0,\n          bytes: 0,\n          skipped: [],\n          errors: [],\n          patch: {}\n        };\n        let idx = 0;\n        function step() {\n          if (idx >= list.length) {\n            onDone(null, report);\n            return;\n          }\n          const file = list[idx++];\n          report.files++;\n          const maxArchiveSize = Number(API.MAX_ARCHIVE_SIZE) || 0;\n          const fileSize = Number(file && file.size) || 0;\n          if (maxArchiveSize > 0 && fileSize > maxArchiveSize) {\n            const limitMb = String(Math.round(maxArchiveSize / (1024 * 1024)));\n            report.errors.push({\n              fileName: file.name,\n              error: \"file-too-large\",\n              size: fileSize,\n              limit: maxArchiveSize,\n              message: aiCmI18nMessage(\n                \"options_archive_file_too_large\",\n                \"\\u0444\\u0430\\u0439\\u043B \\u0441\\u043B\\u0438\\u0448\\u043A\\u043E\\u043C \\u0431\\u043E\\u043B\\u044C\\u0448\\u043E\\u0439 (\\u0431\\u043E\\u043B\\u044C\\u0448\\u0435 \" + limitMb + \" \\u041C\\u0411) \\u2014 \\u0447\\u0442\\u0435\\u043D\\u0438\\u0435 \\u043E\\u0442\\u043C\\u0435\\u043D\\u0435\\u043D\\u043E\",\n                [limitMb]\n              )\n            });\n            step();\n            return;\n          }\n          let reader;\n          try {\n            reader = new FileReader();\n          } catch (eNew) {\n            report.errors.push({ fileName: file.name, error: \"filereader-unavailable\" });\n            step();\n            return;\n          }\n          reader.onerror = function() {\n            report.errors.push({ fileName: file.name, error: \"read-error\" });\n            step();\n          };\n          reader.onload = function() {\n            try {\n              const parsed = API.parseArchiveText(String(reader.result == null ? \"\" : reader.result));\n              if (!parsed.ok) {\n                report.errors.push({ fileName: file.name, error: parsed.error });\n                step();\n                return;\n              }\n              report.conversations += parsed.conversations.length;\n              const plan = API.planArchiveImport(parsed.conversations, { fileName: file.name });\n              (plan.skipped || []).forEach(function(s) {\n                report.skipped.push({ fileName: file.name, convId: s.convId, reason: s.reason });\n              });\n              report.accepted += plan.accepted.length;\n              report.bytes += plan.bytes || 0;\n              Object.assign(report.patch, buildArchiveStoragePatch(plan.accepted, file.name));\n            } catch (eParse) {\n              report.errors.push({ fileName: file.name, error: \"parse-exception\" });\n            }\n            step();\n          };\n          try {\n            reader.readAsText(file);\n          } catch (eRead) {\n            report.errors.push({ fileName: file.name, error: \"read-exception\" });\n            step();\n          }\n        }\n        step();\n      }\n      function formatArchiveReport(report) {\n        if (!report) return \"\";\n        const parts = [];\n        var nFiles = String(report.files);\n        var nConvs = String(report.conversations);\n        var nAccepted = String(report.accepted);\n        parts.push(aiCmI18nMessage(\"options_archive_report_files\", \"\\u0444\\u0430\\u0439\\u043B\\u043E\\u0432: \" + nFiles, [nFiles]));\n        parts.push(aiCmI18nMessage(\"options_archive_report_conversations\", \"\\u0434\\u0438\\u0430\\u043B\\u043E\\u0433\\u043E\\u0432: \" + nConvs, [nConvs]));\n        parts.push(aiCmI18nMessage(\"options_archive_report_imported\", \"\\u0438\\u043C\\u043F\\u043E\\u0440\\u0442\\u0438\\u0440\\u043E\\u0432\\u0430\\u043D\\u043E: \" + nAccepted, [nAccepted]));\n        if (report.bytes) {\n          var kb = String(Math.round(report.bytes / 1024));\n          parts.push(aiCmI18nMessage(\"options_archive_report_kb\", \"\\u2248\" + kb + \" \\u041A\\u0411\", [kb]));\n        }\n        if (report.skipped && report.skipped.length) {\n          const byReason = {};\n          report.skipped.forEach(function(s) {\n            byReason[s.reason] = (byReason[s.reason] || 0) + 1;\n          });\n          var skippedList = Object.keys(byReason).map(function(r) {\n            return r + \"\\xD7\" + byReason[r];\n          }).join(\", \");\n          parts.push(aiCmI18nMessage(\"options_archive_report_skipped\", \"\\u043F\\u0440\\u043E\\u043F\\u0443\\u0449\\u0435\\u043D\\u043E: \" + skippedList, [skippedList]));\n        }\n        if (report.errors && report.errors.length) {\n          var errorList = report.errors.map(function(e) {\n            return e.fileName + \" (\" + (e.message || e.error) + \")\";\n          }).join(\", \");\n          parts.push(aiCmI18nMessage(\"options_archive_report_errors\", \"\\u043E\\u0448\\u0438\\u0431\\u043A\\u0438: \" + errorList, [errorList]));\n        }\n        return parts.join(\" \\xB7 \");\n      }\n      function aiCmListArchiveSourceKeys(cb) {\n        try {\n          if (chrome.storage.local.getKeys) {\n            chrome.storage.local.getKeys(function(keys) {\n              cb((keys || []).filter(function(k) {\n                return k.indexOf(\"aiCmArchive:\") === 0;\n              }).map(function(k) {\n                return k.slice(\"aiCmArchive:\".length);\n              }));\n            });\n            return;\n          }\n        } catch (eKeys) {\n          aiCmPopupDiagLine(\"aiCmListArchiveSourceKeys\", { err: String(eKeys) });\n        }\n        try {\n          chrome.storage.local.get(null, function(all) {\n            cb(Object.keys(all || {}).filter(function(k) {\n              return k.indexOf(\"aiCmArchive:\") === 0;\n            }).map(function(k) {\n              return k.slice(\"aiCmArchive:\".length);\n            }));\n          });\n        } catch (eAll) {\n          cb([]);\n        }\n      }\n      function aiCmRenderArchiveList() {\n        if (!archiveListEl) return;\n        const API = aiCmArchiveApi();\n        if (!API) {\n          archiveListEl.textContent = \"\";\n          return;\n        }\n        aiCmListArchiveSourceKeys(function(convIds) {\n          if (!convIds.length) {\n            archiveListEl.textContent = aiCmI18nMessage(\"options_archive_empty\", \"\\u0410\\u0440\\u0445\\u0438\\u0432\\u044B \\u043D\\u0435 \\u0438\\u043C\\u043F\\u043E\\u0440\\u0442\\u0438\\u0440\\u043E\\u0432\\u0430\\u043D\\u044B.\");\n            return;\n          }\n          const srcKeys = convIds.map(function(cid) {\n            return API.convSourceStorageKey(cid);\n          });\n          chrome.storage.local.get(srcKeys, function(data) {\n            archiveListEl.textContent = \"\";\n            convIds.forEach(function(cid) {\n              const rec = (data || {})[API.convSourceStorageKey(cid)] || null;\n              const row = document.createElement(\"div\");\n              row.className = \"archive-item\";\n              const info = document.createElement(\"span\");\n              info.className = \"archive-info\";\n              const label = rec ? rec.label || API.describeSource(rec) : aiCmI18nMessage(\"options_archive_fallback\", \"\\u0430\\u0440\\u0445\\u0438\\u0432\");\n              const when = rec && rec.importedAt ? \" \\xB7 \" + formatTime(rec.importedAt) : \"\";\n              const file = rec && rec.fileName ? \" \\xB7 \" + rec.fileName : \"\";\n              info.textContent = cid.slice(0, 8) + aiCmI18nMessage(\"options_info_separator\", \"\\xA0\\u2014\\xA0\") + label + when + file;\n              row.appendChild(info);\n              const del = document.createElement(\"button\");\n              del.className = \"btn-reset archive-del\";\n              del.type = \"button\";\n              del.textContent = aiCmI18nMessage(\"options_archive_delete\", \"\\u0423\\u0434\\u0430\\u043B\\u0438\\u0442\\u044C\");\n              del.setAttribute(\"data-conv-id\", cid);\n              del.addEventListener(\"click\", function() {\n                aiCmDeleteArchive(cid);\n              });\n              row.appendChild(del);\n              archiveListEl.appendChild(row);\n            });\n          });\n        });\n      }\n      function aiCmDeleteArchive(convId) {\n        const API = aiCmArchiveApi();\n        if (!API || !convId) return;\n        try {\n          chrome.storage.local.remove([API.archiveStorageKey(convId), API.convSourceStorageKey(convId)], function() {\n            var shortId = String(convId).slice(0, 8);\n            aiCmSetArchiveStatus(aiCmI18nMessage(\"options_archive_deleted\", \"\\u0430\\u0440\\u0445\\u0438\\u0432 \" + shortId + \" \\u0443\\u0434\\u0430\\u043B\\u0451\\u043D\", [shortId]));\n            aiCmRenderArchiveList();\n          });\n        } catch (eDel) {\n          var delErr = String(eDel && eDel.message || eDel);\n          aiCmSetArchiveStatus(aiCmI18nMessage(\"options_archive_delete_error\", \"\\u043D\\u0435 \\u0443\\u0434\\u0430\\u043B\\u043E\\u0441\\u044C \\u0443\\u0434\\u0430\\u043B\\u0438\\u0442\\u044C \\u0430\\u0440\\u0445\\u0438\\u0432: \" + delErr, [delErr]), true);\n        }\n      }\n      function aiCmApplyArchiveImport() {\n        const files = archiveFileInput && archiveFileInput.files;\n        aiCmSetArchiveStatus(aiCmI18nMessage(\"options_archive_reading\", \"\\u0447\\u0442\\u0435\\u043D\\u0438\\u0435 \\u0444\\u0430\\u0439\\u043B\\u043E\\u0432\\u2026\"));\n        aiCmImportArchiveFiles(files, function(err, report) {\n          if (err) {\n            aiCmSetArchiveStatus(err, true);\n            return;\n          }\n          const keys = Object.keys(report.patch);\n          if (!keys.length) {\n            var nothingReport = formatArchiveReport(report);\n            aiCmSetArchiveStatus(aiCmI18nMessage(\"options_archive_nothing\", \"\\u043D\\u0438\\u0447\\u0435\\u0433\\u043E \\u043D\\u0435 \\u0438\\u043C\\u043F\\u043E\\u0440\\u0442\\u0438\\u0440\\u043E\\u0432\\u0430\\u043D\\u043E \\xB7 \" + nothingReport, [nothingReport]), true);\n            aiCmRenderArchiveList();\n            return;\n          }\n          try {\n            chrome.storage.local.set(report.patch, function() {\n              var doneReport = formatArchiveReport(report);\n              aiCmSetArchiveStatus(aiCmI18nMessage(\"options_archive_done\", \"\\u0433\\u043E\\u0442\\u043E\\u0432\\u043E \\xB7 \" + doneReport, [doneReport]));\n              aiCmRenderArchiveList();\n            });\n          } catch (eSet) {\n            var setErr = String(eSet && eSet.message || eSet);\n            aiCmSetArchiveStatus(aiCmI18nMessage(\"options_archive_set_error\", \"\\u043E\\u0448\\u0438\\u0431\\u043A\\u0430 \\u0437\\u0430\\u043F\\u0438\\u0441\\u0438 \\u0432 \\u0445\\u0440\\u0430\\u043D\\u0438\\u043B\\u0438\\u0449\\u0435: \" + setErr, [setErr]), true);\n          }\n        });\n      }\n      archiveImportBtn && archiveImportBtn.addEventListener(\"click\", aiCmApplyArchiveImport);\n      archiveRefreshBtn && archiveRefreshBtn.addEventListener(\"click\", function() {\n        aiCmSetArchiveStatus(\"\");\n        aiCmRenderArchiveList();\n      });\n      try {\n        chrome.storage.onChanged.addListener(function(changes, areaName) {\n          if (areaName !== \"local\") return;\n          for (var k in changes) {\n            if (k.indexOf(\"aiCmArchive:\") === 0) {\n              aiCmRenderArchiveList();\n              return;\n            }\n          }\n        });\n      } catch (eArcCh) {\n        aiCmPopupDiagLine(\"archive-changed\", { err: String(eArcCh) });\n      }\n      document.addEventListener(\"DOMContentLoaded\", function() {\n        loadStats();\n        refreshExportState();\n        aiCmRenderArchiveList();\n      });\n      if (typeof module !== \"undefined\" && module.exports) {\n        module.exports = {\n          isChatHome,\n          buildArchiveStoragePatch,\n          aiCmImportArchiveFiles,\n          formatArchiveReport\n        };\n      }\n    }\n  });\n  require_entry_options();\n})();\n//# sourceMappingURL=options.js.map\n\n</script>\n\n</html>";
   var overlay = null;
 
   function closeOptions() {
