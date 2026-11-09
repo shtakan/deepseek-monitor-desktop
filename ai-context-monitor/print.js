@@ -16,7 +16,7 @@
     }
   };
 
-  // ../utils/markdown.js
+  // ../utils/markdown.ts
   function escapeHtml(s) {
     return String(s == null ? "" : s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
   }
@@ -142,7 +142,7 @@
   }
   var LIST_RE, HEADING_RE, FENCE_RE, MarkdownRenderer, markdown_default;
   var init_markdown = __esm({
-    "../utils/markdown.js"() {
+    "../utils/markdown.ts"() {
       LIST_RE = /^([-*+]|\d+[.)])\s+(.*)$/;
       HEADING_RE = /^(#{1,6})\s+(.*)$/;
       FENCE_RE = /^```/;

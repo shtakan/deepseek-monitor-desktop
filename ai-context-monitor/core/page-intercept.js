@@ -1,5 +1,5 @@
 (() => {
-  // utils/debug.js
+  // utils/debug.ts
   var DEBUG = false;
   var __aiCmLogRing = [];
   var __aiCmLogRingMax = 200;
@@ -21,7 +21,7 @@
     } catch (e) {
     }
   }
-  function debugLog2(level) {
+  function debugLog2(level, ...rest) {
     var args = Array.prototype.slice.call(arguments, 1);
     try {
       var line = args.map(__aiCmStringifyArg).join(" ");
@@ -104,7 +104,7 @@
     __aiCmPushLogRing("[swallow-soft-export] " + eSoftExport);
   }
 
-  // utils/intercept-common.js
+  // utils/intercept-common.ts
   function setIntervalVisible(fn, ms, opts) {
     var id = setInterval(function() {
       try {
@@ -118,6 +118,141 @@
       }
     }, ms);
     return id;
+  }
+  var ONFREEZE_ERROR_RE = /Only fetch keepalive is allowed during onfreeze/i;
+  function isOnFreezeError(error) {
+    try {
+      var message = error && typeof error.message !== "undefined" ? String(error.message) : String(error);
+      return ONFREEZE_ERROR_RE.test(message);
+    } catch (eText) {
+      return false;
+    }
+  }
+  function fetchGuarded(fetchFn, thisArg, args) {
+    try {
+      var list = Array.prototype.slice.call(args);
+      return Reflect.apply(fetchFn, thisArg, list);
+    } catch (eCall) {
+      if (!isOnFreezeError(eCall)) throw eCall;
+      swallowSoft(eCall, "intercept-common:onfreeze-fetch");
+      var rejected = Promise.reject(eCall);
+      rejected.catch(function() {
+      });
+      return rejected;
+    }
+  }
+
+  // utils/chatgpt-conversation-parser.ts
+  function getConvIdFromPath(pathname) {
+    try {
+      var m = String(pathname || "").match(/\/c\/([A-Za-z0-9_-]+)/);
+      return m ? m[1] : "";
+    } catch (e) {
+      return "";
+    }
+  }
+  function shouldResetConversationOnNav(prevId, newId) {
+    var p = prevId == null ? "" : String(prevId);
+    var n = newId == null ? "" : String(newId);
+    return p !== n;
+  }
+  function sanitizeChatGPTText(s) {
+    if (typeof s !== "string") return s;
+    return String(s).replace(/\uE200entity\uE202([^\uE200\uE201]*?)\uE201/g, function(m, payload) {
+      try {
+        var arr = JSON.parse(payload);
+        if (Array.isArray(arr) && arr.length > 1 && typeof arr[1] === "string" && arr[1]) return arr[1];
+      } catch (e) {
+        swallowSoft(e, "chatgpt-utils:sanitizeChatGPTText-entity");
+      }
+      try {
+        var mt = String(payload).match(/"([^"]+)"/g);
+        if (mt && mt.length > 1) {
+          var v = mt[1].replace(/^"|"$/g, "");
+          if (v) return v;
+        }
+      } catch (e2) {
+      }
+      return "";
+    }).replace(/\uE200(?:cite|image_group)\uE202[^\uE200\uE201]*?\uE201/g, "").replace(/[\uE000-\uF8FF]/g, "").replace(/\[entity\](?:\[[^\]]*\])+/g, "").replace(/\[entity\]/g, "").replace(/\[cite:[^\]]*\]/g, "").replace(/[ \t]{2,}/g, " ");
+  }
+  function orderChatGPTMapping(mapping) {
+    var keys = Object.keys(mapping || {});
+    if (!keys.length) return [];
+    var byId = {};
+    for (var i = 0; i < keys.length; i++) {
+      var k = keys[i];
+      var n = mapping[k];
+      var nid = n && n.id != null ? String(n.id) : k;
+      byId[nid] = k;
+    }
+    var hasParent = false;
+    var hasChildren = false;
+    for (var p = 0; p < keys.length; p++) {
+      var np = mapping[keys[p]];
+      if (np && np.parent !== void 0) hasParent = true;
+      if (np && Array.isArray(np.children) && np.children.length) hasChildren = true;
+    }
+    var childrenOf = {};
+    for (var c0 = 0; c0 < keys.length; c0++) childrenOf[keys[c0]] = [];
+    var roots = [];
+    for (var m = 0; m < keys.length; m++) {
+      var kk = keys[m];
+      var nn = mapping[kk];
+      var pid = nn && nn.parent != null ? String(nn.parent) : null;
+      var pk = pid ? byId[pid] || pid : null;
+      if (pk) {
+        if (childrenOf[pk]) childrenOf[pk].push(kk);
+      } else if (hasParent) {
+        roots.push(kk);
+      }
+    }
+    if (!hasParent) {
+      if (hasChildren) {
+        var isChild = {};
+        for (var c1 = 0; c1 < keys.length; c1++) {
+          var n1 = mapping[keys[c1]];
+          if (n1 && Array.isArray(n1.children)) {
+            for (var c2 = 0; c2 < n1.children.length; c2++) {
+              var cid = String(n1.children[c2]);
+              isChild[byId[cid] || cid] = true;
+            }
+          }
+        }
+        roots = keys.filter(function(k2) {
+          return !isChild[k2];
+        });
+        if (!roots.length) roots = [keys[0]];
+      } else {
+        return keys.slice().sort(function(a, b) {
+          var ca = mapping[a] && mapping[a].message && mapping[a].message.create_time || 0;
+          var cb = mapping[b] && mapping[b].message && mapping[b].message.create_time || 0;
+          return ca - cb;
+        });
+      }
+    }
+    roots.sort(function(a, b) {
+      var ca = mapping[a] && mapping[a].message && mapping[a].message.create_time || 0;
+      var cb = mapping[b] && mapping[b].message && mapping[b].message.create_time || 0;
+      return ca - cb;
+    });
+    var out = [];
+    var visited = {};
+    function walk(k2) {
+      if (!k2 || visited[k2] || mapping[k2] === void 0) return;
+      visited[k2] = true;
+      out.push(k2);
+      var ch = childrenOf[k2] || [];
+      if (mapping[k2] && Array.isArray(mapping[k2].children) && mapping[k2].children.length) {
+        ch = mapping[k2].children.map(function(cid2) {
+          return byId[String(cid2)] || String(cid2);
+        });
+      }
+      for (var w = 0; w < ch.length; w++) walk(ch[w]);
+    }
+    for (var r = 0; r < roots.length; r++) walk(roots[r]);
+    for (var u = 0; u < keys.length; u++) if (!visited[keys[u]]) out.push(keys[u]);
+    return out;
   }
 
   // core/page-intercept.js
@@ -150,15 +285,7 @@
     var passiveGetInFlight = false;
     var fallbackTimer = null;
     function getConvId() {
-      if (typeof window !== "undefined" && window.ChatGPTConversationParser && window.ChatGPTConversationParser.getConvIdFromPath) {
-        return window.ChatGPTConversationParser.getConvIdFromPath(location.pathname);
-      }
-      try {
-        var m = location.pathname.match(/\/c\/([A-Za-z0-9_-]+)/);
-        return m ? m[1] : "";
-      } catch (e) {
-        return "";
-      }
+      return getConvIdFromPath(location.pathname);
     }
     var currentConvId = getConvId();
     function resetForNewConversation() {
@@ -183,13 +310,7 @@
     }
     function checkConvChange() {
       var newId = getConvId();
-      var shouldReset;
-      var P = typeof window !== "undefined" && window.ChatGPTConversationParser ? window.ChatGPTConversationParser : null;
-      if (P && typeof P.shouldResetConversationOnNav === "function") {
-        shouldReset = P.shouldResetConversationOnNav(currentConvId, newId);
-      } else {
-        shouldReset = newId !== currentConvId;
-      }
+      var shouldReset = shouldResetConversationOnNav(currentConvId, newId);
       if (shouldReset) {
         currentConvId = newId;
         resetForNewConversation();
@@ -321,15 +442,8 @@
       var imgTokens = 0;
       var strippedMarkers = 0;
       var firstUserHead = "";
-      var orderedKeys = [];
-      if (typeof window !== "undefined" && window.ChatGPTConversationParser && window.ChatGPTConversationParser.orderChatGPTMapping) {
-        orderedKeys = window.ChatGPTConversationParser.orderChatGPTMapping(mapping);
-      } else {
-        orderedKeys = Object.keys(mapping);
-      }
-      var sanitizeText = typeof window !== "undefined" && window.ChatGPTConversationParser && window.ChatGPTConversationParser.sanitizeChatGPTText ? window.ChatGPTConversationParser.sanitizeChatGPTText : function(s) {
-        return s;
-      };
+      var orderedKeys = orderChatGPTMapping(mapping);
+      var sanitizeText = sanitizeChatGPTText;
       function countMarkers(s) {
         if (typeof s !== "string") return 0;
         var n = 0;
@@ -603,7 +717,7 @@
       }
       var responsePromise;
       try {
-        responsePromise = originalFetch.apply(this, arguments);
+        responsePromise = fetchGuarded(originalFetch, this, arguments);
       } catch (e) {
         return Promise.reject(e);
       }

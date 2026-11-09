@@ -58,7 +58,7 @@ if (typeof window.__aiCmSetDebugLogs === 'undefined') {
   window.chrome.runtime.id = 'pake-ai-context-monitor';
   window.chrome.runtime.getURL = window.chrome.runtime.getURL || function(path) { return path; };
   window.chrome.runtime.getManifest = window.chrome.runtime.getManifest || function() {
-    return { version: '2.0.41', manifest_version: 3, name: 'AI Context Monitor' };
+    return { version: '2.1.0', manifest_version: 3, name: 'AI Context Monitor' };
   };
   window.chrome.runtime.onMessage = onMessageStub;
   window.chrome.runtime.onInstalled = createEventStub();
@@ -307,313 +307,280 @@ if (typeof window.__aiCmSetDebugLogs === 'undefined') {
 
 /* ===== utils/debug.js ===== */
 
-// utils/debug.js — единый флаг отладки и обёртка-логгер для AI Context Monitor
-// v31: DEBUG управляется чекбоксом «Подробные логи» (ключ aiCmDebugLogs в chrome.storage.local).
-// По умолчанию ВЫКЛ: скрываются [gemini-autoscroll], [gemini-base-diag], token-diag-scan,
-// content-trace EMIT/DRAW и прочие v4x-логи. Всегда остаются (console.log напрямую):
-// версия расширения, инициализация адаптеров, «база полной истории», логи экспорта.
-// console.warn и console.error видны ВСЕГДА, независимо от флага.
-var DEBUG = false;
-
-// v31: сеттер флага (вызывается из content.js при загрузке ключа и по onChanged;
-// в MAIN-мире перехватчики получают значение через событие 'ai-cm-debug-logs').
-function __aiCmSetDebugLogs(v) {
-  DEBUG = !!v;
-  try { if (typeof window !== 'undefined') window.__aiCmDebugLogs = !!v; } catch (e) { }
-}
-
-// Ring-буфер логов (≤200 строк) для дампа диагностики. console.* НЕ затрагивается.
-// Каждая строка, проходящая через debugLog, дополнительно пишется в ring текущего мира
-// (у перехватчика MAIN-мир и у content.js ISOLATED-мир — отдельные буферы).
-var __aiCmLogRing = [];
-var __aiCmLogRingMax = 200;
-
-function __aiCmStringifyArg(a) {
-  if (typeof a === 'string') return a;
-  try {
-    var s = JSON.stringify(a);
-    if (s === undefined) return String(a);
-    if (s.length > 500) s = s.slice(0, 500) + '…';
-    return s;
-  } catch (e) { return String(a); }
-}
-
-function __aiCmPushLogRing(line) {
-  try {
-    __aiCmLogRing.push(line);
-    if (__aiCmLogRing.length > __aiCmLogRingMax) __aiCmLogRing.shift();
-  } catch (e) { }
-}
-
-// Копия ring-буфера текущего мира (для дампа диагностики).
-function __aiCmGetLogRing() {
-  try { return __aiCmLogRing.slice(); } catch (e) { return []; }
-}
-
-/**
- * Обёртка над console-методами. Заменяет прямой console.log во всём проекте.
- * @param {string} level — 'log', 'info', 'debug', 'warn', 'error'
- *
- * Принимает переменное число аргументов (как console[level]): они уходят дальше
- * без изменений. Отдельным @param их не описать — функция читает `arguments`.
- *
- * Правила:
- *   - 'warn' и 'error' → выводятся ВСЕГДА (сигнал реальной проблемы, не спам)
- *   - 'log' / 'info' / 'debug' → выводятся ТОЛЬКО при DEBUG === true
- */
-function debugLog(level) {
-  var args = Array.prototype.slice.call(arguments, 1);
-  try {
-    var line = args.map(__aiCmStringifyArg).join(' ');
-    __aiCmPushLogRing(line);
-  } catch (e) { }
-  if (level === 'error' || level === 'warn') {
-    (console[level] || console.log).apply(console, args);
-    return;
-  }
-  // v31: динамическая проверка — флаг может меняться в рантайме из любого мира
-  var enabled = DEBUG;
-  try { if (typeof window !== 'undefined' && window.__aiCmDebugLogs === true) enabled = true; } catch (e) { }
-  if (enabled) {
-    (console[level] || console.log).apply(console, args);
-  }
-}
-
-/**
- * ЕДИНАЯ точка молчаливого catch → диагностируемого (Step E.2a, П.5/П.6).
- * Тонкая обёртка над debugLog('error', …): строка идёт в ring ≤200 И в console.error —
- * ВСЕГДА, как любой 'error' (utils/debug.js:61-64). Поток управления НЕ меняется:
- * возврат undefined, исключение не пробрасывается, catch остаётся заглушкой.
- * Дедуп/счётчики/троттлинг здесь НЕ живут (отложено на E.2c).
- * typeof-гард обязателен: срез-песочницы тестов грузят исходники БЕЗ utils/debug.js,
- * и прямой вызов debugLog там бросил бы ReferenceError — т.е. убил бы исходный catch.
- * @param {any} error пойманное исключение
- * @param {string} tag контекст точки вида '<domain>:<function>' ('deepseek:parseSSELines')
- * @returns {void}
- */
-function swallow(error, tag) {
-  try {
-    if (typeof debugLog !== 'function') return;   // песочница без utils/debug.js: тихо и без броска
-    debugLog('error', '[swallow][' + (tag || 'unlabeled') + ']', error);
-  } catch (eSwallow) { /* сам логгер не должен бросать: swallow безопасен всегда */ }
-}
-
-// =============================================================================
-// O-27/O-32 (ДИАГНОСТИКА, только измерение): единый гейт инструментирования и печать
-// строк «точки скачивания / точки записи базы / точки сброса состояния».
-//
-// Гейт — aiCmDebug: sessionStorage 'aiCmDebug' === '1' (тот же флаг, что у СЕКЦИИ 13
-// DeepSeek и санации экспорта) ИЛИ чекбокс «Подробные логи» (chrome.storage.local
-// aiCmDebugLogs → window.__aiCmDebugLogs). Гейт выключен → НИ ОДНОЙ новой строки.
-//
-// Контракт инструментирования (поведение не меняется):
-//   - функции только ЧИТАЮТ уже посчитанные значения (content/fileName/url/threadId);
-//   - ни одна из них не пишет в базу/storage/DOM и не трогает байты экспорта;
-//   - вызовы в чужом коде защищены typeof-гардом, поэтому срез-песочницы тестов без
-//     этих хелперов видят прежнее поведение 1:1.
-// =============================================================================
-function aiCmDiagOn() {
-  try {
-    if (typeof sessionStorage !== 'undefined' && sessionStorage &&
-      sessionStorage.getItem('aiCmDebug') === '1') return true;
-  } catch (eSess) { }
-  try {
-    if (typeof window !== 'undefined' && window && window.__aiCmDebugLogs === true) return true;
-  } catch (eWin) { }
-  return false;
-}
-
-// Тип документа для логов сброса состояния: captcha / chat / search / unknown.
-function aiCmDiagDocKind() {
-  var href = '';
-  var host = '';
-  try { href = String((typeof location !== 'undefined' && location && location.href) || ''); } catch (eHref) { }
-  try { host = String((typeof location !== 'undefined' && location && location.hostname) || ''); } catch (eHost) { }
-  var isGoogle = (host === 'google.com' || host === 'www.google.com');
-  try {
-    if (href.indexOf('/sorry/') !== -1) return 'captcha';
-    if (isGoogle && (document.querySelector('#captcha-form') ||
-      document.querySelector('form[action*="sorry"]') ||
-      document.querySelector('iframe[src*="recaptcha"]'))) return 'captcha';
-  } catch (eCap) { }
-  try {
-    var tid = '';
-    var el = document.querySelector('[data-session-thread-id]');
-    if (el) tid = String(el.getAttribute('data-session-thread-id') || '').trim();
-    if (tid) return 'chat';
-    if (document.querySelector('[data-scope-id="turn"]') ||
-      document.querySelector('[data-subtree="aimfl"]')) return 'chat';
-  } catch (eChat) { }
-  if (isGoogle) return 'search';
-  return 'chat';
-}
-
-// Первые n символов (по умолчанию 100) базы/тела ОДНОЙ строкой; пустое — явно.
-function aiCmDiagHead(v, n) {
-  try {
-    var lim = (typeof n === 'number' && n > 0) ? n : 100;
-    if (v === undefined || v === null) return '(пусто)';
-    var s = String(v);
-    if (!s) return '(пусто)';
-    var flat = s.replace(/\s+/g, ' ').trim();
-    if (!flat) return '(пусто/пробелы)';
-    return (flat.length > lim) ? (flat.slice(0, lim) + '…') : flat;
-  } catch (eHead) { return '(ошибка)'; }
-}
-
-// Источник вызова (dev-режим/подробные логи): верхние кадры стека одной строкой.
-function aiCmDiagStack(skip) {
-  try {
-    var st = String((new Error()).stack || '');
-    if (!st) return '';
-    var lines = st.split('\n');
-    var out = [];
-    var from = 1 + ((typeof skip === 'number' && skip >= 0) ? skip : 0);
-    for (var i = from; i < lines.length && out.length < 4; i++) {
-      var s = String(lines[i] || '').replace(/\s+/g, ' ').trim();
-      if (!s || s.indexOf('aiCmDiag') !== -1) continue;
-      out.push(s);
+var __aiCmDebugClassic = (() => {
+  var __defProp = Object.defineProperty;
+  var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
+  var __getOwnPropNames = Object.getOwnPropertyNames;
+  var __hasOwnProp = Object.prototype.hasOwnProperty;
+  var __export = (target, all) => {
+    for (var name in all)
+      __defProp(target, name, { get: all[name], enumerable: true });
+  };
+  var __copyProps = (to, from, except, desc) => {
+    if (from && typeof from === "object" || typeof from === "function") {
+      for (let key of __getOwnPropNames(from))
+        if (!__hasOwnProp.call(to, key) && key !== except)
+          __defProp(to, key, { get: () => from[key], enumerable: !(desc = __getOwnPropDesc(from, key)) || desc.enumerable });
     }
-    return out.join(' <- ');
-  } catch (eStack) { return ''; }
-}
-
-// Печать строки диагностики: tag + key=value… Только под гейтом aiCmDebug.
-function aiCmDiagLine(tag, fields) {
-  if (!aiCmDiagOn()) return false;
-  try {
-    var parts = [];
-    var f = fields || {};
-    for (var k in f) {
-      if (!Object.prototype.hasOwnProperty.call(f, k)) continue;
-      var v = f[k];
-      parts.push(k + '=' + ((v === undefined || v === null) ? '(нет)' : String(v)));
+    return to;
+  };
+  var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: true }), mod);
+  var stdin_exports = {};
+  __export(stdin_exports, {
+    __aiCmGetLogRing: () => __aiCmGetLogRing,
+    __aiCmPushLogRing: () => __aiCmPushLogRing,
+    __aiCmSetDebugLogs: () => __aiCmSetDebugLogs,
+    __aiCmStringifyArg: () => __aiCmStringifyArg,
+    aiCmDiagDocKind: () => aiCmDiagDocKind,
+    aiCmDiagDownload: () => aiCmDiagDownload,
+    aiCmDiagDownloadBlocked: () => aiCmDiagDownloadBlocked,
+    aiCmDiagHead: () => aiCmDiagHead,
+    aiCmDiagLine: () => aiCmDiagLine,
+    aiCmDiagOn: () => aiCmDiagOn,
+    aiCmDiagStack: () => aiCmDiagStack,
+    aiCmDiagWarn: () => aiCmDiagWarn,
+    debugLog: () => debugLog,
+    swallow: () => swallow,
+    swallowSoft: () => swallowSoft
+  });
+  var DEBUG = false;
+  function __aiCmSetDebugLogs(v) {
+    DEBUG = !!v;
+    try {
+      if (typeof window !== "undefined") window.__aiCmDebugLogs = !!v;
+    } catch (e) {
     }
-    console.log('[AI CM][diag] ' + tag + ' ' + parts.join(' '));
-  } catch (eLine) { }
-  return true;
-}
-
-// ЕДИНАЯ точка лога скачивания: триггер, имя файла (пустое — словом «пустое»),
-// первые 100 символов базы, длина, URL документа, threadId, источник вызова.
-function aiCmDiagDownload(trigger, content, fileName, extra) {
-  if (!aiCmDiagOn()) return false;
-  var e = extra || {};
-  var url = '';
-  try { url = String((typeof location !== 'undefined' && location && location.href) || ''); } catch (eUrl) { }
-  return aiCmDiagLine('download', {
-    trigger: trigger || '(нет)',
-    file: (fileName === undefined || fileName === null || String(fileName) === '') ? 'пустое' : String(fileName),
-    bytes100: aiCmDiagHead(content, 100),
-    len: (content === undefined || content === null) ? 0 : String(content).length,
-    mime: e.mime,
-    url: url,
-    threadId: e.threadId,
-    site: e.site,
-    reason: e.reason,
-    src: aiCmDiagStack(1)
-  });
-}
-
-// O-27 (защитный фикс): ЕДИНСТВЕННАЯ точка скачивания ОТКАЗАЛА в выдаче файла.
-// reason=xssi-prefix — первые байты контента начинаются XSSI-префиксом Google (`)]}'`,
-// живой артефакт `f.txt`); reason=empty-name — имя файла пустое/не задано (живой путь
-// автоэкспорта на captcha-странице). Строка — только под гейтом aiCmDebug; reason идёт
-// ПЕРВЫМ полем, поэтому в логе всегда читается `download-blocked reason=<причина>`.
-function aiCmDiagDownloadBlocked(trigger, content, fileName, reason, extra) {
-  if (!aiCmDiagOn()) return false;
-  var e = extra || {};
-  var url = '';
-  try { url = String((typeof location !== 'undefined' && location && location.href) || ''); } catch (eUrlB) { }
-  return aiCmDiagLine('download-blocked', {
-    reason: reason || '(нет)',
-    trigger: trigger || '(нет)',
-    file: (fileName === undefined || fileName === null || String(fileName) === '') ? 'пустое' : String(fileName),
-    bytes100: aiCmDiagHead(content, 100),
-    len: (content === undefined || content === null) ? 0 : String(content).length,
-    mime: e.mime,
-    url: url,
-    threadId: e.threadId,
-    site: e.site,
-    src: aiCmDiagStack(1)
-  });
-}
-
-// Step E.2a: window-зеркало хелпера — по прецеденту прочих __aiCm*-хуков файла
-// (window.__aiCmDebugLogs:13) и выносов D.1-D.9 (window.__aiCmDeepseek*). try/catch —
-// потому что window может отсутствовать (unit-песочница, print/options-мир).
-try { if (typeof window !== 'undefined') window.__aiCmSwallow = swallow; } catch (eSwallowExport) { }
-
-// =============================================================================
-// Step E.2c-A: канал B — «мягкие» события (swallowSoft / aiCmDiagWarn).
-//
-// Почему хелперы в ХВОСТЕ файла, а не рядом с swallow (utils/debug.js:85): любая
-// вставка выше сдвинула бы номера строк catch, запинутые построчно в
-// tests/fixtures/catch-whitelist.json (13, 36, 60, 67, 89, 110, 113, 121, 122, 129,
-// 137, 184, 194, 218, 236). Страж tests/catch-hygiene.test.js сверяет дерево с этим
-// whitelist ЗАПИСЬ-В-ЗАПИСЬ, а сам whitelist в шаге E.2c-A не обновляется — значит
-// номера строк всех существующих catch обязаны остаться прежними. Побочный плюс:
-// не сдвигаются и строки 62/69, на которые ссылается allow-list стража
-// tests/no-bare-console-warn.test.js. Для core/background.js действует то же правило.
-// =============================================================================
-
-/**
- * Мягкий перехват (Step E.2c-A, канал B): ошибка, которую НЕ эскалируем.
- * Отличие от swallow (utils/debug.js:85): console.error не вызывается НИКОГДА.
- *   - ring-буфер: строка пишется ВСЕГДА (единственный безусловный канал);
- *   - консоль: только под гейтом aiCmDiagOn(), через aiCmDiagLine('swallow-soft', …).
- * Поток управления не меняется: возврат undefined, исключение не пробрасывается.
- * typeof-гард обязателен — срез-песочницы тестов грузят исходники БЕЗ utils/debug.js,
- * и прямой вызов хелперов там бросил бы ReferenceError, т.е. убил бы исходный catch.
- * Дедуп/счётчики/троттлинг здесь НЕ живут (отложено на E.2d).
- * @param {any} error пойманное исключение
- * @param {string} tag контекст точки вида '<domain>:<function>' ('deepseek:parseSSELines')
- * @returns {void}
- */
-function swallowSoft(error, tag) {
-  var label = tag || 'unlabeled';
-  var msg = '';
-  try { msg = (error && error.message) ? String(error.message) : String(error); } catch (eSoftMsg) { msg = '(нечитаемая ошибка)'; }
+  }
+  var __aiCmLogRing = [];
+  var __aiCmLogRingMax = 200;
+  function __aiCmStringifyArg(a) {
+    if (typeof a === "string") return a;
+    try {
+      var s = JSON.stringify(a);
+      if (s === void 0) return String(a);
+      if (s.length > 500) s = s.slice(0, 500) + "\u2026";
+      return s;
+    } catch (e) {
+      return String(a);
+    }
+  }
+  function __aiCmPushLogRing(line) {
+    try {
+      __aiCmLogRing.push(line);
+      if (__aiCmLogRing.length > __aiCmLogRingMax) __aiCmLogRing.shift();
+    } catch (e) {
+    }
+  }
+  function __aiCmGetLogRing() {
+    try {
+      return __aiCmLogRing.slice();
+    } catch (e) {
+      return [];
+    }
+  }
+  function debugLog(level, ...rest) {
+    var args = Array.prototype.slice.call(arguments, 1);
+    try {
+      var line = args.map(__aiCmStringifyArg).join(" ");
+      __aiCmPushLogRing(line);
+    } catch (e) {
+    }
+    if (level === "error" || level === "warn") {
+      (console[level] || console.log).apply(console, args);
+      return;
+    }
+    var enabled = DEBUG;
+    try {
+      if (typeof window !== "undefined" && window.__aiCmDebugLogs === true) enabled = true;
+    } catch (e) {
+    }
+    if (enabled) {
+      (console[level] || console.log).apply(console, args);
+    }
+  }
+  function swallow(error, tag) {
+    try {
+      if (typeof debugLog !== "function") return;
+      debugLog("error", "[swallow][" + (tag || "unlabeled") + "]", error);
+    } catch (eSwallow) {
+    }
+  }
+  function aiCmDiagOn() {
+    try {
+      if (typeof sessionStorage !== "undefined" && sessionStorage && sessionStorage.getItem("aiCmDebug") === "1") return true;
+    } catch (eSess) {
+    }
+    try {
+      if (typeof window !== "undefined" && window && window.__aiCmDebugLogs === true) return true;
+    } catch (eWin) {
+    }
+    return false;
+  }
+  function aiCmDiagDocKind() {
+    var href = "";
+    var host = "";
+    try {
+      href = String(typeof location !== "undefined" && location && location.href || "");
+    } catch (eHref) {
+    }
+    try {
+      host = String(typeof location !== "undefined" && location && location.hostname || "");
+    } catch (eHost) {
+    }
+    var isGoogle = host === "google.com" || host === "www.google.com";
+    try {
+      if (href.indexOf("/sorry/") !== -1) return "captcha";
+      if (isGoogle && (document.querySelector("#captcha-form") || document.querySelector('form[action*="sorry"]') || document.querySelector('iframe[src*="recaptcha"]'))) return "captcha";
+    } catch (eCap) {
+    }
+    try {
+      var tid = "";
+      var el = document.querySelector("[data-session-thread-id]");
+      if (el) tid = String(el.getAttribute("data-session-thread-id") || "").trim();
+      if (tid) return "chat";
+      if (document.querySelector('[data-scope-id="turn"]') || document.querySelector('[data-subtree="aimfl"]')) return "chat";
+    } catch (eChat) {
+    }
+    if (isGoogle) return "search";
+    return "chat";
+  }
+  function aiCmDiagHead(v, n) {
+    try {
+      var lim = typeof n === "number" && n > 0 ? n : 100;
+      if (v === void 0 || v === null) return "(\u043F\u0443\u0441\u0442\u043E)";
+      var s = String(v);
+      if (!s) return "(\u043F\u0443\u0441\u0442\u043E)";
+      var flat = s.replace(/\s+/g, " ").trim();
+      if (!flat) return "(\u043F\u0443\u0441\u0442\u043E/\u043F\u0440\u043E\u0431\u0435\u043B\u044B)";
+      return flat.length > lim ? flat.slice(0, lim) + "\u2026" : flat;
+    } catch (eHead) {
+      return "(\u043E\u0448\u0438\u0431\u043A\u0430)";
+    }
+  }
+  function aiCmDiagStack(skip) {
+    try {
+      var st = String(new Error().stack || "");
+      if (!st) return "";
+      var lines = st.split("\n");
+      var out = [];
+      var from = 1 + (typeof skip === "number" && skip >= 0 ? skip : 0);
+      for (var i = from; i < lines.length && out.length < 4; i++) {
+        var s = String(lines[i] || "").replace(/\s+/g, " ").trim();
+        if (!s || s.indexOf("aiCmDiag") !== -1) continue;
+        out.push(s);
+      }
+      return out.join(" <- ");
+    } catch (eStack) {
+      return "";
+    }
+  }
+  function aiCmDiagLine(tag, fields) {
+    if (!aiCmDiagOn()) return false;
+    try {
+      var parts = [];
+      var f = fields || {};
+      for (var k in f) {
+        if (!Object.prototype.hasOwnProperty.call(f, k)) continue;
+        var v = f[k];
+        parts.push(k + "=" + (v === void 0 || v === null ? "(\u043D\u0435\u0442)" : String(v)));
+      }
+      console.log("[AI CM][diag] " + tag + " " + parts.join(" "));
+    } catch (eLine) {
+    }
+    return true;
+  }
+  function aiCmDiagDownload(trigger, content, fileName, extra) {
+    if (!aiCmDiagOn()) return false;
+    var e = extra || {};
+    var url = "";
+    try {
+      url = String(typeof location !== "undefined" && location && location.href || "");
+    } catch (eUrl) {
+    }
+    return aiCmDiagLine("download", {
+      trigger: trigger || "(\u043D\u0435\u0442)",
+      file: fileName === void 0 || fileName === null || String(fileName) === "" ? "\u043F\u0443\u0441\u0442\u043E\u0435" : String(fileName),
+      bytes100: aiCmDiagHead(content, 100),
+      len: content === void 0 || content === null ? 0 : String(content).length,
+      mime: e.mime,
+      url,
+      threadId: e.threadId,
+      site: e.site,
+      reason: e.reason,
+      src: aiCmDiagStack(1)
+    });
+  }
+  function aiCmDiagDownloadBlocked(trigger, content, fileName, reason, extra) {
+    if (!aiCmDiagOn()) return false;
+    var e = extra || {};
+    var url = "";
+    try {
+      url = String(typeof location !== "undefined" && location && location.href || "");
+    } catch (eUrlB) {
+    }
+    return aiCmDiagLine("download-blocked", {
+      reason: reason || "(\u043D\u0435\u0442)",
+      trigger: trigger || "(\u043D\u0435\u0442)",
+      file: fileName === void 0 || fileName === null || String(fileName) === "" ? "\u043F\u0443\u0441\u0442\u043E\u0435" : String(fileName),
+      bytes100: aiCmDiagHead(content, 100),
+      len: content === void 0 || content === null ? 0 : String(content).length,
+      mime: e.mime,
+      url,
+      threadId: e.threadId,
+      site: e.site,
+      src: aiCmDiagStack(1)
+    });
+  }
   try {
-    if (typeof __aiCmPushLogRing === 'function') __aiCmPushLogRing('[swallow-soft][' + label + '] ' + msg);
-  } catch (eSoftRing) { return undefined; }
+    if (typeof window !== "undefined") window.__aiCmSwallow = swallow;
+  } catch (eSwallowExport) {
+  }
+  function swallowSoft(error, tag) {
+    var label = tag || "unlabeled";
+    var msg = "";
+    try {
+      msg = error && error.message ? String(error.message) : String(error);
+    } catch (eSoftMsg) {
+      msg = "(\u043D\u0435\u0447\u0438\u0442\u0430\u0435\u043C\u0430\u044F \u043E\u0448\u0438\u0431\u043A\u0430)";
+    }
+    try {
+      if (typeof __aiCmPushLogRing === "function") __aiCmPushLogRing("[swallow-soft][" + label + "] " + msg);
+    } catch (eSoftRing) {
+      return void 0;
+    }
+    try {
+      if (typeof aiCmDiagLine !== "function") return;
+      aiCmDiagLine("swallow-soft", { tag: label, err: error });
+    } catch (eSoftDiag) {
+      return void 0;
+    }
+  }
+  function aiCmDiagWarn(tag, message, detail) {
+    var label = tag || "unlabeled";
+    var text = message === void 0 || message === null ? "" : String(message);
+    try {
+      var tail = "";
+      if (detail !== void 0) tail = " " + (typeof __aiCmStringifyArg === "function" ? __aiCmStringifyArg(detail) : String(detail));
+      if (typeof __aiCmPushLogRing === "function") __aiCmPushLogRing("[ai-cm-warn][" + label + "] " + text + tail);
+    } catch (eWarnRing) {
+      return void 0;
+    }
+    try {
+      if (typeof aiCmDiagOn !== "function" || !aiCmDiagOn()) return;
+      console.log("[AI CM][warn][" + label + "] " + text, detail);
+    } catch (eWarnPrint) {
+      return void 0;
+    }
+  }
   try {
-    if (typeof aiCmDiagLine !== 'function') return;   // песочница без utils/debug.js: тихо и без броска
-    aiCmDiagLine('swallow-soft', { tag: label, err: error });
-  } catch (eSoftDiag) { return undefined; }
-}
+    if (typeof window !== "undefined") window.__aiCmSwallowSoft = swallowSoft;
+  } catch (eSoftExport) {
+    __aiCmPushLogRing("[swallow-soft-export] " + eSoftExport);
+  }
+  return __toCommonJS(stdin_exports);
+})();
 
-/**
- * Warn-уровень канала B (Step E.2c-A): сохраняет уровень warn для отладочной сессии,
- * но НЕ эскалирует его в chrome://extensions/errors вне гейта — в отличие от
- * debugLog('warn', …), который печатается всегда (utils/debug.js:61-64).
- *   - ring-буфер: строка пишется ВСЕГДА;
- *   - консоль: ровно один console.warn под гейтом aiCmDiagOn(); вне гейта — ничего.
- * Возврат undefined, исключение не пробрасывается, typeof-гард как у swallowSoft.
- * @param {string} tag контекст точки
- * @param {string} message короткое сообщение
- * @param {any} [detail] необязательная деталь (уходит вторым аргументом console.warn)
- * @returns {void}
- */
-function aiCmDiagWarn(tag, message, detail) {
-  var label = tag || 'unlabeled';
-  var text = (message === undefined || message === null) ? '' : String(message);
-  try {
-    var tail = '';
-    if (detail !== undefined) tail = ' ' + ((typeof __aiCmStringifyArg === 'function') ? __aiCmStringifyArg(detail) : String(detail));
-    if (typeof __aiCmPushLogRing === 'function') __aiCmPushLogRing('[ai-cm-warn][' + label + '] ' + text + tail);
-  } catch (eWarnRing) { return undefined; }
-  try {
-    if (typeof aiCmDiagOn !== 'function' || !aiCmDiagOn()) return;
-    console.log('[AI CM][warn][' + label + '] ' + text, detail);
-  } catch (eWarnPrint) { return undefined; }
-}
-
-// Step E.2c-A: window-зеркало swallowSoft — прецедент window.__aiCmSwallow:236.
-// Тело catch НЕ пустое намеренно: новый молчаливый catch сделал бы красным страж
-// tests/catch-hygiene.test.js (его whitelist в этом шаге не обновляется), поэтому сбой
-// экспорта фиксируется в ring — правило канала B: не бросаем и не эскалируем.
-try { if (typeof window !== 'undefined') window.__aiCmSwallowSoft = swallowSoft; } catch (eSoftExport) { __aiCmPushLogRing('[swallow-soft-export] ' + eSoftExport); }
+Object.assign(globalThis, __aiCmDebugClassic);
 
 
 /* ===== core/deepseek-diag.js ===== */
@@ -654,7 +621,7 @@ try { if (typeof window !== 'undefined') window.__aiCmSwallowSoft = swallowSoft;
 // convId; переменная осталась в ядре — её читает и пишет resetForNewConversation).
 //
 // Порядок подключения (core/background.js, registerSafe 'ai-cm-deepseek-intercept-v4',
-// document_start, world MAIN): utils/debug.js -> ЭТОТ ФАЙЛ -> core/deepseek-netsync.js
+// document_start, world MAIN): utils/debug.ts -> ЭТОТ ФАЙЛ -> core/deepseek-netsync.js
 // (Step D.2) -> core/deepseek-intercept.js.
 // До связки на window.AiCmDeepseekDiag лежит только __bind; после связки Fn заполнен
 // значениями 26 диагностических функций, а ядро раздаёт их 16 форвардерами по прежним
@@ -1618,7 +1585,7 @@ try { if (typeof window !== 'undefined') window.__aiCmSwallowSoft = swallowSoft;
 // и порядок ходов в файле перестал бы расти.
 //
 // Порядок подключения (core/background.js, registerSafe 'ai-cm-deepseek-intercept-v4',
-// document_start, world MAIN): utils/debug.js -> core/deepseek-diag.js -> ЭТОТ ФАЙЛ ->
+// document_start, world MAIN): utils/debug.ts -> core/deepseek-diag.js -> ЭТОТ ФАЙЛ ->
 // core/deepseek-intercept.js. До связки на window.AiCmDeepseekNetsync лежит только
 // __bind; после связки Fn заполнен 5 функциями, а ядро раздаёт 2 из них
 // форвардерами по прежним именам (liveTurnRecord, netSyncNeeded — function
@@ -1692,6 +1659,8 @@ try { if (typeof window !== 'undefined') window.__aiCmSwallowSoft = swallowSoft;
   // Per-turn выбор текста: EQUAL → live (байт-в-байт то же); MIDDLE-HOLE*/TAIL-CUT → сетевой
   // (он полнее: live потерял середину/хвост — сигнатура O-18); LIVE-EXTRA/DIFF-OTHER → live
   // (сеть короче либо различие не классифицировано — молча не заменяем); ONE-SIDE → live.
+  // LIVE-ANSWER-EMPTY (Firefox): live-ход финализировался с ПУСТЫМ answer (гонка пустого
+  // ответа), а сетевой снимок несёт непустой ответ — сетевой текст хода НЕ затирается.
   function exportComposeTurns() {
     var verdicts = {};
     var bump = function (v) { verdicts[v] = (verdicts[v] || 0) + 1; };
@@ -1702,6 +1671,15 @@ try { if (typeof window !== 'undefined') window.__aiCmSwallowSoft = swallowSoft;
         id = ids[i]; t = turnsMap[id]; lv = liveTurns[id];
         if (!t) continue;
         if (!lv) { bump('ONE-SIDE'); continue; }                    // ход только из сети
+        // Firefox: live-ход финализировался с пустым answer (гонка пустого ответа), а
+        // сетевой снимок ответ нёс — сетевой текст хода не затираем (LIVE-ANSWER-EMPTY).
+        // Пробельный answer ответом не считается: пустая строка и одни пробелы — одно и то же.
+        if (String(lv.answer || '').trim() === '' && String(t.answer || '').trim() !== '') {
+          bump('LIVE-ANSWER-EMPTY');
+          console.log('[deepseek-intercept] экспорт: ход ' + String(id).slice(0, 8) +
+            ' — live answer пуст, но сетевой ответ непустой (LIVE-ANSWER-EMPTY), берём сеть');
+          continue;                                                  // остаётся сетевой текст
+        }
         v = diagVerdict(lv.text, t.text);                            // lt=live, nt=net
         bump(v.verdict);
         if (v.verdict === 'MIDDLE-HOLE' || v.verdict === 'MIDDLE-HOLE-PARTIAL' || v.verdict === 'TAIL-CUT') {
@@ -1913,7 +1891,7 @@ try { if (typeof window !== 'undefined') window.__aiCmSwallowSoft = swallowSoft;
 // оставшаяся секция ядра.
 //
 // Порядок подключения (core/background.js, registerSafe 'ai-cm-deepseek-intercept-v5',
-// document_start, world MAIN): utils/debug.js -> core/deepseek-diag.js ->
+// document_start, world MAIN): utils/debug.ts -> core/deepseek-diag.js ->
 // core/deepseek-netsync.js -> ЭТОТ ФАЙЛ -> core/deepseek-intercept.js. До связки на
 // window.AiCmDeepseekRefetch лежит только __bind; после связки ядро раздаёт 7 из 9
 // функций форвардерами по прежним именам (convIdFromHistoryUrl, convIdFromCompletionBody,
@@ -2333,7 +2311,7 @@ try { if (typeof window !== 'undefined') window.__aiCmSwallowSoft = swallowSoft;
 // снимка (K5) и emit-композиция (K3/K4), а lastDispatchSig/lastDispatchResult пишет сам
 // emit-гард O-22. Их переезд означал бы правку K3-K11 (запрещено рамками шага).
 // Порядок подключения (core/background.js, registerSafe 'ai-cm-deepseek-intercept-v7',
-// document_start, world MAIN): utils/debug.js -> core/deepseek-diag.js ->
+// document_start, world MAIN): utils/debug.ts -> core/deepseek-diag.js ->
 // core/deepseek-netsync.js -> core/deepseek-refetch.js -> core/deepseek-parse.js ->
 // ЭТОТ ФАЙЛ -> core/deepseek-intercept.js. До связки на window.AiCmDeepseekConv лежит
 // только __bind; после связки ядро раздаёт 2 из 3 тел форвардерами по прежним именам
@@ -2497,7 +2475,7 @@ try { if (typeof window !== 'undefined') window.__aiCmSwallowSoft = swallowSoft;
 // declaration ядра хойстятся, поэтому значения доступны на момент связки.
 //
 // Порядок подключения (core/background.js, registerSafe 'ai-cm-deepseek-intercept-v8',
-// document_start, world MAIN): utils/debug.js -> core/deepseek-diag.js ->
+// document_start, world MAIN): utils/debug.ts -> core/deepseek-diag.js ->
 // core/deepseek-netsync.js -> core/deepseek-refetch.js -> core/deepseek-parse.js ->
 // core/deepseek-conv.js -> ЭТОТ ФАЙЛ -> core/deepseek-intercept.js. До связки на
 // window.AiCmDeepseekEmit лежит только __bind; после связки ядро раздаёт 1 из 4 тел
@@ -2775,7 +2753,7 @@ try { if (typeof window !== 'undefined') window.__aiCmSwallowSoft = swallowSoft;
 // parseSSE/consumeSseResponse/ingestModelSettings — K6 (СЕКЦИЯ 9).
 //
 // Порядок подключения (core/background.js, registerSafe 'ai-cm-deepseek-intercept-v9',
-// document_start, world MAIN): utils/debug.js -> core/deepseek-diag.js ->
+// document_start, world MAIN): utils/debug.ts -> core/deepseek-diag.js ->
 // core/deepseek-netsync.js -> core/deepseek-refetch.js -> core/deepseek-parse.js ->
 // core/deepseek-conv.js -> core/deepseek-emit.js -> ЭТОТ ФАЙЛ ->
 // core/deepseek-intercept.js. До связки на window.AiCmDeepseekNet лежит только __bind.
@@ -3105,7 +3083,7 @@ try { if (typeof window !== 'undefined') window.__aiCmSwallowSoft = swallowSoft;
 // форвардеры D.4, emitBaseSnapshot — форвардер D.6. Итого 15 fn.
 //
 // Порядок подключения (core/background.js, registerSafe 'ai-cm-deepseek-intercept-v10',
-// document_start, world MAIN): utils/debug.js -> core/deepseek-diag.js ->
+// document_start, world MAIN): utils/debug.ts -> core/deepseek-diag.js ->
 // core/deepseek-netsync.js -> core/deepseek-refetch.js -> core/deepseek-parse.js ->
 // core/deepseek-conv.js -> core/deepseek-emit.js -> core/deepseek-net.js -> ЭТОТ ФАЙЛ ->
 // core/deepseek-intercept.js. До связки на window.AiCmDeepseekIngest лежит только __bind;
@@ -3583,7 +3561,7 @@ try { if (typeof window !== 'undefined') window.__aiCmSwallowSoft = swallowSoft;
     return true;
   }
 
-  // Канал диагностики: aiCmDiagWarn — глобал utils/debug.js (канал B); в модульных
+  // Канал диагностики: aiCmDiagWarn — глобал utils/debug.ts (канал B); в модульных
   // песочницах без него падаем на console.warn, но НИКОГДА не молчим в catch.
   function filesWarn(tag, msg, e) {
     // Канал B: bare console.warn запрещён стражем tests/no-bare-console-warn.test.js.
@@ -3595,7 +3573,7 @@ try { if (typeof window !== 'undefined') window.__aiCmSwallowSoft = swallowSoft;
     return (typeof v === 'string') ? v : '';
   }
 
-  // Строка диагностики под гейтом aiCmDebug (utils/debug.js сам решает, печатать ли).
+  // Строка диагностики под гейтом aiCmDebug (utils/debug.ts сам решает, печатать ли).
   // В срез-песочницах без хелпера молчим: диагностика не имеет права ломать догрузку.
   function filesDiag(tag, fields) {
     if (typeof aiCmDiagLine === 'function') aiCmDiagLine(tag, fields);
@@ -4410,7 +4388,7 @@ try { if (typeof window !== 'undefined') window.__aiCmSwallowSoft = swallowSoft;
 // parseSSE/consumeSseResponse/ingestModelSettings (fn-передачи в D.7).
 //
 // Порядок подключения (core/background.js, registerSafe 'ai-cm-deepseek-intercept-v11',
-// document_start, world MAIN): utils/debug.js -> core/deepseek-diag.js ->
+// document_start, world MAIN): utils/debug.ts -> core/deepseek-diag.js ->
 // core/deepseek-netsync.js -> core/deepseek-refetch.js -> core/deepseek-parse.js ->
 // core/deepseek-conv.js -> core/deepseek-emit.js -> core/deepseek-net.js ->
 // core/deepseek-ingest.js -> ЭТОТ ФАЙЛ -> core/deepseek-intercept.js.
@@ -6283,7 +6261,10 @@ if (typeof module !== 'undefined' && module.exports) {
   function initUI() {
     try {
 (() => {
+  var __defProp = Object.defineProperty;
+  var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
   var __getOwnPropNames = Object.getOwnPropertyNames;
+  var __hasOwnProp = Object.prototype.hasOwnProperty;
   var __require = /* @__PURE__ */ ((x) => typeof require !== "undefined" ? require : typeof Proxy !== "undefined" ? new Proxy(x, {
     get: (a, b) => (typeof require !== "undefined" ? require : a)[b]
   }) : x)(function(x) {
@@ -6305,58 +6286,224 @@ if (typeof module !== 'undefined' && module.exports) {
       throw mod = 0, e;
     }
   };
+  var __export = (target, all) => {
+    for (var name in all)
+      __defProp(target, name, { get: all[name], enumerable: true });
+  };
+  var __copyProps = (to, from, except, desc) => {
+    if (from && typeof from === "object" || typeof from === "function") {
+      for (let key of __getOwnPropNames(from))
+        if (!__hasOwnProp.call(to, key) && key !== except)
+          __defProp(to, key, { get: () => from[key], enumerable: !(desc = __getOwnPropDesc(from, key)) || desc.enumerable });
+    }
+    return to;
+  };
+  var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: true }), mod);
 
-  // ../utils/buildReferenceText.js
-  function cleanInline(s) {
-    s = s.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, "$1");
-    s = s.replace(/(\*\*|__)/g, "");
-    s = s.replace(/(?<![*\w])\*([^*\n]+)\*(?![\w*])/g, "$1");
-    s = s.replace(/(?<![\w_])\_([^_\n]+)\_(?![\w_])/g, "$1");
-    s = s.replace(/`/g, "");
-    return s;
+  // ../utils/gemini-dom-parser.ts
+  function stripAttachmentTokens(s) {
+    if (typeof s !== "string") return s;
+    return s.replace(ATTACH_TOKEN_RE, " ").replace(/[ \t\f\v]+/g, " ");
   }
-  function cleanLine(line) {
-    var s = String(line == null ? "" : line);
-    s = s.replace(/^#{1,6}\s+/, "");
-    s = s.replace(/^>\s?/, "");
-    s = s.replace(/^[-*+]\s+/, "");
-    return s;
-  }
-  function cleanText(text) {
-    var lines = String(text).split("\n");
-    var out = [];
-    for (var i = 0; i < lines.length; i++) {
-      var line = lines[i];
-      var trimmed = line.trim();
-      if (/^-{3,}$/.test(trimmed)) continue;
-      out.push(cleanInline(cleanLine(line)));
+  function attrString(el, names) {
+    var out = "";
+    for (var i = 0; i < names.length; i++) {
+      try {
+        var v = el.getAttribute ? el.getAttribute(names[i]) : null;
+        if (v) out += " " + v;
+      } catch (e) {
+      }
     }
-    return out.join("\n");
+    return out;
   }
-  function buildReferenceText(messages) {
-    var list = Array.isArray(messages) ? messages : [];
+  function classNameId(el) {
+    try {
+      return String(el.className || "") + " " + String(el.id || "");
+    } catch (e) {
+      return "";
+    }
+  }
+  function isHiddenContainer(el) {
+    var h = classNameId(el).toLowerCase();
+    return h.indexOf("cdk-visually-hidden") !== -1 || h.indexOf("cdk-live-announcer") !== -1;
+  }
+  function isThinkingContainer(el) {
+    if (THINK_RE.test(classNameId(el))) return true;
+    var label = attrString(el, ["aria-label", "title"]);
+    return THINKING_LABEL_RE.test(label);
+  }
+  function thinkingControlLabel(el) {
+    var label = attrString(el, ["aria-label", "title"]);
+    if (el.tagName && String(el.tagName).toLowerCase() === "button") {
+      try {
+        label += " " + (el.textContent || "");
+      } catch (e) {
+      }
+    }
+    return label;
+  }
+  function containsThinkingControl(node) {
+    var found = false;
+    (function scan(n, depth) {
+      if (found || depth > 4) return;
+      if (!n || n.nodeType !== 1) return;
+      if (THINKING_LABEL_RE.test(thinkingControlLabel(n))) {
+        found = true;
+        return;
+      }
+      var ch = n.childNodes;
+      for (var i = 0; i < ch.length; i++) scan(ch[i], depth + 1);
+    })(node, 0);
+    return found;
+  }
+  function containsTable(node) {
+    var el = node;
+    try {
+      return !!el.querySelector && !!el.querySelector("table");
+    } catch (e) {
+      return false;
+    }
+  }
+  function isThinkingPanel(node) {
+    if (isHiddenContainer(node) || isThinkingContainer(node)) return true;
+    if (containsTable(node)) return false;
+    return containsThinkingControl(node);
+  }
+  function cleanCell(el) {
+    var clone;
+    try {
+      clone = el.cloneNode(true);
+    } catch (e) {
+      return "";
+    }
+    try {
+      clone.querySelectorAll("script, style, button, svg").forEach(function(x) {
+        x.remove();
+      });
+    } catch (e) {
+    }
+    try {
+      return stripAttachmentTokens((clone.textContent || "").replace(/\s+/g, " ").trim());
+    } catch (e) {
+      return "";
+    }
+  }
+  function tableToMarkdown(tableEl) {
+    var rows = [];
+    try {
+      rows = tableEl.querySelectorAll("tr");
+    } catch (e) {
+      rows = [];
+    }
+    var lines = [];
+    for (var r = 0; r < rows.length; r++) {
+      var cells = rows[r].querySelectorAll("th, td");
+      var cellTexts = [];
+      for (var c = 0; c < cells.length; c++) {
+        cellTexts.push(cleanCell(cells[c]));
+      }
+      if (cellTexts.length === 0) continue;
+      lines.push("| " + cellTexts.join(" | ") + " |");
+    }
+    return lines.join("\n");
+  }
+  function extractGeminiResponse(root) {
     var parts = [];
-    for (var i = 0; i < list.length; i++) {
-      var msg = list[i] || {};
-      parts.push(cleanText(msg.text == null ? "" : msg.text));
+    var buf = [];
+    function flush() {
+      if (!buf.length) return;
+      var s = buf.join(" ");
+      buf = [];
+      s = s.replace(/\s+/g, " ").trim();
+      if (s) parts.push(s);
     }
-    return parts.join("\n\n");
+    function pushText(str) {
+      if (typeof str !== "string") return;
+      var t = stripAttachmentTokens(str.replace(/\s+/g, " ").trim());
+      if (t) buf.push(t);
+    }
+    function walk(node) {
+      if (!node) return;
+      var type = node.nodeType;
+      if (type === 3) {
+        pushText(node.nodeValue || "");
+        return;
+      }
+      if (type !== 1) return;
+      var el = node;
+      if (isThinkingPanel(el)) {
+        flush();
+        return;
+      }
+      var tag = (el.tagName || "").toUpperCase();
+      if (tag === "TABLE") {
+        flush();
+        var md = tableToMarkdown(el);
+        if (md) parts.push(md);
+        return;
+      }
+      if (BLOCK_TAGS[tag]) flush();
+      var children = node.childNodes;
+      for (var i2 = 0; i2 < children.length; i2++) {
+        walk(children[i2]);
+      }
+      if (BLOCK_TAGS[tag]) flush();
+    }
+    if (root) {
+      var rootChildren = root.childNodes;
+      for (var i = 0; i < rootChildren.length; i++) {
+        walk(rootChildren[i]);
+      }
+    }
+    flush();
+    var text = parts.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+    return { text, count: parts.length, parts };
   }
-  var init_buildReferenceText = __esm({
-    "../utils/buildReferenceText.js"() {
+  var THINK_RE, THINKING_LABEL_RE, ATTACH_TOKEN_RE, BLOCK_TAGS;
+  var init_gemini_dom_parser = __esm({
+    "../utils/gemini-dom-parser.ts"() {
+      THINK_RE = /think|thought/i;
+      THINKING_LABEL_RE = /thinking|\bthought\b|\bдумал\b/i;
+      ATTACH_TOKEN_RE = /\$AXzLiR[A-Za-z0-9+\/=]+/g;
+      BLOCK_TAGS = {
+        "P": 1,
+        "DIV": 1,
+        "SECTION": 1,
+        "ARTICLE": 1,
+        "UL": 1,
+        "OL": 1,
+        "LI": 1,
+        "H1": 1,
+        "H2": 1,
+        "H3": 1,
+        "H4": 1,
+        "H5": 1,
+        "H6": 1,
+        "BLOCKQUOTE": 1,
+        "PRE": 1,
+        "BR": 1,
+        "HR": 1,
+        "HEADER": 1,
+        "FOOTER": 1,
+        "MAIN": 1,
+        "ASIDE": 1,
+        "TR": 1,
+        "THEAD": 1,
+        "TBODY": 1
+      };
     }
   });
 
-  // ../utils/platform.js
+  // ../utils/platform.ts
   function aiCmIsFirefox() {
     try {
-      var api = typeof browser !== "undefined" && browser && browser.runtime ? browser : typeof chrome !== "undefined" && chrome && chrome.runtime ? chrome : null;
-      if (!api) return false;
-      if (api.runtime && typeof api.runtime.getURL === "function") {
-        return String(api.runtime.getURL("")).indexOf("moz-extension://") === 0;
+      var api2 = typeof browser !== "undefined" && browser && browser.runtime ? browser : typeof chrome !== "undefined" && chrome && chrome.runtime ? chrome : null;
+      if (!api2) return false;
+      if (api2.runtime && typeof api2.runtime.getURL === "function") {
+        return String(api2.runtime.getURL("")).indexOf("moz-extension://") === 0;
       }
-      if (typeof api.getURL === "function") {
-        return String(api.getURL("")).indexOf("moz-extension://") === 0;
+      if (typeof api2.getURL === "function") {
+        return String(api2.getURL("")).indexOf("moz-extension://") === 0;
       }
       return false;
     } catch (e) {
@@ -6364,11 +6511,11 @@ if (typeof module !== 'undefined' && module.exports) {
     }
   }
   var init_platform = __esm({
-    "../utils/platform.js"() {
+    "../utils/platform.ts"() {
     }
   });
 
-  // ../utils/debug.js
+  // ../utils/debug.ts
   function __aiCmSetDebugLogs(v) {
     DEBUG = !!v;
     try {
@@ -6401,7 +6548,7 @@ if (typeof module !== 'undefined' && module.exports) {
       return [];
     }
   }
-  function debugLog(level) {
+  function debugLog(level, ...rest) {
     var args = Array.prototype.slice.call(arguments, 1);
     try {
       var line = args.map(__aiCmStringifyArg).join(" ");
@@ -6421,14 +6568,14 @@ if (typeof module !== 'undefined' && module.exports) {
       (console[level] || console.log).apply(console, args);
     }
   }
-  function swallow(error, tag) {
+  function swallow2(error, tag) {
     try {
       if (typeof debugLog !== "function") return;
       debugLog("error", "[swallow][" + (tag || "unlabeled") + "]", error);
     } catch (eSwallow) {
     }
   }
-  function aiCmDiagOn() {
+  function aiCmDiagOn2() {
     try {
       if (typeof sessionStorage !== "undefined" && sessionStorage && sessionStorage.getItem("aiCmDebug") === "1") return true;
     } catch (eSess) {
@@ -6498,7 +6645,7 @@ if (typeof module !== 'undefined' && module.exports) {
     }
   }
   function aiCmDiagLine2(tag, fields) {
-    if (!aiCmDiagOn()) return false;
+    if (!aiCmDiagOn2()) return false;
     try {
       var parts = [];
       var f = fields || {};
@@ -6512,8 +6659,8 @@ if (typeof module !== 'undefined' && module.exports) {
     }
     return true;
   }
-  function aiCmDiagDownload2(trigger, content, fileName, extra) {
-    if (!aiCmDiagOn()) return false;
+  function aiCmDiagDownload(trigger, content, fileName, extra) {
+    if (!aiCmDiagOn2()) return false;
     var e = extra || {};
     var url = "";
     try {
@@ -6533,8 +6680,8 @@ if (typeof module !== 'undefined' && module.exports) {
       src: aiCmDiagStack(1)
     });
   }
-  function aiCmDiagDownloadBlocked2(trigger, content, fileName, reason, extra) {
-    if (!aiCmDiagOn()) return false;
+  function aiCmDiagDownloadBlocked(trigger, content, fileName, reason, extra) {
+    if (!aiCmDiagOn2()) return false;
     var e = extra || {};
     var url = "";
     try {
@@ -6585,7 +6732,7 @@ if (typeof module !== 'undefined' && module.exports) {
       return void 0;
     }
     try {
-      if (typeof aiCmDiagOn !== "function" || !aiCmDiagOn()) return;
+      if (typeof aiCmDiagOn2 !== "function" || !aiCmDiagOn2()) return;
       console.log("[AI CM][warn][" + label + "] " + text, detail);
     } catch (eWarnPrint) {
       return void 0;
@@ -6593,12 +6740,12 @@ if (typeof module !== 'undefined' && module.exports) {
   }
   var DEBUG, __aiCmLogRing, __aiCmLogRingMax;
   var init_debug = __esm({
-    "../utils/debug.js"() {
+    "../utils/debug.ts"() {
       DEBUG = false;
       __aiCmLogRing = [];
       __aiCmLogRingMax = 200;
       try {
-        if (typeof window !== "undefined") window.__aiCmSwallow = swallow;
+        if (typeof window !== "undefined") window.__aiCmSwallow = swallow2;
       } catch (eSwallowExport) {
       }
       try {
@@ -6609,1308 +6756,14 @@ if (typeof module !== 'undefined' && module.exports) {
     }
   });
 
-  // ../utils/google-search-folwr-parser.js
-  var require_google_search_folwr_parser = __commonJS({
-    "../utils/google-search-folwr-parser.js"(exports, module) {
-      (function() {
-        function decodeEntities(s) {
-          if (!s) return "";
-          var out = String(s);
-          out = out.replace(new RegExp("&quot;", "g"), '"');
-          out = out.replace(new RegExp("&amp;", "g"), "&");
-          out = out.replace(new RegExp("&#39;", "g"), "'");
-          out = out.replace(new RegExp("&lt;", "g"), "<");
-          out = out.replace(new RegExp("&gt;", "g"), ">");
-          out = out.replace(new RegExp("&nbsp;", "g"), " ");
-          out = out.replace(/&#(\d+);/g, function(m, d) {
-            try {
-              return String.fromCharCode(parseInt(d, 10));
-            } catch (e) {
-              return m;
-            }
-          });
-          return out;
-        }
-        var FENCE_RE = /(`{3,})[\s\S]*?\1/g;
-        function mapOutsideFences(s, fn) {
-          var str = String(s == null ? "" : s);
-          var out = "";
-          var last = 0;
-          var m;
-          FENCE_RE.lastIndex = 0;
-          while ((m = FENCE_RE.exec(str)) !== null) {
-            out += fn(str.slice(last, m.index)) + m[0];
-            last = m.index + m[0].length;
-          }
-          return out + fn(str.slice(last));
-        }
-        function stripTagsSeg(seg) {
-          return String(seg).replace(/<script[\s\S]*?<\/script>/gi, " ").replace(/<style[\s\S]*?<\/style>/gi, " ").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ");
-        }
-        function stripTags(html) {
-          if (!html) return "";
-          return mapOutsideFences(html, stripTagsSeg).replace(/^\s+/, "").replace(/\s+$/, "");
-        }
-        function sanitizeAssistantSeg(seg) {
-          return String(seg).replace(/<script[\s\S]*?<\/script>/gi, " ").replace(/<style[\s\S]*?<\/style>/gi, " ").replace(/<[^>]+>/g, " ").replace(/[ \t\f\v]+/g, " ").split("\n").map(function(ln) {
-            return ln.trim();
-          }).join("\n").replace(/\n{3,}/g, "\n\n");
-        }
-        function sanitizeAssistant(s) {
-          if (!s) return "";
-          return mapOutsideFences(s, sanitizeAssistantSeg).replace(/^\s+/, "").replace(/\s+$/, "");
-        }
-        function tableCellText(cellEl) {
-          var clone = cellEl.cloneNode(true);
-          clone.querySelectorAll("script, style, button, svg").forEach(function(el) {
-            el.remove();
-          });
-          return stripTags(decodeEntities(clone.innerHTML)).trim();
-        }
-        function tableToMarkdown(tableEl) {
-          var rows = tableEl.querySelectorAll("tr");
-          var lines = [];
-          for (var r = 0; r < rows.length; r++) {
-            var cells = rows[r].querySelectorAll("th, td");
-            var cellTexts = [];
-            for (var c = 0; c < cells.length; c++) {
-              cellTexts.push(tableCellText(cells[c]));
-            }
-            if (cellTexts.length === 0) continue;
-            lines.push("| " + cellTexts.join(" | ") + " |");
-          }
-          return lines.join("\n");
-        }
-        function isQuestionHeading(el) {
-          return el.tagName === "H2" && el.className && String(el.className).indexOf("iMqumd") !== -1;
-        }
-        var CODE_CONTAINER_SEL = 'pre, code, [class*="code-block"], [class*="codeBlock"], [class*="codeblock"]';
-        var CODE_LANG_RE = /^[A-Za-z][A-Za-z0-9+#._-]{0,19}$/;
-        function classOf(el) {
-          try {
-            return String(el && el.className || "");
-          } catch (e) {
-            return "";
-          }
-        }
-        function isCodeLikeNode(el) {
-          if (!el || !el.tagName) return false;
-          var tag = String(el.tagName).toUpperCase();
-          return tag === "PRE" || tag === "CODE" || /code-?block/i.test(classOf(el));
-        }
-        function codeTextOf(el) {
-          if (!el || typeof el.cloneNode !== "function") return "";
-          var clone;
-          try {
-            clone = el.cloneNode(true);
-          } catch (e) {
-            return "";
-          }
-          try {
-            var junk = clone.querySelectorAll("script, style, button, svg");
-            for (var i = 0; i < junk.length; i++) {
-              if (junk[i].parentNode) junk[i].parentNode.removeChild(junk[i]);
-            }
-            var brs = clone.querySelectorAll("br");
-            var doc = clone.ownerDocument || (typeof document !== "undefined" ? document : null);
-            for (var b = 0; b < brs.length; b++) {
-              if (brs[b].parentNode && doc && doc.createTextNode) {
-                brs[b].parentNode.replaceChild(doc.createTextNode("\n"), brs[b]);
-              }
-            }
-          } catch (e2) {
-          }
-          var txt = "";
-          try {
-            txt = String(clone.textContent || "");
-          } catch (e3) {
-            txt = "";
-          }
-          if (txt.indexOf("\n") === -1 && clone.children && clone.children.length > 1) {
-            var allBlock = true;
-            for (var k = 0; k < clone.children.length; k++) {
-              if (!/^(DIV|P|LI|TR|SECTION|ARTICLE|FIGURE|BLOCKQUOTE|H[1-6])$/.test(String(clone.children[k].tagName || "").toUpperCase())) {
-                allBlock = false;
-                break;
-              }
-            }
-            if (allBlock) {
-              var lines = [];
-              for (var k2 = 0; k2 < clone.children.length; k2++) {
-                lines.push(String(clone.children[k2].textContent || ""));
-              }
-              var joined = lines.join("\n");
-              if (joined.replace(/\s+/g, "")) txt = joined;
-            }
-          }
-          return txt.replace(/[ \t]+$/gm, "").replace(/^\n+/, "").replace(/\s+$/, "");
-        }
-        function codeBodyElement(el) {
-          try {
-            var inner = el.querySelectorAll ? el.querySelectorAll("pre, code") : null;
-            if (inner && inner.length) return inner[inner.length - 1];
-          } catch (e) {
-          }
-          return el;
-        }
-        function detectCodeLang(el, langHint) {
-          if (langHint != null && CODE_LANG_RE.test(String(langHint).trim())) return String(langHint).trim();
-          var attrNames = ["code-lang", "data-lang", "data-code-lang"];
-          try {
-            for (var a = 0; a < attrNames.length; a++) {
-              var v = el && el.getAttribute ? el.getAttribute(attrNames[a]) : null;
-              if (v && CODE_LANG_RE.test(String(v).trim())) return String(v).trim();
-            }
-          } catch (e) {
-          }
-          var m = classOf(el).match(/(?:^|[\s_-])(?:language|lang)[-_]([A-Za-z][A-Za-z0-9+#._-]{0,19})/);
-          if (m && CODE_LANG_RE.test(m[1])) return m[1];
-          var cur = el;
-          for (var up = 0; cur && up < 4; up++) {
-            var prev = cur.previousSibling;
-            for (var hops = 0; prev && hops < 3; hops++) {
-              var t = "";
-              try {
-                t = String(prev.textContent || "").trim();
-              } catch (e2) {
-                t = "";
-              }
-              if (t) {
-                if (CODE_LANG_RE.test(t)) return t;
-                break;
-              }
-              prev = prev.previousSibling;
-            }
-            cur = cur.parentNode;
-          }
-          return "";
-        }
-        function isCodeBlockElement(el) {
-          if (!el || !el.tagName) return false;
-          var tag = String(el.tagName).toUpperCase();
-          if (/code-?block/i.test(classOf(el))) return true;
-          if (tag === "PRE") return true;
-          if (tag !== "CODE") return false;
-          if (/(?:^|[\s_-])(?:language|lang)[-_]/.test(classOf(el))) return true;
-          return codeTextOf(el).indexOf("\n") !== -1;
-        }
-        function renderCodeBlock(node, langHint) {
-          if (!node) return "";
-          var body = codeBodyElement(node);
-          var text = codeTextOf(body);
-          if (!text) text = codeTextOf(node);
-          if (!text) return "";
-          var lang = detectCodeLang(node, langHint) || detectCodeLang(body, langHint);
-          var fence = "```";
-          while (text.indexOf(fence) !== -1) fence += "`";
-          return fence + lang + "\n" + text + "\n" + fence;
-        }
-        function answerTextOf(node) {
-          if (!node) return "";
-          if (isCodeBlockElement(node)) return renderCodeBlock(node);
-          if (typeof node.cloneNode !== "function") return "";
-          var clone;
-          try {
-            clone = node.cloneNode(true);
-          } catch (e) {
-            return "";
-          }
-          try {
-            var junk = clone.querySelectorAll("script, style, button, svg");
-            for (var i = 0; i < junk.length; i++) {
-              if (junk[i].parentNode) junk[i].parentNode.removeChild(junk[i]);
-            }
-            var found = clone.querySelectorAll ? clone.querySelectorAll(CODE_CONTAINER_SEL) : [];
-            var outer = [];
-            for (var f = 0; f < found.length; f++) {
-              if (!isCodeBlockElement(found[f])) continue;
-              var nested = false;
-              for (var o = 0; o < outer.length; o++) {
-                if (outer[o].contains && outer[o].contains(found[f])) {
-                  nested = true;
-                  break;
-                }
-              }
-              if (!nested) outer.push(found[f]);
-            }
-            var doc = clone.ownerDocument || (typeof document !== "undefined" ? document : null);
-            for (var c = outer.length - 1; c >= 0; c--) {
-              var fenced = renderCodeBlock(outer[c]);
-              if (!fenced || !outer[c].parentNode || !doc || !doc.createTextNode) continue;
-              outer[c].parentNode.replaceChild(doc.createTextNode("\n" + fenced + "\n"), outer[c]);
-            }
-          } catch (e2) {
-          }
-          var txt = "";
-          try {
-            txt = String(clone.textContent || "");
-          } catch (e3) {
-            txt = "";
-          }
-          return txt.trim();
-        }
-        function answerDomNodes(root) {
-          var doc = root || (typeof document !== "undefined" ? document : null);
-          if (!doc || typeof doc.querySelectorAll !== "function") return [];
-          var nodes = doc.querySelectorAll(".n6owBd.awi2gc, " + CODE_CONTAINER_SEL);
-          var out = [];
-          for (var i = 0; i < nodes.length; i++) {
-            var el = nodes[i];
-            if (isCodeLikeNode(el) && !isCodeBlockElement(el)) continue;
-            var nested = false;
-            for (var j = 0; j < out.length; j++) {
-              if (out[j].contains && out[j].contains(el)) {
-                nested = true;
-                break;
-              }
-            }
-            if (nested) continue;
-            out.push(el);
-          }
-          return out;
-        }
-        var WEB_SEARCH_CHIP_RE = /(?:Самые популярные результаты веб-поиска по этой теме|People also search|Related searches|Похожие запросы|Связанные запросы)/i;
-        var FOREIGN_QUESTION_RE = /^Вы сказали:\s*"/;
-        function nodeText(node) {
-          try {
-            return (node.textContent || "").trim();
-          } catch (e) {
-            return "";
-          }
-        }
-        function isWebSearchChipNode(node) {
-          return WEB_SEARCH_CHIP_RE.test(nodeText(node));
-        }
-        function isForeignQuestionNode(node) {
-          return FOREIGN_QUESTION_RE.test(nodeText(node));
-        }
-        function listItemToMarkdown(liEl) {
-          var clone = liEl.cloneNode(true);
-          clone.querySelectorAll("script, style, button, svg").forEach(function(el) {
-            el.remove();
-          });
-          var label = null;
-          var b = clone.querySelector("strong, b");
-          if (b) {
-            label = (b.textContent || "").replace(/\s+/g, " ").trim();
-            b.remove();
-          }
-          var rest = stripTags(decodeEntities(clone.innerHTML)).trim();
-          if (label) {
-            return "- **" + label + "**" + (rest ? ": " + rest : "");
-          }
-          return rest ? "- " + rest : "";
-        }
-        function listToText(listEl) {
-          var items = listEl.querySelectorAll("li");
-          var lines = [];
-          for (var r = 0; r < items.length; r++) {
-            var t = listItemToMarkdown(items[r]);
-            if (t) lines.push(t);
-          }
-          return lines.join("\n");
-        }
-        function gatherAnswerContentNodes(doc) {
-          var raw = doc.querySelectorAll('.n6owBd.awi2gc, table, [role="heading"], h2, h3, h4, ul, ol, li, [role="list"], [role="listitem"], ' + CODE_CONTAINER_SEL);
-          var out = [];
-          for (var i = 0; i < raw.length; i++) {
-            var el = raw[i];
-            if (isQuestionHeading(el)) continue;
-            if (isCodeLikeNode(el) && !isCodeBlockElement(el)) continue;
-            var nested = false;
-            for (var j = 0; j < out.length; j++) {
-              if (out[j].contains && out[j].contains(el)) {
-                nested = true;
-                break;
-              }
-            }
-            if (nested) continue;
-            out.push(el);
-          }
-          return out;
-        }
-        function assignContentToTurns(turnsArr, contentNodes) {
-          var answers = [];
-          var skipAfterChip = [];
-          for (var ti = 0; ti < turnsArr.length; ti++) {
-            answers[ti] = [];
-            skipAfterChip[ti] = false;
-          }
-          for (var n = 0; n < contentNodes.length; n++) {
-            var node = contentNodes[n];
-            var assigned = -1;
-            for (var t2 = 0; t2 < turnsArr.length; t2++) {
-              if (turnsArr[t2].compareDocumentPosition(node) & Node.DOCUMENT_POSITION_FOLLOWING) {
-                assigned = t2;
-              } else {
-                break;
-              }
-            }
-            if (assigned < 0) continue;
-            if (isForeignQuestionNode(node)) continue;
-            if (isWebSearchChipNode(node)) {
-              skipAfterChip[assigned] = true;
-              continue;
-            }
-            if (skipAfterChip[assigned]) continue;
-            var part = null;
-            if (node.tagName === "TABLE") {
-              var md = tableToMarkdown(node);
-              if (md) part = md;
-            } else if (node.tagName === "UL" || node.tagName === "OL") {
-              var lt = listToText(node);
-              if (lt) part = lt;
-            } else {
-              var ct = answerTextOf(node).trim();
-              if (ct) part = ct;
-            }
-            if (part) answers[assigned].push(part);
-          }
-          return answers;
-        }
-        function readThreadId(doc) {
-          try {
-            var el = doc.querySelector("[data-session-thread-id]");
-            if (el) {
-              var v = el.getAttribute("data-session-thread-id");
-              return v ? v.trim() : "";
-            }
-          } catch (e) {
-          }
-          return "";
-        }
-        function parseGoogleFolwrOpen(htmlText) {
-          var turns = [];
-          var messages = [];
-          if (!htmlText || typeof htmlText !== "string") {
-            return { threadId: "", turns, messages, text: "", count: 0 };
-          }
-          var doc;
-          try {
-            doc = new DOMParser().parseFromString(htmlText, "text/html");
-          } catch (e) {
-            return { threadId: "", turns, messages, text: "", count: 0 };
-          }
-          var threadId = readThreadId(doc);
-          var turnEls = doc.querySelectorAll('[data-scope-id="turn"]');
-          var allAimfl = doc.querySelectorAll('[data-subtree="aimfl"]');
-          var turnsArr = Array.prototype.slice.call(turnEls);
-          var tgQuestions = [];
-          try {
-            var tgRe = /<!--TgQPHd\|[\s\S]*?-->/g;
-            var m;
-            while ((m = tgRe.exec(htmlText)) !== null) {
-              var c = decodeEntities(m[0]);
-              var longRe = /"([^"]{20,})"/g;
-              var lm;
-              var found = null;
-              while ((lm = longRe.exec(c)) !== null) {
-                var cand = lm[1];
-                if (cand.indexOf("\\u0026") !== -1) continue;
-                if (cand.indexOf("OLOoOd") !== -1) continue;
-                if (cand.indexOf("dRog6c") !== -1) continue;
-                if (cand.indexOf("TgQPHd") !== -1) continue;
-                if (!/[а-яёА-ЯЁ]/.test(cand) && cand.indexOf(" ") === -1) continue;
-                found = cand;
-                break;
-              }
-              tgQuestions.push(found);
-            }
-          } catch (e) {
-            swallowSoft(e, "gsa-utils:parseGoogleFolwrOpen-tgqphd");
-          }
-          var contentNodes = gatherAnswerContentNodes(doc);
-          var answers = assignContentToTurns(turnsArr, contentNodes);
-          for (var i = 0; i < turnsArr.length; i++) {
-            var turn = turnsArr[i];
-            var question = null;
-            var h2 = turn.querySelector("h2.iMqumd");
-            if (h2) {
-              var raw = (h2.textContent || "").trim();
-              var qm = raw.match(/^Вы сказали:\s*"([\s\S]*)"$/);
-              question = qm ? qm[1].trim() : raw;
-            }
-            var assistantText = answers[i].length > 0 ? answers[i].join("\n\n") : null;
-            if (!assistantText) {
-              var nestedAimfl = turn.querySelector('[data-subtree="aimfl"]');
-              if (nestedAimfl) {
-                var nat = (nestedAimfl.textContent || "").trim();
-                if (nat) assistantText = nat;
-              }
-            }
-            if (!assistantText && allAimfl[i]) {
-              var at = (allAimfl[i].textContent || "").trim();
-              if (at) assistantText = at;
-            }
-            if (!question && tgQuestions[i]) question = tgQuestions[i];
-            turns.push({
-              id: turn.getAttribute && turn.getAttribute("jsuid") || "idx" + i,
-              userText: question || null,
-              assistantText: assistantText || null
-            });
-          }
-          if (turns.length === 0) {
-            var folifAnswer = null;
-            for (var aa = 0; aa < allAimfl.length; aa++) {
-              var at2 = (allAimfl[aa].textContent || "").trim();
-              if (at2) {
-                folifAnswer = at2;
-                break;
-              }
-            }
-            if (!folifAnswer && contentNodes.length > 0) {
-              var firstNode = contentNodes[0];
-              if (firstNode.tagName === "TABLE") {
-                folifAnswer = tableToMarkdown(firstNode);
-              } else {
-                folifAnswer = answerTextOf(firstNode).trim() || null;
-              }
-            }
-            var folifQuestion = tgQuestions.length > 0 ? tgQuestions[0] : null;
-            if (folifQuestion || folifAnswer) {
-              turns.push({ id: "folif_" + Date.now(), userText: folifQuestion, assistantText: folifAnswer });
-            }
-          }
-          for (var t = 0; t < turns.length; t++) {
-            var t2 = turns[t];
-            if (t2.userText) messages.push({ role: "user", text: stripTags(decodeEntities(t2.userText)) });
-            if (t2.assistantText) messages.push({ role: "assistant", text: sanitizeAssistant(t2.assistantText) });
-          }
-          var text = "";
-          for (var mi = 0; mi < messages.length; mi++) {
-            text += (mi > 0 ? "\n" : "") + messages[mi].text;
-          }
-          return { threadId, turns, messages, text, count: messages.length };
-        }
-        function countTurnContainers(htmlText) {
-          if (!htmlText || typeof htmlText !== "string") return 0;
-          try {
-            var doc = new DOMParser().parseFromString(htmlText, "text/html");
-            return doc.querySelectorAll('[data-scope-id="turn"]').length;
-          } catch (e) {
-            return 0;
-          }
-        }
-        function extractTurnsFromDocument(doc) {
-          if (!doc || typeof doc.querySelectorAll !== "function") return [];
-          var turns = [];
-          try {
-            var turnEls = doc.querySelectorAll('[data-scope-id="turn"]');
-            var allAimfl = doc.querySelectorAll('[data-subtree="aimfl"]');
-            var turnsArr = Array.prototype.slice.call(turnEls);
-            var questions = [];
-            for (var i = 0; i < turnsArr.length; i++) {
-              var h2 = turnsArr[i].querySelector("h2.iMqumd");
-              var q = null;
-              if (h2) {
-                var raw = (h2.textContent || "").trim();
-                var m = raw.match(/^Вы сказали:\s*"([\s\S]*)"$/);
-                q = m ? m[1].trim() : raw;
-              }
-              questions.push(q);
-            }
-            var answers = [];
-            for (var t = 0; t < turnsArr.length; t++) answers[t] = [];
-            var blocks = answerDomNodes(doc);
-            for (var b = 0; b < blocks.length; b++) {
-              var blk = blocks[b];
-              var assigned = -1;
-              for (var t2 = 0; t2 < turnsArr.length; t2++) {
-                if (turnsArr[t2].compareDocumentPosition(blk) & Node.DOCUMENT_POSITION_FOLLOWING) assigned = t2;
-                else break;
-              }
-              if (assigned >= 0 && assigned < turnsArr.length) {
-                var txt = answerTextOf(blk).trim();
-                if (txt) answers[assigned].push(txt);
-              }
-            }
-            for (var k = 0; k < turnsArr.length; k++) {
-              var joined = answers[k].length ? answers[k].join("\n\n") : null;
-              if (!joined && allAimfl[k]) {
-                var at = (allAimfl[k].textContent || "").trim();
-                if (at) joined = at;
-              }
-              turns.push({
-                id: turnsArr[k].getAttribute && turnsArr[k].getAttribute("jsuid") || "idx" + k,
-                userText: questions[k] || null,
-                assistantText: joined || null
-              });
-            }
-          } catch (e) {
-            swallowSoft(e, "gsa-utils:extractTurnsFromDocument");
-          }
-          return turns;
-        }
-        function extractContinuationToken(htmlText) {
-          if (!htmlText || typeof htmlText !== "string") return null;
-          try {
-            var doc = new DOMParser().parseFromString(htmlText, "text/html");
-            var els = doc.querySelectorAll("[data-mstk]");
-            var last = null;
-            for (var i = 0; i < els.length; i++) {
-              var v = els[i].getAttribute("data-mstk");
-              if (v) last = v.trim();
-            }
-            return last;
-          } catch (e) {
-            return null;
-          }
-        }
-        function normalizeTurnKeyPart(s) {
-          return String(s == null ? "" : s).toLowerCase().replace(/\u00a0/g, " ").replace(/[^a-zа-яё0-9]+/g, "");
-        }
-        function isAnswerWrapperTail(tail) {
-          var t = String(tail == null ? "" : tail);
-          var body = t.replace(/^["»”']{0,2}/, "").replace(/^[\s.,:;-]{0,4}/, "");
-          return body.replace(/\s+/g, "").length > 0;
-        }
-        var QUESTION_ASK_RE = /^(?:в\s+)?(?:ответ(?:е)?(?:\s+на\s+вопрос)?|на\s+вопрос|вопрос)\s*:?\s*/i;
-        function wrapperPrefix(text) {
-          var s = String(text == null ? "" : text);
-          var head = s.slice(0, 96);
-          var at = head.indexOf(":");
-          if (at === -1) return null;
-          var after = head.slice(at + 1);
-          var m = /^\s*"/.exec(after);
-          if (!m) return null;
-          return s.slice(0, at + 1 + m[0].length);
-        }
-        function answerWrapperParts(text) {
-          var s = String(text == null ? "" : text);
-          var prefix = wrapperPrefix(s);
-          if (!prefix) return null;
-          var rest = s.slice(prefix.length);
-          var close = rest.indexOf('"');
-          if (close === -1) return null;
-          var tail = rest.slice(close + 1);
-          if (!isAnswerWrapperTail(tail)) return null;
-          var question = rest.slice(0, close).trim();
-          if (!question) return null;
-          var body = tail.replace(/^["»”']{0,2}/, "").replace(/^[\s.,:;-]+/, "");
-          if (!body) return null;
-          return { question, body };
-        }
-        function canonicalAnswerBody(text) {
-          var wrapper = answerWrapperParts(text);
-          if (wrapper) return wrapper.body;
-          var s = String(text == null ? "" : text);
-          try {
-            var q = QUESTION_ASK_RE.exec(s);
-            if (q) {
-              var rest2 = s.slice(q[0].length);
-              var close2 = rest2.indexOf('"?');
-              if (close2 !== -1 && close2 < 200) {
-                var body2 = rest2.slice(close2 + 2).replace(/^[\s.,:;-]+/, "");
-                if (body2) s = body2;
-              }
-            }
-          } catch (e) {
-            return String(text == null ? "" : text);
-          }
-          return s;
-        }
-        function turnIdentityParts(turn) {
-          if (!turn) return { u: "", a: "" };
-          var wrapper = answerWrapperParts(turn.assistantText);
-          var u = normalizeTurnKeyPart(turn.userText);
-          if (!u && wrapper) u = normalizeTurnKeyPart(wrapper.question);
-          var a = normalizeTurnKeyPart(wrapper ? wrapper.body : canonicalAnswerBody(turn.assistantText));
-          return { u, a };
-        }
-        function canonicalTurnKeyOf(turn) {
-          if (!turn) return "";
-          var parts = turnIdentityParts(turn);
-          return parts.u + "||" + parts.a;
-        }
-        function canonicalizeTurnForThread(turn) {
-          if (!turn) return turn;
-          var question = turn.userText == null ? "" : String(turn.userText).trim();
-          if (!question) {
-            var wrapper = answerWrapperParts(turn.assistantText);
-            if (wrapper) question = wrapper.question;
-          }
-          return {
-            id: turn.id,
-            userText: question || null,
-            assistantText: turn.assistantText == null ? null : turn.assistantText
-          };
-        }
-        function isBetterTurn(candidate, current) {
-          if (!current) return true;
-          var la = String(candidate && candidate.assistantText || "").length;
-          var lb = String(current && current.assistantText || "").length;
-          if (la !== lb) return la > lb;
-          return String(candidate && candidate.userText || "").length > String(current && current.userText || "").length;
-        }
-        function turnRecord(t, idFallback) {
-          return {
-            id: t && t.id != null ? t.id : idFallback,
-            userText: t && t.userText || null,
-            assistantText: t && t.assistantText || null
-          };
-        }
-        var PREFIX_MIN_CHARS = 12;
-        var PREFIX_FUZZY_RATIO = 0.8;
-        function bodiesPrefixCompatible(a, b) {
-          var x = String(a == null ? "" : a);
-          var y = String(b == null ? "" : b);
-          if (!x || !y) return false;
-          if (x === y) return true;
-          var n = Math.min(x.length, y.length);
-          if (n < PREFIX_MIN_CHARS) return false;
-          var common = 0;
-          while (common < n && x.charCodeAt(common) === y.charCodeAt(common)) common++;
-          if (common === n) return true;
-          return common / n >= PREFIX_FUZZY_RATIO;
-        }
-        function isFullerTurn(candidate, current) {
-          var la = turnIdentityParts(candidate).a.length;
-          var lb = turnIdentityParts(current).a.length;
-          if (la !== lb) return la > lb;
-          return isBetterTurn(candidate, current);
-        }
-        var PARAGRAPH_PERMUTATION_MIN = 2;
-        function answerBodyParagraphs(turn) {
-          var wrapper = answerWrapperParts(turn && turn.assistantText);
-          var body = wrapper ? wrapper.body : canonicalAnswerBody(turn && turn.assistantText);
-          var lines = String(body == null ? "" : body).split(String.fromCharCode(10));
-          var out = [];
-          var cur = "";
-          for (var i = 0; i < lines.length; i++) {
-            var line = lines[i];
-            if (line.trim() === "") {
-              var p = normalizeTurnKeyPart(cur);
-              if (p) out.push(p);
-              cur = "";
-              continue;
-            }
-            cur = cur ? cur + String.fromCharCode(10) + line : line;
-          }
-          var tail = normalizeTurnKeyPart(cur);
-          if (tail) out.push(tail);
-          return out;
-        }
-        function bodiesParagraphPermutation(aTurn, bTurn) {
-          var pa = answerBodyParagraphs(aTurn);
-          var pb = answerBodyParagraphs(bTurn);
-          if (pa.length < PARAGRAPH_PERMUTATION_MIN || pa.length !== pb.length) return false;
-          pa.sort();
-          pb.sort();
-          for (var i = 0; i < pa.length; i++) {
-            if (pa[i] !== pb[i]) return false;
-          }
-          return true;
-        }
-        function findPrefixCompatibleIndex(turns, turn) {
-          var parts = turnIdentityParts(turn);
-          if (!parts.u || !parts.a) return -1;
-          for (var i = 0; i < turns.length; i++) {
-            var other = turnIdentityParts(turns[i]);
-            if (other.u !== parts.u) continue;
-            if (bodiesPrefixCompatible(other.a, parts.a)) return i;
-            if (other.a.length === parts.a.length && bodiesParagraphPermutation(turns[i], turn)) return i;
-          }
-          return -1;
-        }
-        function reindexTurnKey(byKey, turns, at) {
-          var k;
-          for (k in byKey) {
-            if (byKey[k] === at) delete byKey[k];
-          }
-          var key = canonicalTurnKeyOf(turns[at]);
-          if (key !== "||") byKey[key] = at;
-        }
-        function mergeTurnsById(baseTurns, extraTurns) {
-          baseTurns = Array.isArray(baseTurns) ? baseTurns : [];
-          extraTurns = Array.isArray(extraTurns) ? extraTurns : [];
-          var byId = {};
-          var byKey = {};
-          var out = [];
-          function add(t) {
-            if (!t) return;
-            var id = t.id != null ? String(t.id) : "x" + out.length;
-            var key = canonicalTurnKeyOf(t);
-            var hasId = Object.prototype.hasOwnProperty.call(byId, id);
-            var hasKey = key !== "||" && Object.prototype.hasOwnProperty.call(byKey, key);
-            var at = hasId ? byId[id] : hasKey ? byKey[key] : findPrefixCompatibleIndex(out, t);
-            if (at !== -1) {
-              var richer = hasId || hasKey ? isBetterTurn(t, out[at]) : isFullerTurn(t, out[at]);
-              if (richer) {
-                out[at] = turnRecord(t, out[at].id);
-                reindexTurnKey(byKey, out, at);
-              }
-              return;
-            }
-            byId[id] = out.length;
-            if (key !== "||") byKey[key] = out.length;
-            out.push(turnRecord(t, id));
-          }
-          var i;
-          for (i = 0; i < baseTurns.length; i++) add(baseTurns[i]);
-          for (i = 0; i < extraTurns.length; i++) add(extraTurns[i]);
-          return out;
-        }
-        function mergeTurnsMonotone(baseTurns, extraTurns) {
-          return mergeTurnsById(baseTurns, extraTurns);
-        }
-        function mergeTurnsByKey(baseTurns, extraTurns) {
-          baseTurns = Array.isArray(baseTurns) ? baseTurns : [];
-          extraTurns = Array.isArray(extraTurns) ? extraTurns : [];
-          var byKey = {};
-          var out = [];
-          function add(t) {
-            if (!t) return;
-            var key = canonicalTurnKeyOf(t);
-            if (key === "||") return;
-            var hasKey = Object.prototype.hasOwnProperty.call(byKey, key);
-            var at = hasKey ? byKey[key] : findPrefixCompatibleIndex(out, t);
-            if (at === -1) {
-              byKey[key] = out.length;
-              out.push(turnRecord(t, "x" + out.length));
-              return;
-            }
-            var richer = hasKey ? isBetterTurn(t, out[at]) : isFullerTurn(t, out[at]);
-            if (richer) {
-              out[at] = turnRecord(t, out[at].id);
-              reindexTurnKey(byKey, out, at);
-            }
-          }
-          for (var i = 0; i < baseTurns.length; i++) add(baseTurns[i]);
-          for (var j = 0; j < extraTurns.length; j++) add(extraTurns[j]);
-          return out;
-        }
-        function dedupeTurns(turns) {
-          var list = Array.isArray(turns) ? turns : [];
-          var byKey = {};
-          var out = [];
-          for (var i = 0; i < list.length; i++) {
-            var t = list[i];
-            if (!t) continue;
-            var key = canonicalTurnKeyOf(t);
-            var hasKey = key !== "||" && Object.prototype.hasOwnProperty.call(byKey, key);
-            var at = hasKey ? byKey[key] : findPrefixCompatibleIndex(out, t);
-            if (at === -1) {
-              if (key !== "||") byKey[key] = out.length;
-              out.push(t);
-              continue;
-            }
-            var richer = hasKey ? isBetterTurn(t, out[at]) : isFullerTurn(t, out[at]);
-            if (richer) {
-              out[at] = t;
-              reindexTurnKey(byKey, out, at);
-            }
-          }
-          return out;
-        }
-        function classifyFolwrContinuation(input) {
-          var i = input || {};
-          var ok = i.ok === true;
-          var status = i.status == null ? 0 : i.status;
-          var bodyLength = typeof i.bodyLength === "number" && i.bodyLength >= 0 ? i.bodyLength : 0;
-          var newTurns = typeof i.newTurns === "number" && i.newTurns > 0 ? i.newTurns : 0;
-          var cursor = i.cursor ? String(i.cursor) : null;
-          var sentCursor = i.sentCursor ? String(i.sentCursor) : null;
-          var cursorRepeated = !!(cursor && sentCursor && cursor === sentCursor);
-          var kind;
-          var complete, canContinue;
-          if (!ok) {
-            kind = "http-error";
-            complete = false;
-            canContinue = false;
-          } else if (bodyLength === 0) {
-            kind = "empty-body";
-            complete = true;
-            canContinue = false;
-          } else if (cursorRepeated) {
-            kind = "cursor-repeat";
-            complete = true;
-            canContinue = false;
-          } else if (newTurns > 0) {
-            kind = "new-turns";
-            complete = false;
-            canContinue = true;
-          } else {
-            kind = "no-new-turns";
-            complete = true;
-            canContinue = false;
-          }
-          return {
-            kind,
-            complete,
-            canContinue,
-            status,
-            ok,
-            bodyLength,
-            newTurns,
-            cursor,
-            cursorRepeated,
-            log: "kind=" + kind + " status=" + status + " ok=" + (ok ? 1 : 0) + " len=" + bodyLength + "B \u0445\u043E\u0434\u043E\u0432=+" + newTurns + " \u043A\u0443\u0440\u0441\u043E\u0440=" + (cursor ? "\u0435\u0441\u0442\u044C(" + (cursorRepeated ? "\u043F\u043E\u0432\u0442\u043E\u0440" : "\u043D\u043E\u0432\u044B\u0439") + ")" : "\u043D\u0435\u0442")
-          };
-        }
-        if (typeof window !== "undefined") {
-          window.parseGoogleFolwrOpen = parseGoogleFolwrOpen;
-          window.GoogleFolwrUtils = {
-            countTurnContainers,
-            extractTurnsFromDocument,
-            mergeTurnsByKey,
-            extractContinuationToken,
-            mergeTurnsById,
-            mergeTurnsMonotone,
-            classifyFolwrContinuation,
-            // O-32: каноническая идентичность/форма хода — ОДИН источник правды для сетевого пути,
-            // DOM-добора перехватчика и DOM-пути адаптера (см. блок «O-32» ниже по файлу).
-            canonicalTurnKeyOf,
-            canonicalAnswerBody,
-            canonicalizeTurnForThread,
-            normalizeTurnKeyPart,
-            // O-32 (фикс A/C): префикс-терпимая идентичность хода и дедуп списка перед кэшем.
-            turnIdentityParts,
-            bodiesPrefixCompatible,
-            dedupeTurns,
-            // O-45: общий рендер код-блоков (```lang … ```) и отбор узлов DOM-пути —
-            // переиспользуются адаптером (adapters/google-search-adapter.js) и тестами.
-            renderCodeBlock,
-            answerTextOf,
-            answerDomNodes,
-            isCodeBlockElement
-          };
-        }
-        if (typeof module !== "undefined" && module.exports) {
-          module.exports = {
-            parseGoogleFolwrOpen,
-            countTurnContainers,
-            extractTurnsFromDocument,
-            mergeTurnsByKey,
-            extractContinuationToken,
-            mergeTurnsById,
-            mergeTurnsMonotone,
-            classifyFolwrContinuation,
-            canonicalTurnKeyOf,
-            canonicalAnswerBody,
-            canonicalizeTurnForThread,
-            normalizeTurnKeyPart,
-            turnIdentityParts,
-            bodiesPrefixCompatible,
-            dedupeTurns,
-            renderCodeBlock,
-            answerTextOf,
-            answerDomNodes,
-            isCodeBlockElement
-          };
-        }
-      })();
-    }
-  });
-
-  // ../utils/export-text-builders.js
-  var require_export_text_builders = __commonJS({
-    "../utils/export-text-builders.js"(exports, module) {
-      init_buildReferenceText();
-      (function() {
-        "use strict";
-        function aiCmI18nMessage(key, fallback, substitutions) {
-          try {
-            if (typeof chrome !== "undefined" && chrome.i18n && typeof chrome.i18n.getMessage === "function") {
-              var message = substitutions ? chrome.i18n.getMessage(key, substitutions) : chrome.i18n.getMessage(key);
-              if (message) return message;
-            }
-          } catch (eMessage) {
-          }
-          return fallback;
-        }
-        var REASONING_SECTION_TAG = "[REASONING]";
-        var ANSWER_SECTION_TAG = "[ANSWER]";
-        function reasoningOfMessage(msg) {
-          if (!msg || typeof msg !== "object") return "";
-          var r = msg.reasoning;
-          return typeof r === "string" ? r : "";
-        }
-        function withReasoningSections(text, reasoning) {
-          var t = typeof text === "string" ? text : "";
-          var r = typeof reasoning === "string" ? reasoning : "";
-          if (!r) return t;
-          if (t.indexOf(r) !== -1) return t;
-          return REASONING_SECTION_TAG + "\n" + r + "\n\n" + ANSWER_SECTION_TAG + "\n" + t;
-        }
-        function messageTextWithReasoning(msg) {
-          if (!msg || typeof msg !== "object") return "";
-          return withReasoningSections(msg.text, reasoningOfMessage(msg));
-        }
-        function reasoningOfMessageForExport(msg, useHidden) {
-          var r = reasoningOfMessage(msg);
-          if (r) return r;
-          if (useHidden !== true || !msg || typeof msg !== "object") return "";
-          return typeof msg.hiddenReasoning === "string" ? msg.hiddenReasoning : "";
-        }
-        function markersMessageTextWithReasoning(msg, useHidden) {
-          return withReasoningSections(
-            messageTextForMarkers(msg),
-            reasoningOfMessageForExport(msg, useHidden)
-          );
-        }
-        var TXT_ROLE_MARKER_SITES = ["qwen"];
-        function isTxtRoleMarkerHistory(history) {
-          try {
-            var site = String(history && history.site || "").toLowerCase();
-            return TXT_ROLE_MARKER_SITES.indexOf(site) !== -1;
-          } catch (e) {
-            return false;
-          }
-        }
-        function txtRoleMarker(role) {
-          return role === "user" ? "USER:" : "ASSISTANT:";
-        }
-        function mdRoleMarker(role) {
-          return role === "user" ? "### USER" : "### ASSISTANT";
-        }
-        var CONTAINER_MIN_CONTAINED = 2;
-        var CONTAINER_COVER_MIN = 0.8;
-        function messageTextForMarkers(msg) {
-          if (!msg || typeof msg !== "object") return "";
-          if (typeof msg.text === "string" && msg.text) return msg.text;
-          if (typeof msg.content === "string") return msg.content;
-          return typeof msg.text === "string" ? msg.text : "";
-        }
-        function dropContainerMessages(list) {
-          var src = Array.isArray(list) ? list : [];
-          var texts = [];
-          for (var t = 0; t < src.length; t++) texts.push(messageTextForMarkers(src[t]));
-          var keep = [];
-          for (var c = 0; c < src.length; c++) {
-            var candidate = texts[c];
-            var contained = 0;
-            var covered = 0;
-            var longest = 0;
-            if (candidate) {
-              for (var j = 0; j < texts.length; j++) {
-                var other = texts[j];
-                if (j === c || !other || other.length >= candidate.length) continue;
-                if (candidate.indexOf(other) === -1) continue;
-                contained++;
-                covered += other.length;
-                if (other.length > longest) longest = other.length;
-              }
-            }
-            var isContainer = contained >= CONTAINER_MIN_CONTAINED && covered >= CONTAINER_COVER_MIN * candidate.length && candidate.length >= 2 * longest;
-            if (!isContainer) keep.push(src[c]);
-          }
-          return keep;
-        }
-        function diagTxtRoleStructure(list, totalCount) {
-          if (!diagOn()) return false;
-          try {
-            var kept = Array.isArray(list) ? list.length : -1;
-            var total = typeof totalCount === "number" ? totalCount : kept;
-            var first = Array.isArray(list) && list.length > 0 ? list[0] : null;
-            var text = messageTextForMarkers(first);
-            var kind = "\u043D\u0435\u0442";
-            if (first && typeof first === "object") {
-              if (typeof first.text === "string") kind = "text";
-              else if (typeof first.content === "string") kind = "content";
-            }
-            console.log(DIAG_PREFIX + " txt-roles site=qwen isArray=" + Array.isArray(list) + " msgs=" + total + " kept=" + kept + " dropped-containers=" + (kept >= 0 && total >= kept ? total - kept : 0) + " first.role=" + (first && first.role !== void 0 && first.role !== null ? String(first.role) : "(\u043D\u0435\u0442)") + " first.kind=" + kind + " first.len=" + text.length + " first.head=" + (diagHead(text, 60) || "\u043F\u0443\u0441\u0442\u043E"));
-          } catch (eLogRoles) {
-          }
-          return true;
-        }
-        function renderReferenceText(list) {
-          return buildReferenceText(list);
-        }
-        function renderReferenceTextWithRoleMarkers(list) {
-          var src = Array.isArray(list) ? list : [];
-          var parts = [];
-          for (var i = 0; i < src.length; i++) {
-            var m = src[i] || {};
-            var text = renderReferenceText([{ role: m.role, text: messageTextForMarkers(m) }]);
-            if (text === null) return null;
-            if (!String(text).trim()) continue;
-            parts.push(txtRoleMarker(m.role) + "\n" + text);
-          }
-          return parts.join("\n\n");
-        }
-        function buildTxtFromHistory(history) {
-          var hist = history || {};
-          var site = typeof hist.site === "string" ? hist.site : "";
-          var messages = history && Array.isArray(history.messages) ? history.messages : [];
-          var marked = isTxtRoleMarkerHistory(history);
-          var kept = marked ? dropContainerMessages(messages) : messages;
-          var forTxt = kept.map(function(m) {
-            var text = marked ? markersMessageTextWithReasoning(m, true) : messageTextWithReasoning(m);
-            if (!m || typeof m !== "object" || text === m.text) return m;
-            var copy = {};
-            for (var k in m) {
-              if (Object.prototype.hasOwnProperty.call(m, k)) copy[k] = m[k];
-            }
-            copy.text = text;
-            return copy;
-          });
-          var out;
-          if (marked) {
-            diagTxtRoleStructure(forTxt, messages.length);
-            out = renderReferenceTextWithRoleMarkers(forTxt);
-          } else {
-            out = renderReferenceText(forTxt);
-          }
-          if (site === "gemini" && hist.sourceTier && out) out = hist.sourceTier + "\n\n" + out;
-          return out === null ? "" : out;
-        }
-        function exportTokenSnapshot(history) {
-          var h = history || {};
-          var tokens = typeof h.tokens === "number" ? h.tokens : 0;
-          var limit = typeof h.limit === "number" ? h.limit : 0;
-          var percent = typeof h.percent === "number" ? h.percent : 0;
-          if (limit > 0) {
-            var calc = Math.round(tokens / limit * 1e3) / 10;
-            if (calc !== percent) percent = calc;
-          }
-          return { tokens, limit, percent };
-        }
-        function buildMdFromHistory(history, platform) {
-          var h = history || {};
-          var site = typeof h.site === "string" ? h.site : "";
-          var lines = [];
-          lines.push(aiCmI18nMessage("export_md_title", "# AI Context Monitor \u2014 \u044D\u043A\u0441\u043F\u043E\u0440\u0442 \u0438\u0441\u0442\u043E\u0440\u0438\u0438"));
-          lines.push("");
-          lines.push(aiCmI18nMessage("export_md_platform", "\u041F\u043B\u0430\u0442\u0444\u043E\u0440\u043C\u0430: " + (platform || "AI Chat"), [platform || "AI Chat"]));
-          lines.push(aiCmI18nMessage("export_md_model", "\u041C\u043E\u0434\u0435\u043B\u044C: " + (h.model || "\u2014"), [h.model || "\u2014"]));
-          var exportedAt = (/* @__PURE__ */ new Date()).toISOString();
-          lines.push(aiCmI18nMessage("export_md_date", "\u0414\u0430\u0442\u0430 \u044D\u043A\u0441\u043F\u043E\u0440\u0442\u0430: " + exportedAt, [exportedAt]));
-          var snap = exportTokenSnapshot(h);
-          var tokens = snap.tokens;
-          var limit = snap.limit;
-          var percent = snap.percent;
-          if (tokens === 0 && limit === 0) {
-            lines.push("\u0422\u043E\u043A\u0435\u043D\u044B: \u043D/\u0434 (" + percent + "%)");
-          } else {
-            lines.push(aiCmI18nMessage("export_md_tokens", "\u0422\u043E\u043A\u0435\u043D\u044B: " + tokens + " / " + limit + " (" + percent + "%)", [String(tokens), String(limit), String(percent)]));
-          }
-          lines.push("");
-          if (site === "gemini" && h.sourceTier) {
-            lines.push(h.sourceTier, "");
-          }
-          var mdMarked = isTxtRoleMarkerHistory(h);
-          var messages = Array.isArray(h.messages) ? h.messages : [];
-          if (mdMarked) messages = dropContainerMessages(messages);
-          for (var i = 0; i < messages.length; i++) {
-            var msg = messages[i] || {};
-            if (typeof aiCmDiagLine === "function") {
-              aiCmDiagLine("claude-role-builder", { msgRole: msg.role, mdMarked });
-            }
-            var title = mdMarked ? mdRoleMarker(msg.role) : msg.role === "user" || msg.role === "human" ? aiCmI18nMessage("export_md_role_user", "## \u041F\u043E\u043B\u044C\u0437\u043E\u0432\u0430\u0442\u0435\u043B\u044C") : aiCmI18nMessage("export_md_role_assistant", "## \u0410\u0441\u0441\u0438\u0441\u0442\u0435\u043D\u0442");
-            lines.push(title);
-            lines.push("");
-            lines.push(mdMarked ? markersMessageTextWithReasoning(msg, true) : messageTextWithReasoning(msg));
-            lines.push("");
-          }
-          return lines.join("\n");
-        }
-        function buildJsonFromHistory(history, platform) {
-          var h = history || {};
-          return JSON.stringify({
-            platform: platform || "AI Chat",
-            model: h.model || "",
-            exportedAt: (/* @__PURE__ */ new Date()).toISOString(),
-            tokens: typeof h.tokens === "number" ? h.tokens : 0,
-            limit: typeof h.limit === "number" ? h.limit : 0,
-            percent: typeof h.percent === "number" ? h.percent : 0,
-            // Two-Tier (v89): аддитивное поле метаданных. undefined → JSON.stringify ключ НЕ
-            // добавляет, поэтому у прочих платформ и у Gemini без метки байты прежние.
-            sourceTier: h.sourceTier,
-            messages: Array.isArray(h.messages) ? h.messages : []
-          }, null, 2);
-        }
-        var DIAG_PREFIX = "[AI CM][diag]";
-        function diagOn() {
-          try {
-            if (typeof sessionStorage !== "undefined" && sessionStorage && sessionStorage.getItem("aiCmDebug") === "1") return true;
-          } catch (eSess) {
-          }
-          try {
-            if (typeof window !== "undefined" && window && window.__aiCmDebugLogs === true) return true;
-          } catch (eWin) {
-          }
-          return false;
-        }
-        function diagHead(v, n) {
-          try {
-            var lim = typeof n === "number" && n > 0 ? n : 100;
-            if (v === void 0 || v === null) return "";
-            var s = String(v);
-            if (!s) return "";
-            var flat = s.replace(/\s+/g, " ").trim();
-            if (!flat) return "";
-            return flat.length > lim ? flat.slice(0, lim) + "\u2026" : flat;
-          } catch (eHead) {
-            return "";
-          }
-        }
-        function diagStack() {
-          try {
-            var lines = String(new Error().stack || "").split("\n");
-            var out = [];
-            for (var i = 1; i < lines.length && out.length < 4; i++) {
-              var s = String(lines[i] || "").replace(/\s+/g, " ").trim();
-              if (!s || s.indexOf("diag") !== -1) continue;
-              out.push(s);
-            }
-            return out.join(" <- ");
-          } catch (eStack) {
-            return "";
-          }
-        }
-        function diagDownload(trigger, content, fileName, extra) {
-          try {
-            if (typeof aiCmDiagDownload === "function") return aiCmDiagDownload(trigger, content, fileName, extra);
-          } catch (eGlobal) {
-          }
-          if (!diagOn()) return false;
-          try {
-            var e = extra || {};
-            var url = "";
-            try {
-              url = String(typeof location !== "undefined" && location && location.href || "");
-            } catch (eUrl) {
-            }
-            console.log(DIAG_PREFIX + " download trigger=" + (trigger || "(\u043D\u0435\u0442)") + " file=" + (fileName === void 0 || fileName === null || String(fileName) === "" ? "\u043F\u0443\u0441\u0442\u043E\u0435" : String(fileName)) + " bytes100=" + (diagHead(content, 100) || "\u043F\u0443\u0441\u0442\u043E") + " len=" + (content === void 0 || content === null ? 0 : String(content).length) + " mime=" + (e.mime === void 0 ? "(\u043D\u0435\u0442)" : e.mime) + " url=" + url + " threadId=" + (e.threadId === void 0 || e.threadId === "" ? "(\u043D\u0435\u0442)" : e.threadId) + " site=" + (e.site === void 0 ? "" : e.site) + " reason=" + (e.reason === void 0 ? "" : e.reason) + " src=" + diagStack());
-          } catch (eLog) {
-          }
-          return true;
-        }
-        var XSSI_PREFIX_LEN = 4;
-        function startsWithXssiPrefix(content) {
-          try {
-            if (content === void 0 || content === null) return false;
-            var s = String(content);
-            if (s.length < XSSI_PREFIX_LEN) return false;
-            return s.charCodeAt(0) === 41 && s.charCodeAt(1) === 93 && s.charCodeAt(2) === 125 && s.charCodeAt(3) === 39;
-          } catch (eXssi) {
-            return false;
-          }
-        }
-        function downloadBlockReason(content, fileName) {
-          if (startsWithXssiPrefix(content)) return "xssi-prefix";
-          if (fileName === void 0 || fileName === null || String(fileName).trim() === "") return "empty-name";
-          return null;
-        }
-        function diagDownloadBlocked(trigger, content, fileName, reason, extra) {
-          try {
-            if (typeof aiCmDiagDownloadBlocked === "function") {
-              return aiCmDiagDownloadBlocked(trigger, content, fileName, reason, extra);
-            }
-          } catch (eGlobalBlocked) {
-          }
-          if (!diagOn()) return false;
-          try {
-            var e = extra || {};
-            var url = "";
-            try {
-              url = String(typeof location !== "undefined" && location && location.href || "");
-            } catch (eUrlB) {
-            }
-            console.log(DIAG_PREFIX + " download-blocked reason=" + (reason || "(\u043D\u0435\u0442)") + " trigger=" + (trigger || "(\u043D\u0435\u0442)") + " file=" + (fileName === void 0 || fileName === null || String(fileName) === "" ? "\u043F\u0443\u0441\u0442\u043E\u0435" : String(fileName)) + " bytes100=" + (diagHead(content, 100) || "\u043F\u0443\u0441\u0442\u043E") + " len=" + (content === void 0 || content === null ? 0 : String(content).length) + " mime=" + (e.mime === void 0 ? "(\u043D\u0435\u0442)" : e.mime) + " url=" + url + " threadId=" + (e.threadId === void 0 || e.threadId === "" ? "(\u043D\u0435\u0442)" : e.threadId) + " site=" + (e.site === void 0 ? "" : e.site) + " src=" + diagStack());
-          } catch (eLogBlocked) {
-          }
-          return true;
-        }
-        function downloadBlob(content, fileName, mimeType, trigger, extra) {
-          var ex = extra || {};
-          var blockReason = downloadBlockReason(content, fileName);
-          if (blockReason) {
-            try {
-              diagDownloadBlocked(
-                trigger || "builder-download",
-                content,
-                fileName,
-                blockReason,
-                { mime: mimeType, threadId: ex.threadId, site: ex.site }
-              );
-            } catch (eDiagBlocked) {
-            }
-            return false;
-          }
-          try {
-            diagDownload(
-              trigger || "builder-download",
-              content,
-              fileName,
-              { mime: mimeType, threadId: ex.threadId, site: ex.site, reason: ex.reason }
-            );
-          } catch (eDiag) {
-          }
-          try {
-            var blob = new Blob([content], { type: mimeType });
-            var url = URL.createObjectURL(blob);
-            var a = document.createElement("a");
-            a.href = url;
-            a.download = fileName;
-            document.body.appendChild(a);
-            a.click();
-            a.remove();
-            setTimeout(function() {
-              URL.revokeObjectURL(url);
-            }, 1e3);
-          } catch (e) {
-            console.warn("[export] \u043D\u0435 \u0443\u0434\u0430\u043B\u043E\u0441\u044C \u0441\u043A\u0430\u0447\u0430\u0442\u044C \u0444\u0430\u0439\u043B:", e);
-          }
-          return true;
-        }
-        var Api = {
-          buildTxtFromHistory,
-          buildMdFromHistory,
-          buildJsonFromHistory,
-          downloadBlob,
-          // O-27 (защитный фикс): причина отказа точки скачивания (null — выдача разрешена) и
-          // сама точка отказа наружу — для пинов тестов и переиспользования вызывающим кодом.
-          aiCmDownloadBlockReason: downloadBlockReason,
-          aiCmDiagDownloadBlocked: diagDownloadBlocked,
-          // O-27/O-32: диагностические хелперы наружу (content.js/export-manager.js зовут их
-          // через window.AiCmExportBuilders, если глобальный utils/debug.js не подключён).
-          aiCmDiagOn: diagOn,
-          aiCmDiagHead: diagHead,
-          aiCmDiagDownload: diagDownload,
-          // O-35: рендер reasoning контрактом DeepSeek — чистая функция наружу (пины тестов
-          // и переиспользование; на боевом пути вызывается только двумя сборщиками выше).
-          aiCmMessageTextWithReasoning: messageTextWithReasoning,
-          aiCmWithReasoningSections: withReasoningSections,
-          // O-37 (C): источник размышления для маркерного пути (reasoning, иначе поле захвата
-          // hiddenReasoning) и композиция «текст сообщения + секции» — чистые функции наружу;
-          // на боевом пути их зовут только buildTxtFromHistory/buildMdFromHistory выше.
-          aiCmReasoningOfMessageForExport: reasoningOfMessageForExport,
-          aiCmMarkersMessageTextWithReasoning: markersMessageTextWithReasoning,
-          // O-36 (D2): маркеры ролей txt-экспорта — чистые предикаты наружу (пины тестов;
-          // на боевом пути вызываются только сборщиком buildTxtFromHistory выше).
-          aiCmTxtRoleMarker: txtRoleMarker,
-          aiCmIsTxtRoleMarkerHistory: isTxtRoleMarkerHistory,
-          aiCmTxtRoleMarkerSites: TXT_ROLE_MARKER_SITES,
-          // O-36 (D2.1): маркер роли md (Qwen Studio), текст сообщения для маркерного пути
-          // (с фолбэком на .content) и контейнер-чистка — чистые функции наружу для пинов
-          // и переиспользования; на боевом пути их зовут только два сборщика выше.
-          aiCmMdRoleMarker: mdRoleMarker,
-          aiCmMessageTextForMarkers: messageTextForMarkers,
-          aiCmDropContainerMessages: dropContainerMessages,
-          aiCmDiagTxtRoleStructure: diagTxtRoleStructure,
-          aiCmContainerRules: { minContained: CONTAINER_MIN_CONTAINED, coverMin: CONTAINER_COVER_MIN }
-        };
-        if (typeof module !== "undefined" && module.exports) module.exports = Api;
-        if (typeof window !== "undefined") window.AiCmExportBuilders = Api;
-      })();
-    }
-  });
-
-  // entry-content.js
-  var require_entry_content = __commonJS({
-    "entry-content.js"(exports, module) {
-      init_buildReferenceText();
-      init_platform();
-      init_debug();
-      var CYRILLIC_CHARS_PER_TOKEN = 3.3;
-      var Tokenizer = {
+  // ../utils/tokenizer.ts
+  var CYRILLIC_CHARS_PER_TOKEN, Tokenizer;
+  var init_tokenizer = __esm({
+    "../utils/tokenizer.ts"() {
+      CYRILLIC_CHARS_PER_TOKEN = 3.3;
+      Tokenizer = {
         CYRILLIC_CHARS_PER_TOKEN,
-        /**
-         * Определяет тип символа.
-         * @param {string} char Один символ текста.
-         * @returns {CharType} Класс символа для выбора эвристики.
-         */
+        /** Определяет класс символа для выбора эвристики. */
         _getCharType(char) {
           if (/[а-яёА-ЯЁ]/.test(char)) return "cyrillic";
           if (/[\u4E00-\u9FFF\u3040-\u30FF\uAC00-\uD7AF]/.test(char)) return "cjk";
@@ -7920,11 +6773,7 @@ if (typeof module !== 'undefined' && module.exports) {
           if (/[.,!?;:()\[\]{}"'«»\-—]/.test(char)) return "punctuation";
           return "other";
         },
-        /**
-         * Приблизительный подсчёт токенов в тексте.
-         * @param {string} text - текст для оценки
-         * @returns {number} - приблизительное количество токенов
-         */
+        /** Приблизительный подсчёт токенов в тексте. */
         countTokens(text) {
           if (!text || text.length === 0) return 0;
           let tokens = 0;
@@ -7984,11 +6833,8 @@ if (typeof module !== 'undefined' && module.exports) {
         },
         // countTokensFast удалён в v1.1 — дублировал логику countTokens и не вызывался нигде.
         /**
-         * Оценивает токены в диалоге с учётом структуры чата.
-         * Учитывает накладные расходы на форматирование сообщений.
-         * @param {string} dialogText - полный текст диалога
-         * @param {number} [messageCount=1] - количество сообщений
-         * @returns {number} - токены текста плюс накладные расходы на форматирование
+         * Оценивает токены в диалоге с учётом структуры чата:
+         * текст плюс накладные расходы на форматирование сообщений.
          */
         estimateDialogTokens(dialogText, messageCount = 1) {
           const textTokens = this.countTokens(dialogText);
@@ -7996,13 +6842,16 @@ if (typeof module !== 'undefined' && module.exports) {
           return textTokens + overhead;
         }
       };
-      if (typeof module !== "undefined" && module.exports) {
-        module.exports = Tokenizer;
-      }
-      var ModelConfig = {
-        /** Общий потолок окна: действующий лимит = min(contextLimit, это значение). @type {number} */
+    }
+  });
+
+  // ../utils/model-config.ts
+  var ModelConfig;
+  var init_model_config = __esm({
+    "../utils/model-config.ts"() {
+      ModelConfig = {
+        /** Общий потолок окна: действующий лимит = min(contextLimit, это значение). */
         EFFECTIVE_CAP_DEFAULT: 128e3,
-        /** @type {ModelCatalog} */
         models: {
           // ---- OpenAI: текущая линейка 2026-10 ----
           // Окна взяты с официальной страницы моделей OpenAI (platform.openai.com/docs/models).
@@ -8028,6 +6877,26 @@ if (typeof module !== 'undefined' && module.exports) {
             provider: "OpenAI",
             contextLimit: 105e4,
             description: "GPT-5.6 Terra \u2014 \u043E\u043A\u043D\u043E 1 050 000 (API)"
+            // Источник: https://platform.openai.com/docs/models (снят 2026-10-04)
+          },
+          // ЖИВАЯ ПРИЁМКА 2026-11-09 (chatgpt.com): сеть отдаёт raw="gpt-6" и
+          // raw="gpt-6-turbo". Без явного ключа resolveModelId не находил совпадения
+          // (ни префикса, ни подстроки) и бейдж падал в siteDefaults ('gpt-5.5').
+          // 'gpt-6-turbo' держим отдельным ключом, чтобы турбо-вариант не схлопывался
+          // префиксом в базовую линейку. Лимит — как у остальных GPT-6 из снимка
+          // 2026-10-04 (своего окна для turbo в документации не заявлено).
+          "gpt-6": {
+            name: "GPT-6",
+            provider: "OpenAI",
+            contextLimit: 105e4,
+            description: "\u041B\u0438\u043D\u0435\u0439\u043A\u0430 GPT-6, \u043E\u043A\u043D\u043E 1 050 000 (API)"
+            // Источник: https://platform.openai.com/docs/models (снят 2026-10-04)
+          },
+          "gpt-6-turbo": {
+            name: "GPT-6 Turbo",
+            provider: "OpenAI",
+            contextLimit: 105e4,
+            description: "GPT-6 Turbo \u2014 \u043E\u043A\u043D\u043E 1 050 000 (API)"
             // Источник: https://platform.openai.com/docs/models (снят 2026-10-04)
           },
           "gpt-6-astra": {
@@ -8702,9 +7571,6 @@ if (typeof module !== 'undefined' && module.exports) {
           return "gemini-flash-latest";
         }
       };
-      if (typeof module !== "undefined" && module.exports) {
-        module.exports = ModelConfig;
-      }
       (function() {
         var V = ["1.5", "2.0", "2.5", "3.1", "3.5", "3.6", "3.7"];
         var F = ["Flash", "Pro", "Ultra"];
@@ -8738,6 +7604,3623 @@ if (typeof module !== 'undefined' && module.exports) {
           if (r && r.contextLimit !== 1048576) r.contextLimit = 1048576;
         });
       })();
+    }
+  });
+
+  // ../utils/buildReferenceText.ts
+  function cleanInline(s) {
+    s = s.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, "$1");
+    s = s.replace(/(\*\*|__)/g, "");
+    s = s.replace(/(?<![*\w])\*([^*\n]+)\*(?![\w*])/g, "$1");
+    s = s.replace(/(?<![\w_])\_([^_\n]+)\_(?![\w_])/g, "$1");
+    s = s.replace(/`/g, "");
+    return s;
+  }
+  function cleanLine(line) {
+    var s = String(line == null ? "" : line);
+    s = s.replace(/^#{1,6}\s+/, "");
+    s = s.replace(/^>\s?/, "");
+    s = s.replace(/^[-*+]\s+/, "");
+    return s;
+  }
+  function cleanText(text) {
+    var lines = String(text).split("\n");
+    var out = [];
+    for (var i = 0; i < lines.length; i++) {
+      var line = lines[i];
+      var trimmed = line.trim();
+      if (/^-{3,}$/.test(trimmed)) continue;
+      out.push(cleanInline(cleanLine(line)));
+    }
+    return out.join("\n");
+  }
+  function buildReferenceText(messages) {
+    var list = Array.isArray(messages) ? messages : [];
+    var parts = [];
+    for (var i = 0; i < list.length; i++) {
+      var msg = list[i] || {};
+      parts.push(cleanText(msg.text == null ? "" : msg.text));
+    }
+    return parts.join("\n\n");
+  }
+  var init_buildReferenceText = __esm({
+    "../utils/buildReferenceText.ts"() {
+    }
+  });
+
+  // ../utils/export-text-builders.ts
+  function aiCmI18nMessage(key, fallback, substitutions) {
+    try {
+      if (typeof chrome !== "undefined" && chrome.i18n && typeof chrome.i18n.getMessage === "function") {
+        var message = substitutions ? chrome.i18n.getMessage(key, substitutions) : chrome.i18n.getMessage(key);
+        if (message) return message;
+      }
+    } catch (eMessage) {
+    }
+    return fallback;
+  }
+  function reasoningOfMessage(msg) {
+    if (!msg || typeof msg !== "object") return "";
+    var r = msg.reasoning;
+    return typeof r === "string" ? r : "";
+  }
+  function withReasoningSections(text, reasoning) {
+    var t = typeof text === "string" ? text : "";
+    var r = typeof reasoning === "string" ? reasoning : "";
+    if (!r) return t;
+    if (t.indexOf(r) !== -1) return t;
+    return REASONING_SECTION_TAG + "\n" + r + "\n\n" + ANSWER_SECTION_TAG + "\n" + t;
+  }
+  function messageTextWithReasoning(msg) {
+    if (!msg || typeof msg !== "object") return "";
+    return withReasoningSections(msg.text, reasoningOfMessage(msg));
+  }
+  function reasoningOfMessageForExport(msg, useHidden) {
+    var r = reasoningOfMessage(msg);
+    if (r) return r;
+    if (useHidden !== true || !msg || typeof msg !== "object") return "";
+    return typeof msg.hiddenReasoning === "string" ? msg.hiddenReasoning : "";
+  }
+  function markersMessageTextWithReasoning(msg, useHidden) {
+    return withReasoningSections(
+      messageTextForMarkers(msg),
+      reasoningOfMessageForExport(msg, useHidden)
+    );
+  }
+  function isTxtRoleMarkerHistory(history) {
+    try {
+      var site = String(history && history.site || "").toLowerCase();
+      return TXT_ROLE_MARKER_SITES.indexOf(site) !== -1;
+    } catch (e) {
+      return false;
+    }
+  }
+  function txtRoleMarker(role) {
+    return role === "user" ? "USER:" : "ASSISTANT:";
+  }
+  function mdRoleMarker(role) {
+    return role === "user" ? "### USER" : "### ASSISTANT";
+  }
+  function messageTextForMarkers(msg) {
+    if (!msg || typeof msg !== "object") return "";
+    if (typeof msg.text === "string" && msg.text) return msg.text;
+    if (typeof msg.content === "string") return msg.content;
+    return typeof msg.text === "string" ? msg.text : "";
+  }
+  function dropContainerMessages(list) {
+    var src = Array.isArray(list) ? list : [];
+    var texts = [];
+    for (var t = 0; t < src.length; t++) texts.push(messageTextForMarkers(src[t]));
+    var keep = [];
+    for (var c = 0; c < src.length; c++) {
+      var candidate = texts[c];
+      var contained = 0;
+      var covered = 0;
+      var longest = 0;
+      if (candidate) {
+        for (var j = 0; j < texts.length; j++) {
+          var other = texts[j];
+          if (j === c || !other || other.length >= candidate.length) continue;
+          if (candidate.indexOf(other) === -1) continue;
+          contained++;
+          covered += other.length;
+          if (other.length > longest) longest = other.length;
+        }
+      }
+      var isContainer = contained >= CONTAINER_MIN_CONTAINED && covered >= CONTAINER_COVER_MIN * candidate.length && candidate.length >= 2 * longest;
+      if (!isContainer) keep.push(src[c]);
+    }
+    return keep;
+  }
+  function diagTxtRoleStructure(list, totalCount) {
+    if (!diagOn()) return false;
+    try {
+      var kept = Array.isArray(list) ? list.length : -1;
+      var total = typeof totalCount === "number" ? totalCount : kept;
+      var first = Array.isArray(list) && list.length > 0 ? list[0] : null;
+      var text = messageTextForMarkers(first);
+      var kind = "\u043D\u0435\u0442";
+      if (first && typeof first === "object") {
+        if (typeof first.text === "string") kind = "text";
+        else if (typeof first.content === "string") kind = "content";
+      }
+      console.log(DIAG_PREFIX + " txt-roles site=qwen isArray=" + Array.isArray(list) + " msgs=" + total + " kept=" + kept + " dropped-containers=" + (kept >= 0 && total >= kept ? total - kept : 0) + " first.role=" + (first && first.role !== void 0 && first.role !== null ? String(first.role) : "(\u043D\u0435\u0442)") + " first.kind=" + kind + " first.len=" + text.length + " first.head=" + (diagHead(text, 60) || "\u043F\u0443\u0441\u0442\u043E"));
+    } catch (eLogRoles) {
+    }
+    return true;
+  }
+  function renderReferenceText(list) {
+    return buildReferenceText(list);
+  }
+  function renderReferenceTextWithRoleMarkers(list) {
+    var src = Array.isArray(list) ? list : [];
+    var parts = [];
+    for (var i = 0; i < src.length; i++) {
+      var m = src[i] || {};
+      var text = renderReferenceText([{ role: m.role, text: messageTextForMarkers(m) }]);
+      if (text === null) return null;
+      if (!String(text).trim()) continue;
+      parts.push(txtRoleMarker(m.role) + "\n" + text);
+    }
+    return parts.join("\n\n");
+  }
+  function buildTxtFromHistory(history) {
+    var hist = history || {};
+    var site = typeof hist.site === "string" ? hist.site : "";
+    var messages = history && Array.isArray(history.messages) ? history.messages : [];
+    var marked = isTxtRoleMarkerHistory(history);
+    var kept = marked ? dropContainerMessages(messages) : messages;
+    var forTxt = kept.map(function(m) {
+      var text = marked ? markersMessageTextWithReasoning(m, true) : messageTextWithReasoning(m);
+      if (!m || typeof m !== "object" || text === m.text) return m;
+      var copy = {};
+      for (var k in m) {
+        if (Object.prototype.hasOwnProperty.call(m, k)) copy[k] = m[k];
+      }
+      copy.text = text;
+      return copy;
+    });
+    var out;
+    if (marked) {
+      diagTxtRoleStructure(forTxt, messages.length);
+      out = renderReferenceTextWithRoleMarkers(forTxt);
+    } else {
+      out = renderReferenceText(forTxt);
+    }
+    if (site === "gemini" && hist.sourceTier && out) out = hist.sourceTier + "\n\n" + out;
+    return out === null ? "" : out;
+  }
+  function exportTokenSnapshot(history) {
+    var h = history || {};
+    var tokens = typeof h.tokens === "number" ? h.tokens : 0;
+    var limit = typeof h.limit === "number" ? h.limit : 0;
+    var percent = typeof h.percent === "number" ? h.percent : 0;
+    if (limit > 0) {
+      var calc = Math.round(tokens / limit * 1e3) / 10;
+      if (calc !== percent) percent = calc;
+    }
+    return { tokens, limit, percent };
+  }
+  function buildMdFromHistory(history, platform) {
+    var h = history || {};
+    var site = typeof h.site === "string" ? h.site : "";
+    var lines = [];
+    lines.push(aiCmI18nMessage("export_md_title", "# AI Context Monitor \u2014 \u044D\u043A\u0441\u043F\u043E\u0440\u0442 \u0438\u0441\u0442\u043E\u0440\u0438\u0438"));
+    lines.push("");
+    lines.push(aiCmI18nMessage("export_md_platform", "\u041F\u043B\u0430\u0442\u0444\u043E\u0440\u043C\u0430: " + (platform || "AI Chat"), [platform || "AI Chat"]));
+    lines.push(aiCmI18nMessage("export_md_model", "\u041C\u043E\u0434\u0435\u043B\u044C: " + (h.model || "\u2014"), [h.model || "\u2014"]));
+    var exportedAt = (/* @__PURE__ */ new Date()).toISOString();
+    lines.push(aiCmI18nMessage("export_md_date", "\u0414\u0430\u0442\u0430 \u044D\u043A\u0441\u043F\u043E\u0440\u0442\u0430: " + exportedAt, [exportedAt]));
+    var snap = exportTokenSnapshot(h);
+    var tokens = snap.tokens;
+    var limit = snap.limit;
+    var percent = snap.percent;
+    if (tokens === 0 && limit === 0) {
+      lines.push("\u0422\u043E\u043A\u0435\u043D\u044B: \u043D/\u0434 (" + percent + "%)");
+    } else {
+      lines.push(aiCmI18nMessage("export_md_tokens", "\u0422\u043E\u043A\u0435\u043D\u044B: " + tokens + " / " + limit + " (" + percent + "%)", [String(tokens), String(limit), String(percent)]));
+    }
+    lines.push("");
+    if (site === "gemini" && h.sourceTier) {
+      lines.push(h.sourceTier, "");
+    }
+    var mdMarked = isTxtRoleMarkerHistory(h);
+    var messages = Array.isArray(h.messages) ? h.messages : [];
+    if (mdMarked) messages = dropContainerMessages(messages);
+    for (var i = 0; i < messages.length; i++) {
+      var msg = messages[i] || {};
+      if (typeof aiCmDiagLine === "function") {
+        aiCmDiagLine("claude-role-builder", { msgRole: msg.role, mdMarked });
+      }
+      var title = mdMarked ? mdRoleMarker(msg.role) : msg.role === "user" || msg.role === "human" ? aiCmI18nMessage("export_md_role_user", "## \u041F\u043E\u043B\u044C\u0437\u043E\u0432\u0430\u0442\u0435\u043B\u044C") : aiCmI18nMessage("export_md_role_assistant", "## \u0410\u0441\u0441\u0438\u0441\u0442\u0435\u043D\u0442");
+      lines.push(title);
+      lines.push("");
+      lines.push(mdMarked ? markersMessageTextWithReasoning(msg, true) : messageTextWithReasoning(msg));
+      lines.push("");
+    }
+    return lines.join("\n");
+  }
+  function buildJsonFromHistory(history, platform) {
+    var h = history || {};
+    return JSON.stringify({
+      platform: platform || "AI Chat",
+      model: h.model || "",
+      exportedAt: (/* @__PURE__ */ new Date()).toISOString(),
+      tokens: typeof h.tokens === "number" ? h.tokens : 0,
+      limit: typeof h.limit === "number" ? h.limit : 0,
+      percent: typeof h.percent === "number" ? h.percent : 0,
+      // Two-Tier (v89): аддитивное поле метаданных. undefined → JSON.stringify ключ НЕ
+      // добавляет, поэтому у прочих платформ и у Gemini без метки байты прежние.
+      sourceTier: h.sourceTier,
+      messages: Array.isArray(h.messages) ? h.messages : []
+    }, null, 2);
+  }
+  function diagOn() {
+    try {
+      if (typeof sessionStorage !== "undefined" && sessionStorage && sessionStorage.getItem("aiCmDebug") === "1") return true;
+    } catch (eSess) {
+    }
+    try {
+      var gRoot = globalThis;
+      if (gRoot && gRoot.__aiCmDebugLogs === true) return true;
+    } catch (eWin) {
+    }
+    return false;
+  }
+  function diagHead(v, n) {
+    try {
+      var lim = typeof n === "number" && n > 0 ? n : 100;
+      if (v === void 0 || v === null) return "";
+      var s = String(v);
+      if (!s) return "";
+      var flat = s.replace(/\s+/g, " ").trim();
+      if (!flat) return "";
+      return flat.length > lim ? flat.slice(0, lim) + "\u2026" : flat;
+    } catch (eHead) {
+      return "";
+    }
+  }
+  function diagStack() {
+    try {
+      var lines = String(new Error().stack || "").split("\n");
+      var out = [];
+      for (var i = 1; i < lines.length && out.length < 4; i++) {
+        var s = String(lines[i] || "").replace(/\s+/g, " ").trim();
+        if (!s || s.indexOf("diag") !== -1) continue;
+        out.push(s);
+      }
+      return out.join(" <- ");
+    } catch (eStack) {
+      return "";
+    }
+  }
+  function diagDownload(trigger, content, fileName, extra) {
+    try {
+      if (typeof aiCmDiagDownload === "function") return aiCmDiagDownload(trigger, content, fileName, extra);
+    } catch (eGlobal) {
+    }
+    if (!diagOn()) return false;
+    try {
+      var e = extra || {};
+      var url = "";
+      try {
+        url = String(typeof location !== "undefined" && location && location.href || "");
+      } catch (eUrl) {
+      }
+      console.log(DIAG_PREFIX + " download trigger=" + (trigger || "(\u043D\u0435\u0442)") + " file=" + (fileName === void 0 || fileName === null || String(fileName) === "" ? "\u043F\u0443\u0441\u0442\u043E\u0435" : String(fileName)) + " bytes100=" + (diagHead(content, 100) || "\u043F\u0443\u0441\u0442\u043E") + " len=" + (content === void 0 || content === null ? 0 : String(content).length) + " mime=" + (e.mime === void 0 ? "(\u043D\u0435\u0442)" : e.mime) + " url=" + url + " threadId=" + (e.threadId === void 0 || e.threadId === "" ? "(\u043D\u0435\u0442)" : e.threadId) + " site=" + (e.site === void 0 ? "" : e.site) + " reason=" + (e.reason === void 0 ? "" : e.reason) + " src=" + diagStack());
+    } catch (eLog) {
+    }
+    return true;
+  }
+  function startsWithXssiPrefix(content) {
+    try {
+      if (content === void 0 || content === null) return false;
+      var s = String(content);
+      if (s.length < XSSI_PREFIX_LEN) return false;
+      return s.charCodeAt(0) === 41 && s.charCodeAt(1) === 93 && s.charCodeAt(2) === 125 && s.charCodeAt(3) === 39;
+    } catch (eXssi) {
+      return false;
+    }
+  }
+  function downloadBlockReason(content, fileName) {
+    if (startsWithXssiPrefix(content)) return "xssi-prefix";
+    if (fileName === void 0 || fileName === null || String(fileName).trim() === "") return "empty-name";
+    return null;
+  }
+  function diagDownloadBlocked(trigger, content, fileName, reason, extra) {
+    try {
+      if (typeof aiCmDiagDownloadBlocked === "function") {
+        return aiCmDiagDownloadBlocked(trigger, content, fileName, reason, extra);
+      }
+    } catch (eGlobalBlocked) {
+    }
+    if (!diagOn()) return false;
+    try {
+      var e = extra || {};
+      var url = "";
+      try {
+        url = String(typeof location !== "undefined" && location && location.href || "");
+      } catch (eUrlB) {
+      }
+      console.log(DIAG_PREFIX + " download-blocked reason=" + (reason || "(\u043D\u0435\u0442)") + " trigger=" + (trigger || "(\u043D\u0435\u0442)") + " file=" + (fileName === void 0 || fileName === null || String(fileName) === "" ? "\u043F\u0443\u0441\u0442\u043E\u0435" : String(fileName)) + " bytes100=" + (diagHead(content, 100) || "\u043F\u0443\u0441\u0442\u043E") + " len=" + (content === void 0 || content === null ? 0 : String(content).length) + " mime=" + (e.mime === void 0 ? "(\u043D\u0435\u0442)" : e.mime) + " url=" + url + " threadId=" + (e.threadId === void 0 || e.threadId === "" ? "(\u043D\u0435\u0442)" : e.threadId) + " site=" + (e.site === void 0 ? "" : e.site) + " src=" + diagStack());
+    } catch (eLogBlocked) {
+    }
+    return true;
+  }
+  function downloadBlob(content, fileName, mimeType, trigger, extra) {
+    var ex = extra || {};
+    var blockReason = downloadBlockReason(content, fileName);
+    if (blockReason) {
+      try {
+        diagDownloadBlocked(
+          trigger || "builder-download",
+          content,
+          fileName,
+          blockReason,
+          { mime: mimeType, threadId: ex.threadId, site: ex.site }
+        );
+      } catch (eDiagBlocked) {
+      }
+      return false;
+    }
+    try {
+      diagDownload(
+        trigger || "builder-download",
+        content,
+        fileName,
+        { mime: mimeType, threadId: ex.threadId, site: ex.site, reason: ex.reason }
+      );
+    } catch (eDiag) {
+    }
+    try {
+      var blob = new Blob([content], { type: mimeType });
+      var url = URL.createObjectURL(blob);
+      var a = document.createElement("a");
+      a.href = url;
+      a.download = fileName;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(function() {
+        URL.revokeObjectURL(url);
+      }, 1e3);
+    } catch (e) {
+      console.warn("[export] \u043D\u0435 \u0443\u0434\u0430\u043B\u043E\u0441\u044C \u0441\u043A\u0430\u0447\u0430\u0442\u044C \u0444\u0430\u0439\u043B:", e);
+    }
+    return true;
+  }
+  var REASONING_SECTION_TAG, ANSWER_SECTION_TAG, TXT_ROLE_MARKER_SITES, CONTAINER_MIN_CONTAINED, CONTAINER_COVER_MIN, DIAG_PREFIX, XSSI_PREFIX_LEN, Api, export_text_builders_default;
+  var init_export_text_builders = __esm({
+    "../utils/export-text-builders.ts"() {
+      init_buildReferenceText();
+      init_debug();
+      REASONING_SECTION_TAG = "[REASONING]";
+      ANSWER_SECTION_TAG = "[ANSWER]";
+      TXT_ROLE_MARKER_SITES = ["qwen"];
+      CONTAINER_MIN_CONTAINED = 2;
+      CONTAINER_COVER_MIN = 0.8;
+      DIAG_PREFIX = "[AI CM][diag]";
+      XSSI_PREFIX_LEN = 4;
+      Api = {
+        buildTxtFromHistory,
+        buildMdFromHistory,
+        buildJsonFromHistory,
+        downloadBlob,
+        // O-27 (защитный фикс): причина отказа точки скачивания (null — выдача разрешена) и
+        // сама точка отказа наружу — для пинов тестов и переиспользования вызывающим кодом.
+        aiCmDownloadBlockReason: downloadBlockReason,
+        aiCmDiagDownloadBlocked: diagDownloadBlocked,
+        // O-27/O-32: диагностические хелперы наружу (content.js/export-manager.js зовут их
+        // через этот объект; канон строки по-прежнему utils/debug.ts, импортированный выше).
+        aiCmDiagOn: diagOn,
+        aiCmDiagHead: diagHead,
+        aiCmDiagDownload: diagDownload,
+        // O-35: рендер reasoning контрактом DeepSeek — чистая функция наружу (пины тестов
+        // и переиспользование; на боевом пути вызывается только двумя сборщиками выше).
+        aiCmMessageTextWithReasoning: messageTextWithReasoning,
+        aiCmWithReasoningSections: withReasoningSections,
+        // O-37 (C): источник размышления для маркерного пути (reasoning, иначе поле захвата
+        // hiddenReasoning) и композиция «текст сообщения + секции» — чистые функции наружу;
+        // на боевом пути их зовут только buildTxtFromHistory/buildMdFromHistory выше.
+        aiCmReasoningOfMessageForExport: reasoningOfMessageForExport,
+        aiCmMarkersMessageTextWithReasoning: markersMessageTextWithReasoning,
+        // O-36 (D2): маркеры ролей txt-экспорта — чистые предикаты наружу (пины тестов;
+        // на боевом пути вызываются только сборщиком buildTxtFromHistory выше).
+        aiCmTxtRoleMarker: txtRoleMarker,
+        aiCmIsTxtRoleMarkerHistory: isTxtRoleMarkerHistory,
+        aiCmTxtRoleMarkerSites: TXT_ROLE_MARKER_SITES,
+        // O-36 (D2.1): маркер роли md (Qwen Studio), текст сообщения для маркерного пути
+        // (с фолбэком на .content) и контейнер-чистка — чистые функции наружу для пинов
+        // и переиспользования; на боевом пути их зовут только два сборщика выше.
+        aiCmMdRoleMarker: mdRoleMarker,
+        aiCmMessageTextForMarkers: messageTextForMarkers,
+        aiCmDropContainerMessages: dropContainerMessages,
+        aiCmDiagTxtRoleStructure: diagTxtRoleStructure,
+        aiCmContainerRules: { minContained: CONTAINER_MIN_CONTAINED, coverMin: CONTAINER_COVER_MIN }
+      };
+      export_text_builders_default = Api;
+    }
+  });
+
+  // ../utils/export-emit-pipeline.ts
+  var export_emit_pipeline_exports = {};
+  __export(export_emit_pipeline_exports, {
+    Api: () => Api2,
+    BDS_BOM: () => BDS_BOM,
+    BDS_CLOSE_TAG: () => BDS_CLOSE_TAG,
+    BDS_INJECTION_FORMS: () => BDS_INJECTION_FORMS,
+    BDS_OPEN_TAG: () => BDS_OPEN_TAG,
+    BDS_TRUNCATION_MARK: () => BDS_TRUNCATION_MARK,
+    BDS_WRAPPER_ID: () => BDS_WRAPPER_ID,
+    CROSS_RAW_MIN_CHARS: () => CROSS_RAW_MIN_CHARS,
+    CROSS_RAW_MIN_LINES: () => CROSS_RAW_MIN_LINES,
+    FIRED_SESSION_PREFIX: () => FIRED_SESSION_PREFIX,
+    HIDDEN_ANSWER_TAG: () => HIDDEN_ANSWER_TAG,
+    HIDDEN_REASONING_TAG: () => HIDDEN_REASONING_TAG,
+    INTRA_CORE_MIN_LEN: () => INTRA_CORE_MIN_LEN,
+    REASONING_SECTION_PAIR_RE: () => REASONING_SECTION_PAIR_RE,
+    RE_ANY_SPACE: () => RE_ANY_SPACE,
+    RE_CODE_FENCE_LINE: () => RE_CODE_FENCE_LINE,
+    RE_LIST_MARK: () => RE_LIST_MARK,
+    RE_MARKER_RESIDUE_LINE: () => RE_MARKER_RESIDUE_LINE,
+    RE_RAW_HEADING_LINE: () => RE_RAW_HEADING_LINE,
+    RE_TOOL_CALL_BLOCK: () => RE_TOOL_CALL_BLOCK,
+    SECTION_ANSWER_TAG: () => SECTION_ANSWER_TAG,
+    SECTION_REASONING_TAG: () => SECTION_REASONING_TAG,
+    TC_ENVELOPE_FORMS: () => TC_ENVELOPE_FORMS,
+    TC_LFR_CLOSE: () => TC_LFR_CLOSE,
+    TC_LFR_OPEN: () => TC_LFR_OPEN,
+    TC_PROSE_ANCHOR: () => TC_PROSE_ANCHOR,
+    TC_RESULTS_CLOSE: () => TC_RESULTS_CLOSE,
+    TC_RESULTS_OPEN: () => TC_RESULTS_OPEN,
+    TC_TASK_CLOSE: () => TC_TASK_CLOSE,
+    TC_TASK_OPEN: () => TC_TASK_OPEN,
+    TOOL_CALL_TAG_ALT: () => TOOL_CALL_TAG_ALT,
+    TOOL_CALL_TAG_NAMES: () => TOOL_CALL_TAG_NAMES,
+    TOOL_RESULTS_CLOSE: () => TOOL_RESULTS_CLOSE,
+    TOOL_RESULTS_OPEN: () => TOOL_RESULTS_OPEN,
+    TOOL_RESULTS_TAIL: () => TOOL_RESULTS_TAIL,
+    VISIBLE_USER_PROMPT_END: () => VISIBLE_USER_PROMPT_END,
+    VISIBLE_USER_PROMPT_START: () => VISIBLE_USER_PROMPT_START,
+    VISIBLE_USER_PROMPT_VALUE: () => VISIBLE_USER_PROMPT_VALUE,
+    applyReasoningExportFields: () => applyReasoningExportFields,
+    bdsDiagLine: () => bdsDiagLine,
+    bdsDiagSlice: () => bdsDiagSlice,
+    bdsFirstContentLine: () => bdsFirstContentLine,
+    bdsFormOfHeadLine: () => bdsFormOfHeadLine,
+    bdsLastContentLine: () => bdsLastContentLine,
+    bdsWrapperFormId: () => bdsWrapperFormId,
+    betterDeepSeekForms: () => betterDeepSeekForms,
+    blockLinePair: () => blockLinePair,
+    buildAutoExportFileName: () => buildAutoExportFileName,
+    buildExportFileName: () => buildExportFileName,
+    buildGsaExportFileName: () => buildGsaExportFileName,
+    convIdStamp: () => convIdStamp,
+    copyMessageWithText: () => copyMessageWithText,
+    coreOfBlock: () => coreOfBlock,
+    coreOfLine: () => coreOfLine,
+    corePrefixCutIndex: () => corePrefixCutIndex,
+    coreText: () => coreText,
+    countMarker: () => countMarker,
+    crossCopyIsSubstantial: () => crossCopyIsSubstantial,
+    cutLeadingCopy: () => cutLeadingCopy,
+    cutPairHead: () => cutPairHead,
+    cutPairTail: () => cutPairTail,
+    deSpaceAny: () => deSpaceAny,
+    dedupeCrossRawCopies: () => dedupeCrossRawCopies,
+    dedupeIntraMessage: () => dedupeIntraMessage,
+    dedupeMessages: () => dedupeMessages,
+    default: () => export_emit_pipeline_default,
+    diagTag: () => diagTag,
+    disambiguateFileName: () => disambiguateFileName,
+    effectiveAutoExportThreshold: () => effectiveAutoExportThreshold,
+    effectiveReasoningToggle: () => effectiveReasoningToggle,
+    exportPad2: () => exportPad2,
+    extractConvIdFromUrl: () => extractConvIdFromUrl,
+    firedSessionKey: () => firedSessionKey,
+    getAutoExportFired: () => getAutoExportFired,
+    hasHiddenFields: () => hasHiddenFields,
+    hasReasoningInSource: () => hasReasoningInSource,
+    hiddenReasoningOf: () => hiddenReasoningOf,
+    includeHiddenExportBlocks: () => includeHiddenExportBlocks,
+    injectedUserTextSkipReason: () => injectedUserTextSkipReason,
+    intraBlocksSimilar: () => intraBlocksSimilar,
+    isBdsOpenTagLine: () => isBdsOpenTagLine,
+    isEmptyExportText: () => isEmptyExportText,
+    isFileNameTaken: () => isFileNameTaken,
+    isFiredInSession: () => isFiredInSession,
+    isRawMarkdownBlock: () => isRawMarkdownBlock,
+    isToolResultsOnlyText: () => isToolResultsOnlyText,
+    latchKey: () => latchKey,
+    manualExportStamp: () => manualExportStamp,
+    markAutoExportFired: () => markAutoExportFired,
+    normExportFmt: () => normExportFmt,
+    normalizeExportMessages: () => normalizeExportMessages,
+    normalizeIntraBlock: () => normalizeIntraBlock,
+    notCompleteReason: () => notCompleteReason,
+    pickExportSource: () => pickExportSource,
+    prepareExportMessages: () => prepareExportMessages,
+    renderedBeforeRaw: () => renderedBeforeRaw,
+    resetAutoExportFired: () => resetAutoExportFired,
+    resolveAutoExportConvId: () => resolveAutoExportConvId,
+    resolveExportSource: () => resolveExportSource,
+    safeModelSeg: () => safeModelSeg,
+    safeSeg: () => safeSeg,
+    sanitizeBetterDeepSeekText: () => sanitizeBetterDeepSeekText,
+    sanitizeEmitMessages: () => sanitizeEmitMessages,
+    sanitizeInjectedUserText: () => sanitizeInjectedUserText,
+    sanitizeToolContinuationText: () => sanitizeToolContinuationText,
+    sepForSections: () => sepForSections,
+    separateRawBlocks: () => separateRawBlocks,
+    seqEqual: () => seqEqual,
+    seqIsPrefix: () => seqIsPrefix,
+    seqIsSuffix: () => seqIsSuffix,
+    sessionFiredPatch: () => sessionFiredPatch,
+    shouldSkipAutoExport: () => shouldSkipAutoExport,
+    shouldSkipBaseCompleteTrigger: () => shouldSkipBaseCompleteTrigger,
+    shouldSkipGsaPageGuard: () => shouldSkipGsaPageGuard,
+    sourceTierOf: () => sourceTierOf,
+    splitRawSections: () => splitRawSections,
+    splitReasoningSections: () => splitReasoningSections,
+    stripHiddenFields: () => stripHiddenFields,
+    stripMarkerResidue: () => stripMarkerResidue,
+    stripReasoningSections: () => stripReasoningSections,
+    stripToolCallBlocks: () => stripToolCallBlocks,
+    tcIsWholeMessagePair: () => tcIsWholeMessagePair,
+    tcPairAfter: () => tcPairAfter,
+    tcProseAnchorLine: () => tcProseAnchorLine,
+    toolContinuationForms: () => toolContinuationForms,
+    trimEdgeEmpty: () => trimEdgeEmpty,
+    trimPairEdges: () => trimPairEdges,
+    unionTurnsById: () => unionTurnsById,
+    withoutHiddenFields: () => withoutHiddenFields
+  });
+  function safeSeg(s) {
+    return String(s == null ? "" : s).replace(/[^a-zA-Z0-9_-]+/g, "-").replace(/^-+|-+$/g, "");
+  }
+  function extractConvIdFromUrl(pathname) {
+    try {
+      var p = String(pathname || "");
+      var mPr = p.match(/\/prompts\/(?!new(?:_chat)?(?:\/|$)|apikey(?:\/|$))([A-Za-z0-9_-]+)/);
+      if (mPr) return mPr[1];
+      var mApp = p.match(/\/app\/(?!prompts(?:\/|$)|new(?:\/|$)|apikey(?:\/|$))([A-Za-z0-9_-]+)/);
+      if (mApp) return mApp[1];
+      var mDs = p.match(/\/a\/chat\/s\/([A-Za-z0-9_-]+)/);
+      if (mDs) return mDs[1];
+      var parts = p.split("/");
+      var chatIdx = parts.indexOf("chat");
+      if (chatIdx !== -1 && chatIdx + 1 < parts.length && parts[chatIdx + 1]) return parts[chatIdx + 1];
+      var mC = p.match(/\/c\/([A-Za-z0-9_-]+)/);
+      if (mC) return mC[1];
+      var mPss = p.match(/\/session\/([0-9a-f-]{8,})/);
+      if (mPss) return mPss[1];
+      var mPs = p.match(/\/search\/([A-Za-z0-9_-]{8,})/);
+      if (mPs) return mPs[1];
+      var mP = p.match(/\/thread\/([A-Za-z0-9_-]+)/);
+      if (mP) return mP[1];
+      return "";
+    } catch (e) {
+      return "";
+    }
+  }
+  function normExportFmt(fmt) {
+    return fmt === "md" ? "md" : fmt === "json" ? "json" : "txt";
+  }
+  function exportPad2(n) {
+    return (n < 10 ? "0" : "") + n;
+  }
+  function convIdStamp(d) {
+    return d.getFullYear() + "-" + exportPad2(d.getMonth() + 1) + "-" + exportPad2(d.getDate()) + "_" + exportPad2(d.getHours()) + "-" + exportPad2(d.getMinutes());
+  }
+  function manualExportStamp(d) {
+    return d.getFullYear() + "-" + exportPad2(d.getMonth() + 1) + "-" + exportPad2(d.getDate()) + "-" + exportPad2(d.getHours()) + "-" + exportPad2(d.getMinutes());
+  }
+  function safeModelSeg(model) {
+    return String(model == null ? "" : model).replace(/[^a-zA-Z0-9_.-]+/g, "-").replace(/^-+|-+$/g, "") || "model";
+  }
+  function isFileNameTaken(taken, name) {
+    try {
+      if (!taken || !name) return false;
+      if (typeof Set !== "undefined" && taken instanceof Set) return taken.has(name);
+      if (Array.isArray(taken)) return taken.indexOf(name) !== -1;
+      if (typeof taken === "object") return Object.prototype.hasOwnProperty.call(taken, name);
+      return false;
+    } catch (e) {
+      return false;
+    }
+  }
+  function disambiguateFileName(name, taken) {
+    var base = String(name == null ? "" : name);
+    try {
+      if (!isFileNameTaken(taken, base)) return base;
+      var m = base.match(/^(.*)\.([A-Za-z0-9]+)$/);
+      var stem = m ? m[1] : base;
+      var ext = m ? "." + m[2] : "";
+      for (var i = 2; i <= 999; i++) {
+        var cand = stem + "-" + i + ext;
+        if (!isFileNameTaken(taken, cand)) return cand;
+      }
+      return stem + "-" + Date.now() + ext;
+    } catch (e) {
+      return base;
+    }
+  }
+  function buildAutoExportFileName(spec) {
+    var s = spec || {};
+    var lowConfPrefix = s.isLowConfidence === true ? "[LOW CONFIDENCE]_" : "";
+    var d = /* @__PURE__ */ new Date();
+    var base;
+    if (s.mask === "manual") {
+      var siteSeg = safeSeg(s.site) || "google_search";
+      base = "ai-context-monitor-" + siteSeg + "-" + safeModelSeg(s.model) + "-" + manualExportStamp(d);
+    } else {
+      var cidSeg = safeSeg(String(s.convId || "").slice(0, 8)) || "noconv";
+      var svcSeg = safeSeg(s.service) || "chat";
+      var suffix = "";
+      if (s.reason === "pre-trim") suffix = "-pretrim";
+      else if (s.reason === "base-complete") suffix = "-base-complete";
+      base = svcSeg + "-" + cidSeg + "-" + convIdStamp(d) + suffix;
+    }
+    return disambiguateFileName(lowConfPrefix + base + "." + normExportFmt(s.fmt), s.taken);
+  }
+  function buildExportFileName(service, convId, reason, isLowConfidence, fmt) {
+    return buildAutoExportFileName({
+      mask: "convId",
+      service,
+      convId,
+      reason,
+      isLowConfidence,
+      fmt,
+      taken: arguments.length > 5 ? arguments[5] : null
+    });
+  }
+  function buildGsaExportFileName(site, model, isLowConfidence, fmt) {
+    return buildAutoExportFileName({
+      mask: "manual",
+      site,
+      model,
+      isLowConfidence,
+      fmt,
+      taken: arguments.length > 4 ? arguments[4] : null
+    });
+  }
+  function resolveAutoExportConvId(site, urlConvId, threadId) {
+    var cid = String(urlConvId == null ? "" : urlConvId);
+    if (cid) return cid;
+    if (String(site == null ? "" : site) === "google_search") {
+      return String(threadId == null ? "" : threadId);
+    }
+    return "";
+  }
+  function notCompleteReason(state) {
+    var s = state || {};
+    if (s.site === "google_search" && s.probeRunning === true) return "probe-running";
+    return "not-complete";
+  }
+  function pickExportSource(hasBaseSeen, hasNetworkTexts) {
+    return hasBaseSeen === true ? "network" : "adapter";
+  }
+  function resolveExportSource(state) {
+    var s = state || {};
+    if (s.isGemini !== true) return { action: "local", reason: "non-gemini" };
+    if (s.bridge !== true) return { action: "local", reason: "no-bridge" };
+    var arch = typeof s.archiveCount === "number" && s.archiveCount > 0 ? s.archiveCount : 0;
+    if (arch <= 0) return { action: "local", reason: "no-archive" };
+    var live = typeof s.liveCount === "number" ? s.liveCount : null;
+    if (live === 0) return { action: "block", reason: "archive-only-base" };
+    var base = typeof s.baseCount === "number" ? s.baseCount : 0;
+    var local = typeof s.localCount === "number" ? s.localCount : 0;
+    if (live !== null && live > 0 && base > local) return { action: "union", reason: "stale-local-source" };
+    return { action: "local", reason: "in-sync" };
+  }
+  function sourceTierOf(state) {
+    var s = state || {};
+    var arch = typeof s.archiveCount === "number" && s.archiveCount > 0 ? s.archiveCount : 0;
+    var live = typeof s.liveCount === "number" && s.liveCount > 0 ? s.liveCount : 0;
+    if (arch > 0 && live > 0) return "[MERGED: ARCHIVE+LIVE]";
+    if (arch > 0) return "[ARCHIVE]";
+    return "[BEST-EFFORT: LIVE CAPTURE]";
+  }
+  function shouldSkipGsaPageGuard(state) {
+    var s = state || {};
+    if (s.site !== "google_search") return { skip: false, reason: null };
+    if (s.chatPageMarker === false) return { skip: true, reason: "not-chat-page" };
+    if (typeof s.msgCount === "number" && s.msgCount < 1) return { skip: true, reason: "no-messages" };
+    if (typeof s.baseTextLen === "number" && s.baseTextLen < 1) return { skip: true, reason: "empty-base" };
+    return { skip: false, reason: null };
+  }
+  function shouldSkipAutoExport(state) {
+    var s = state || {};
+    if (s.enabled !== true) return { skip: true, reason: "not-enabled", resetFired: false };
+    if (typeof s.percentage !== "number" || !(s.percentage >= 0)) return { skip: true, reason: "no-pct", resetFired: false };
+    var gsaPage = shouldSkipGsaPageGuard(s);
+    if (gsaPage.skip) return { skip: true, reason: gsaPage.reason, resetFired: false };
+    var threshold = typeof s.threshold === "number" && s.threshold >= 1 && s.threshold <= 100 ? s.threshold : 90;
+    var domBaseTrusted = s.domBaseTrusted === true;
+    var networkCompleteLatch = s.gsaNetworkCompleteLatch === true;
+    var completeOk = s.baseComplete === true || networkCompleteLatch;
+    var baseReady = completeOk || domBaseTrusted;
+    var basePending = s.isGemini !== true && s.baseSeen !== true && !domBaseTrusted && !networkCompleteLatch;
+    if (!baseReady && !basePending) return { skip: true, reason: "not-complete", resetFired: false };
+    if (s.historyIncomplete === true) return { skip: true, reason: "not-complete", resetFired: false };
+    if (s.isGemini === true && typeof s.archiveCount === "number" && s.archiveCount > 0 && typeof s.baseCount === "number" && s.baseCount <= s.archiveCount) {
+      return { skip: true, reason: "archive-pending-live", resetFired: false };
+    }
+    if (s.isGemini === true && s.loaderRunning) return { skip: true, reason: "loader-running", resetFired: false };
+    if (s.percentage < threshold - 10) {
+      if (s.isGemini === true || s.baseSeen === true) return { skip: true, reason: "below-threshold-hysteresis", resetFired: true };
+      return { skip: true, reason: "below-threshold-unreliable", resetFired: false };
+    }
+    if (s.percentage < threshold) return { skip: true, reason: "below-threshold", resetFired: false };
+    if (!baseReady && basePending) return { skip: true, reason: "base-pending", resetFired: false };
+    if (s.fired) return { skip: true, reason: "already-fired", resetFired: false };
+    return { skip: false, reason: null, resetFired: false };
+  }
+  function shouldSkipBaseCompleteTrigger(state) {
+    var s = state || {};
+    var threshold = typeof s.threshold === "number" && s.threshold >= 1 && s.threshold <= 100 ? s.threshold : 90;
+    if (typeof s.percentage !== "number" || !(s.percentage >= 0)) {
+      return { skip: true, reason: "no-pct", threshold };
+    }
+    if (s.percentage < threshold) {
+      return { skip: true, reason: "below-threshold-base-complete", threshold };
+    }
+    return { skip: false, reason: null, threshold };
+  }
+  function effectiveAutoExportThreshold(globalPct, perSitePct) {
+    function clampPerSite(v) {
+      var n = parseInt(v, 10);
+      if (isNaN(n)) return null;
+      if (n < 1) return 1;
+      if (n > 100) return 100;
+      return n;
+    }
+    if (perSitePct !== void 0 && perSitePct !== null && String(perSitePct).trim() !== "") {
+      var per = clampPerSite(perSitePct);
+      if (per != null) return per;
+    }
+    var g = typeof globalPct === "number" && globalPct >= 1 && globalPct <= 100 ? globalPct : null;
+    return g == null ? 90 : g;
+  }
+  function latchKey(service, convId) {
+    return safeSeg(service) + "|" + String(convId || "");
+  }
+  function markAutoExportFired(store, service, convId) {
+    try {
+      store[latchKey(service, convId)] = 1;
+    } catch (e) {
+    }
+  }
+  function getAutoExportFired(store, service, convId) {
+    try {
+      return store[latchKey(service, convId)] === 1;
+    } catch (e) {
+      return false;
+    }
+  }
+  function resetAutoExportFired(store, service, convId) {
+    try {
+      delete store[latchKey(service, convId)];
+    } catch (e) {
+    }
+  }
+  function firedSessionKey(service, convId) {
+    return FIRED_SESSION_PREFIX + latchKey(service, convId);
+  }
+  function isFiredInSession(sessionMap, service, convId) {
+    try {
+      return !!sessionMap && sessionMap[firedSessionKey(service, convId)] === 1;
+    } catch (e) {
+      return false;
+    }
+  }
+  function sessionFiredPatch(service, convId) {
+    var patch = {};
+    try {
+      patch[firedSessionKey(service, convId)] = 1;
+    } catch (e) {
+    }
+    return patch;
+  }
+  function normalizeExportMessages(raw) {
+    var out = [];
+    try {
+      if (!Array.isArray(raw)) return out;
+      for (var i = 0; i < raw.length; i++) {
+        var m = raw[i] || {};
+        var text = typeof m.text === "string" ? m.text : typeof m.content === "string" ? m.content : "";
+        if (!text) continue;
+        var norm = { role: m.role === "user" || m.role === "human" ? "user" : "assistant", text };
+        if (typeof aiCmDiagLine === "function") {
+          aiCmDiagLine("claude-role-normalize", { inputRole: m.role, outputRole: norm.role });
+        }
+        if (typeof m.hiddenReasoning === "string" && m.hiddenReasoning) norm.hiddenReasoning = m.hiddenReasoning;
+        out.push(norm);
+      }
+    } catch (e) {
+      swallow(e, "export-utils:normalizeExportMessages");
+    }
+    return out;
+  }
+  function deSpaceAny(s) {
+    return String(s == null ? "" : s).replace(RE_ANY_SPACE, " ");
+  }
+  function coreOfLine(line) {
+    try {
+      var s = deSpaceAny(line);
+      if (RE_CODE_FENCE_LINE.test(s)) return "";
+      var prev;
+      do {
+        prev = s;
+        s = s.replace(/^[ \t]+/, "");
+        if (/^>[ \t]?/.test(s)) s = s.replace(/^>[ \t]?/, "");
+        else if (RE_LIST_MARK.test(s)) s = s.replace(RE_LIST_MARK, "");
+        else if (RE_RAW_HEADING_LINE.test(s)) s = s.replace(/^#{1,}[ \t]*/, "");
+      } while (s !== prev);
+      return s.replace(/[*_`~#>]+/g, " ").replace(/\s+/g, " ").trim();
+    } catch (e) {
+      return "";
+    }
+  }
+  function coreText(text) {
+    try {
+      var lines = deSpaceAny(text).split("\n");
+      var kept = [];
+      for (var i = 0; i < lines.length; i++) {
+        var c = coreOfLine(lines[i]);
+        if (c) kept.push(c);
+      }
+      return kept.join(" ");
+    } catch (e) {
+      return "";
+    }
+  }
+  function stripMarkerResidue(text) {
+    try {
+      var s = String(text == null ? "" : text);
+      if (s.indexOf("#") === -1) return s;
+      var lines = s.split("\n");
+      var kept = [];
+      var dropped = false;
+      for (var i = 0; i < lines.length; i++) {
+        if (RE_MARKER_RESIDUE_LINE.test(lines[i])) {
+          dropped = true;
+          continue;
+        }
+        kept.push(lines[i]);
+      }
+      return dropped ? kept.join("\n") : s;
+    } catch (e) {
+      return String(text == null ? "" : text);
+    }
+  }
+  function dedupeMessages(messages) {
+    var out = [];
+    var seen = {};
+    var removed = 0;
+    try {
+      if (!Array.isArray(messages)) return { messages: out, removed: 0 };
+      for (var i = 0; i < messages.length; i++) {
+        var m = messages[i] || {};
+        var role = m.role === "user" ? "user" : "assistant";
+        var text = typeof m.text === "string" ? m.text : "";
+        var key = role + "\0" + coreText(text);
+        if (Object.prototype.hasOwnProperty.call(seen, key)) {
+          removed++;
+          continue;
+        }
+        seen[key] = true;
+        var keep = { role, text };
+        if (m.id != null) keep.id = m.id;
+        out.push(keep);
+      }
+    } catch (e) {
+      swallow(e, "export-utils:dedupeMessages");
+    }
+    return { messages: out, removed };
+  }
+  function isRawMarkdownBlock(block) {
+    try {
+      var lines = String(block == null ? "" : block).split("\n");
+      for (var i = 0; i < lines.length; i++) {
+        if (RE_RAW_HEADING_LINE.test(lines[i])) return true;
+      }
+      return false;
+    } catch (e) {
+      return false;
+    }
+  }
+  function separateRawBlocks(text) {
+    return String(text).replace(/([^#\n])[ \t]*(#{1,6})(?=[ \t])/g, function(all, prev, hashes) {
+      if (hashes.length < 2 && !/[.!?;:»")\]]$/.test(prev)) return all;
+      return prev + "\n\n" + hashes;
+    });
+  }
+  function splitRawSections(block) {
+    try {
+      var lines = String(block == null ? "" : block).split("\n");
+      var out = [];
+      var cur = null;
+      for (var i = 0; i < lines.length; i++) {
+        if (RE_RAW_HEADING_LINE.test(lines[i])) {
+          if (cur) out.push(cur.join("\n"));
+          cur = [lines[i]];
+        } else if (cur) {
+          cur.push(lines[i]);
+        } else {
+          cur = [lines[i]];
+        }
+      }
+      if (cur) out.push(cur.join("\n"));
+      return out.length ? out : [String(block == null ? "" : block)];
+    } catch (e) {
+      return [String(block == null ? "" : block)];
+    }
+  }
+  function sepForSections(block) {
+    return /\n{2,}/.test(String(block == null ? "" : block)) ? "\n\n" : "\n";
+  }
+  function cutLeadingCopy(section, folded) {
+    var lines = String(section).split("\n");
+    if (lines.length < 2) return { text: String(section), trimmed: false };
+    var head = lines[0];
+    var body = lines.slice(1).join("\n");
+    var bodyNorm = normalizeIntraBlock(body);
+    var copyNorm = normalizeIntraBlock(folded);
+    if (!bodyNorm || !copyNorm) return { text: String(section), trimmed: false };
+    if (bodyNorm === copyNorm) return null;
+    if (bodyNorm.indexOf(copyNorm) === 0) {
+      var tail = bodyNorm.slice(copyNorm.length).replace(/^\s+/, "");
+      if (!tail) return null;
+      var lastWord = copyNorm.split(" ").pop();
+      var at = body.lastIndexOf(lastWord);
+      if (at < 0) return null;
+      var rest = body.slice(at + lastWord.length).replace(/^\s+/, "");
+      if (!rest) return null;
+      return { text: head + "\n" + rest, trimmed: true };
+    }
+    var cutIdx = corePrefixCutIndex(body, coreText(folded));
+    if (cutIdx < 0) return { text: String(section), trimmed: false };
+    var restCore = body.slice(cutIdx).replace(/^\s+/, "");
+    if (!restCore) return null;
+    return { text: head + "\n" + restCore, trimmed: true };
+  }
+  function corePrefixCutIndex(body, copyCore) {
+    try {
+      if (!copyCore) return -1;
+      if (coreText(body).indexOf(copyCore) !== 0) return -1;
+      var re = /(\S+)/g;
+      var m;
+      while ((m = re.exec(body)) !== null) {
+        var end = m.index + m[0].length;
+        var probe = coreText(body.slice(0, end));
+        if (probe === copyCore) return end;
+        if (probe.length > copyCore.length) return -1;
+      }
+      return -1;
+    } catch (e) {
+      return -1;
+    }
+  }
+  function renderedBeforeRaw(blocks, i, raw) {
+    for (var b = i - 1; b >= 0; b--) {
+      if (b === i || raw[b]) continue;
+      if (!coreText(blocks[b])) continue;
+      return String(blocks[b]);
+    }
+    return null;
+  }
+  function normalizeIntraBlock(block) {
+    return String(block == null ? "" : block).replace(/\s+/g, " ").trim();
+  }
+  function intraBlocksSimilar(a, b) {
+    var x = coreText(a);
+    var y = coreText(b);
+    if (!x || !y) return false;
+    if (x === y) return true;
+    var minLen = x.length < y.length ? x.length : y.length;
+    if (minLen < INTRA_CORE_MIN_LEN) return false;
+    return x.length >= y.length ? x.indexOf(y) !== -1 : y.indexOf(x) !== -1;
+  }
+  function dedupeIntraMessage(message) {
+    var text = message && typeof message.text === "string" ? message.text : "";
+    var removedBlocks = 0;
+    try {
+      let coreDup = function(core, selfIdx, minLen) {
+        if (!core) return false;
+        if (seenCore[core]) return true;
+        if (core.length < minLen) return false;
+        for (var q = 0; q < blocks.length; q++) {
+          if (q === selfIdx || drop[q] || raw[q] || !norm[q]) continue;
+          if (intraBlocksSimilar(core, blocks[q])) return true;
+        }
+        return false;
+      };
+      if (!text) return { text, removedBlocks: 0 };
+      var seam = separateRawBlocks(text);
+      var blocks = seam.split(/\n{2,}/);
+      if (blocks.length < 2) return { text, removedBlocks: 0 };
+      var norm = [];
+      var raw = [];
+      var i;
+      for (i = 0; i < blocks.length; i++) {
+        norm.push(coreText(blocks[i]));
+        raw.push(isRawMarkdownBlock(blocks[i]));
+      }
+      var drop = {};
+      var seen = /* @__PURE__ */ Object.create(null);
+      for (i = 0; i < blocks.length; i++) {
+        if (!norm[i]) continue;
+        if (seen[norm[i]]) {
+          drop[i] = true;
+          removedBlocks++;
+          continue;
+        }
+        seen[norm[i]] = true;
+      }
+      var seenCore = /* @__PURE__ */ Object.create(null);
+      var cores = [];
+      for (i = 0; i < blocks.length; i++) {
+        cores.push(coreOfBlock(blocks[i]));
+        if (drop[i] || raw[i] || !norm[i]) continue;
+        if (cores[i]) seenCore[cores[i]] = true;
+      }
+      for (i = 0; i < blocks.length; i++) {
+        if (drop[i] || !raw[i]) continue;
+        if (coreDup(cores[i], i, INTRA_CORE_MIN_LEN)) {
+          drop[i] = true;
+          removedBlocks++;
+          continue;
+        }
+        var secs = splitRawSections(blocks[i]);
+        var folded = renderedBeforeRaw(blocks, i, raw);
+        if (folded === null) continue;
+        var cutSecs = 0;
+        var keptSecs = [];
+        for (var s = 0; s < secs.length; s++) {
+          if (coreDup(coreOfBlock(secs[s]), i, 0)) {
+            cutSecs++;
+            continue;
+          }
+          var cut = cutLeadingCopy(secs[s], folded);
+          if (cut === null) {
+            cutSecs++;
+            continue;
+          }
+          if (cut.trimmed) cutSecs++;
+          keptSecs.push(cut.text);
+        }
+        if (cutSecs === 0) continue;
+        removedBlocks += cutSecs;
+        if (keptSecs.length === 0) {
+          drop[i] = true;
+          continue;
+        }
+        blocks[i] = keptSecs.join(sepForSections(blocks[i])).replace(/^\n+/, "");
+        norm[i] = coreText(blocks[i]);
+        cores[i] = coreOfBlock(blocks[i]);
+        raw[i] = isRawMarkdownBlock(blocks[i]);
+      }
+      for (i = 0; i < blocks.length; i++) {
+        if (drop[i] || !raw[i]) continue;
+        var coreRaw = cores[i];
+        if (coreRaw.length < INTRA_CORE_MIN_LEN) continue;
+        for (var j = i + 1; j < blocks.length; j++) {
+          if (drop[j] || raw[j]) continue;
+          if (intraBlocksSimilar(coreRaw, blocks[j])) {
+            drop[i] = true;
+            removedBlocks++;
+            break;
+          }
+        }
+      }
+      if (removedBlocks === 0) return { text, removedBlocks: 0 };
+      var kept = [];
+      for (i = 0; i < blocks.length; i++) {
+        if (!drop[i]) kept.push(blocks[i]);
+      }
+      return { text: kept.join("\n\n"), removedBlocks };
+    } catch (e) {
+      swallow(e, "export-utils:dedupeIntraMessage");
+    }
+    return { text, removedBlocks: 0 };
+  }
+  function coreOfBlock(block) {
+    try {
+      var lines = String(block == null ? "" : block).split("\n");
+      var kept = [];
+      for (var i = 0; i < lines.length; i++) {
+        if (RE_RAW_HEADING_LINE.test(lines[i])) continue;
+        kept.push(lines[i]);
+      }
+      return coreText(kept.join("\n"));
+    } catch (e) {
+      return coreText(block);
+    }
+  }
+  function blockLinePair(block) {
+    var raw = deSpaceAny(block).split("\n");
+    var core = [];
+    for (var i = 0; i < raw.length; i++) core.push(coreOfLine(raw[i]));
+    return trimPairEdges(raw, core);
+  }
+  function trimPairEdges(raw, core) {
+    var a = 0, b = raw.length;
+    while (a < b && !core[a]) a++;
+    while (b > a && !core[b - 1]) b--;
+    return { raw: raw.slice(a, b), core: core.slice(a, b) };
+  }
+  function cutPairHead(pair, n) {
+    return trimPairEdges(pair.raw.slice(n), pair.core.slice(n));
+  }
+  function cutPairTail(pair, n) {
+    var k = pair.raw.length - n;
+    return trimPairEdges(pair.raw.slice(0, k), pair.core.slice(0, k));
+  }
+  function trimEdgeEmpty(lines) {
+    var a = lines.slice();
+    while (a.length && !a[0]) a.shift();
+    while (a.length && !a[a.length - 1]) a.pop();
+    return a;
+  }
+  function seqEqual(a, b) {
+    if (a.length !== b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      if (a[i] !== b[i]) return false;
+    }
+    return true;
+  }
+  function seqIsPrefix(shortArr, longArr) {
+    if (!shortArr.length || shortArr.length >= longArr.length) return false;
+    for (var i = 0; i < shortArr.length; i++) {
+      if (shortArr[i] !== longArr[i]) return false;
+    }
+    return true;
+  }
+  function seqIsSuffix(shortArr, longArr) {
+    if (!shortArr.length || shortArr.length >= longArr.length) return false;
+    var off = longArr.length - shortArr.length;
+    for (var i = 0; i < shortArr.length; i++) {
+      if (shortArr[i] !== longArr[off + i]) return false;
+    }
+    return true;
+  }
+  function crossCopyIsSubstantial(lines) {
+    var ls = trimEdgeEmpty(lines);
+    var nonEmpty = 0;
+    var chars = 0;
+    for (var i = 0; i < ls.length; i++) {
+      if (!ls[i]) continue;
+      nonEmpty++;
+      chars += ls[i].length;
+    }
+    return nonEmpty >= CROSS_RAW_MIN_LINES && chars >= CROSS_RAW_MIN_CHARS;
+  }
+  function dedupeCrossRawCopies(messages) {
+    var out = [];
+    var removed = 0;
+    var refs = [];
+    try {
+      var src = Array.isArray(messages) ? messages : [];
+      for (var i = 0; i < src.length; i++) {
+        var m = src[i] || {};
+        var text = typeof m.text === "string" ? m.text : "";
+        if (!text) {
+          out.push(m);
+          continue;
+        }
+        var blocks = separateRawBlocks(text).split(/\n{2,}/);
+        var keptBlocks = [];
+        var touched = false;
+        for (var b = 0; b < blocks.length; b++) {
+          if (!isRawMarkdownBlock(blocks[b])) {
+            keptBlocks.push(blocks[b]);
+            continue;
+          }
+          var pair = blockLinePair(blocks[b]);
+          var origJoin = pair.raw.join("\n");
+          var dropped = false;
+          var changed = true;
+          while (changed && !dropped) {
+            changed = false;
+            for (var r = 0; r < refs.length; r++) {
+              var ref = refs[r];
+              if (seqEqual(ref, pair.core)) {
+                if (!crossCopyIsSubstantial(ref)) continue;
+                dropped = true;
+                removed++;
+                break;
+              }
+              if (seqIsSuffix(ref, pair.core) && crossCopyIsSubstantial(ref)) {
+                pair = cutPairTail(pair, ref.length);
+                changed = true;
+                break;
+              }
+              if (seqIsPrefix(ref, pair.core) && crossCopyIsSubstantial(ref)) {
+                pair = cutPairHead(pair, ref.length);
+                changed = true;
+                break;
+              }
+            }
+            if (!dropped && !pair.raw.length) {
+              dropped = true;
+              removed++;
+            }
+          }
+          if (dropped || !pair.raw.length) {
+            touched = true;
+            continue;
+          }
+          var rebuilt = pair.raw.join("\n");
+          if (rebuilt !== origJoin) touched = true;
+          keptBlocks.push(rebuilt);
+          if (isRawMarkdownBlock(rebuilt)) refs.push(pair.core);
+        }
+        var keep = { role: m.role === "user" ? "user" : "assistant", text: touched ? keptBlocks.join("\n\n") : text };
+        if (m.id != null) keep.id = m.id;
+        out.push(keep);
+      }
+    } catch (e) {
+      return { messages: Array.isArray(messages) ? messages : [], removed: 0 };
+    }
+    return { messages: out, removed };
+  }
+  function prepareExportMessages(raw, onMessageDedupe) {
+    var intraRemoved = 0;
+    var out = [];
+    try {
+      var src = Array.isArray(raw) ? raw : [];
+      for (var i = 0; i < src.length; i++) {
+        var m = src[i] || {};
+        var role = m.role === "user" ? "user" : "assistant";
+        var text = typeof m.text === "string" ? m.text : "";
+        var res = dedupeIntraMessage({ role, text });
+        var next = { role, text: res.text };
+        if (m.id != null) next.id = m.id;
+        out.push(next);
+        if (res.removedBlocks > 0) {
+          intraRemoved += res.removedBlocks;
+          if (typeof onMessageDedupe === "function") {
+            try {
+              onMessageDedupe(role, res.removedBlocks);
+            } catch (eCb) {
+            }
+          }
+        }
+      }
+    } catch (e) {
+      out = Array.isArray(raw) ? raw : [];
+      intraRemoved = 0;
+    }
+    var inter = dedupeMessages(out);
+    var cross = dedupeCrossRawCopies(inter.messages);
+    var cleaned = [];
+    for (var k = 0; k < cross.messages.length; k++) {
+      var mk = cross.messages[k] || {};
+      var clean = {
+        role: mk.role === "user" ? "user" : "assistant",
+        text: stripMarkerResidue(typeof mk.text === "string" ? mk.text : "")
+      };
+      if (mk.id != null) clean.id = mk.id;
+      cleaned.push(clean);
+    }
+    return {
+      messages: cleaned,
+      intraRemoved,
+      removed: inter.removed + cross.removed,
+      crossRemoved: cross.removed
+    };
+  }
+  function countMarker(text, marker) {
+    var n = 0;
+    var at = text.indexOf(marker);
+    while (at !== -1) {
+      n++;
+      at = text.indexOf(marker, at + marker.length);
+    }
+    return n;
+  }
+  function injectedUserTextSkipReason(text) {
+    var s = typeof text === "string" ? text : String(text == null ? "" : text);
+    var starts = countMarker(s, VISIBLE_USER_PROMPT_START);
+    var ends = countMarker(s, VISIBLE_USER_PROMPT_END);
+    if (starts === 0 && ends === 0) {
+      return s.indexOf(VISIBLE_USER_PROMPT_VALUE) !== -1 ? "value-only" : "no-markers";
+    }
+    if (starts === 1 && ends === 1) {
+      return s.indexOf(VISIBLE_USER_PROMPT_END) < s.indexOf(VISIBLE_USER_PROMPT_START) ? "unpaired-markers" : null;
+    }
+    if (starts > 1 || ends > 1) return "multiple-pairs";
+    return "unpaired-markers";
+  }
+  function sanitizeInjectedUserText(text) {
+    var s = typeof text === "string" ? text : String(text == null ? "" : text);
+    if (injectedUserTextSkipReason(s) !== null) return s;
+    var from = s.indexOf(VISIBLE_USER_PROMPT_START) + VISIBLE_USER_PROMPT_START.length;
+    var to = s.indexOf(VISIBLE_USER_PROMPT_END, from);
+    return s.slice(from, to).trim();
+  }
+  function bdsDiagLine(tag, fields) {
+    try {
+      if (typeof aiCmDiagLine !== "function") return false;
+      return aiCmDiagLine(tag, fields) !== false;
+    } catch (eDiag) {
+      return false;
+    }
+  }
+  function bdsDiagSlice(text, from, n) {
+    try {
+      var s = typeof text === "string" ? text : String(text == null ? "" : text);
+      return JSON.stringify(from === 0 ? s.slice(0, n) : s.slice(Math.max(0, s.length - n)));
+    } catch (eSlice) {
+      return '""';
+    }
+  }
+  function isBdsOpenTagLine(line, at) {
+    if (line === BDS_OPEN_TAG) return true;
+    return at === 0 && line === BDS_BOM + BDS_OPEN_TAG;
+  }
+  function bdsFormOfHeadLine(line) {
+    var s = typeof line === "string" ? line : "";
+    for (var i = 0; i < BDS_INJECTION_FORMS.length; i++) {
+      var f = BDS_INJECTION_FORMS[i];
+      if (f.match === "prefix") {
+        if (s.slice(0, f.head.length) === f.head) return f;
+      } else if (s === f.head) return f;
+    }
+    return null;
+  }
+  function bdsFirstContentLine(lines) {
+    for (var i = 0; i < lines.length; i++) {
+      if (String(lines[i]).trim() !== "") return i;
+    }
+    return -1;
+  }
+  function bdsLastContentLine(lines) {
+    for (var i = lines.length - 1; i >= 0; i--) {
+      if (String(lines[i]).trim() !== "") return i;
+    }
+    return -1;
+  }
+  function sanitizeBetterDeepSeekText(text) {
+    var s = typeof text === "string" ? text : String(text == null ? "" : text);
+    if (s.indexOf(BDS_OPEN_TAG) === -1) return { text: s, removed: 0, forms: [] };
+    var lines = s.split("\n");
+    var drop = {};
+    var forms = [];
+    var diagRows = typeof aiCmDiagLine === "function" ? [] : null;
+    var firstLine = bdsFirstContentLine(lines);
+    var lastLine = bdsLastContentLine(lines);
+    for (var k = 0; k < lines.length; k++) {
+      if (!isBdsOpenTagLine(lines[k], k)) continue;
+      var form = k + 1 < lines.length ? bdsFormOfHeadLine(lines[k + 1]) : null;
+      if (form) {
+        var end = -1;
+        for (var j = k + 2; j < lines.length; j++) {
+          if (isBdsOpenTagLine(lines[j], j)) break;
+          if (lines[j] === BDS_CLOSE_TAG || lines[j] === BDS_TRUNCATION_MARK) {
+            end = j;
+            break;
+          }
+        }
+        if (end === -1) {
+          if (diagRows) diagRows.push({ k, first: firstLine, pair: -1, last: lastLine, form: form.id, skip: "no-boundary" });
+          continue;
+        }
+        if (diagRows) diagRows.push({ k, first: firstLine, pair: end, last: lastLine, form: form.id, skip: "(\u043D\u0435\u0442)" });
+        for (var d = k; d <= end; d++) drop[d] = true;
+        forms.push(form.id);
+        k = end;
+        continue;
+      }
+      var pair = -1;
+      for (var p = k + 1; p < lines.length; p++) {
+        if (isBdsOpenTagLine(lines[p], p)) break;
+        if (lines[p] === BDS_CLOSE_TAG) {
+          pair = p;
+          break;
+        }
+      }
+      if (pair === -1) {
+        if (diagRows) diagRows.push({ k, first: firstLine, pair: -1, last: lastLine, form: "(\u043D\u0435\u0442)", skip: "unpaired-tag" });
+        continue;
+      }
+      if (diagRows) diagRows.push({ k, first: firstLine, pair, last: lastLine, form: BDS_WRAPPER_ID, skip: "(\u043D\u0435\u0442)" });
+      drop[k] = true;
+      drop[pair] = true;
+      forms.push(BDS_WRAPPER_ID);
+      k = pair;
+    }
+    var removedTotal = forms.length;
+    if (diagRows) {
+      for (var r = 0; r < diagRows.length; r++) {
+        bdsDiagLine("o40-bds-line", {
+          k: diagRows[r].k,
+          firstLine: diagRows[r].first,
+          pair: diagRows[r].pair,
+          lastLine: diagRows[r].last,
+          form: diagRows[r].form,
+          skip: diagRows[r].skip,
+          removed: removedTotal
+        });
+      }
+    }
+    if (!forms.length) return { text: s, removed: 0, forms: [] };
+    var kept = [];
+    for (var m = 0; m < lines.length; m++) {
+      if (!drop[m]) kept.push(lines[m]);
+    }
+    return { text: kept.join("\n"), removed: forms.length, forms };
+  }
+  function tcPairAfter(lines, from, open, close) {
+    for (var i = Math.max(0, from); i < lines.length; i++) {
+      if (lines[i] !== open) continue;
+      for (var j = i + 1; j < lines.length; j++) {
+        if (lines[j] === close) return { open: i, close: j };
+      }
+      return null;
+    }
+    return null;
+  }
+  function tcIsWholeMessagePair(lines, pair) {
+    var i;
+    for (i = 0; i < pair.open; i++) {
+      if (String(lines[i]).trim() !== "") return false;
+    }
+    for (i = pair.close + 1; i < lines.length; i++) {
+      if (String(lines[i]).trim() !== "") return false;
+    }
+    return true;
+  }
+  function tcProseAnchorLine(lines) {
+    for (var i = 0; i < lines.length; i++) {
+      if (String(lines[i]).slice(0, TC_PROSE_ANCHOR.length) === TC_PROSE_ANCHOR) return i;
+    }
+    return -1;
+  }
+  function sanitizeToolContinuationText(text) {
+    var s = typeof text === "string" ? text : String(text == null ? "" : text);
+    if (s.indexOf(TC_LFR_OPEN) === -1 && s.indexOf(TC_TASK_OPEN) === -1 && s.indexOf(TC_RESULTS_OPEN) === -1 && s.indexOf(TC_PROSE_ANCHOR) === -1) {
+      return { text: s, removed: 0, forms: [] };
+    }
+    var lines = s.split("\n");
+    var drop = {};
+    var forms = [];
+    var anchor = tcProseAnchorLine(lines);
+    if (anchor !== -1) {
+      var runEnd = anchor;
+      for (var p = anchor + 1; p < lines.length; p++) {
+        if (String(lines[p]).trim() === "") break;
+        runEnd = p;
+      }
+      var spanEnd = runEnd;
+      var afterRun = runEnd + 1;
+      var task = tcPairAfter(lines, afterRun, TC_TASK_OPEN, TC_TASK_CLOSE);
+      if (task) {
+        spanEnd = task.close;
+        afterRun = task.close + 1;
+      }
+      var results = tcPairAfter(lines, afterRun, TC_RESULTS_OPEN, TC_RESULTS_CLOSE);
+      if (results) {
+        spanEnd = results.close;
+      }
+      for (var d = anchor; d <= spanEnd; d++) drop[d] = true;
+      forms.push("tc-prose-continuation");
+      if (task) forms.push("tc-original-task");
+      if (results) forms.push("tc-tool-results");
+    }
+    for (var k = 0; k < lines.length; k++) {
+      if (drop[k] || lines[k] !== TC_LFR_OPEN) continue;
+      var lfr = tcPairAfter(lines, k, TC_LFR_OPEN, TC_LFR_CLOSE);
+      if (!lfr) continue;
+      if (!tcIsWholeMessagePair(lines, lfr)) {
+        k = lfr.close;
+        continue;
+      }
+      for (var d2 = lfr.open; d2 <= lfr.close; d2++) drop[d2] = true;
+      forms.push("tc-local-file-read");
+      k = lfr.close;
+    }
+    if (!forms.length) return { text: s, removed: 0, forms: [] };
+    var kept = [];
+    for (var m = 0; m < lines.length; m++) {
+      if (!drop[m]) kept.push(lines[m]);
+    }
+    return { text: kept.join("\n"), removed: forms.length, forms };
+  }
+  function stripReasoningSections(text) {
+    var s = typeof text === "string" ? text : String(text == null ? "" : text);
+    if (s.indexOf(SECTION_REASONING_TAG) === -1 || s.indexOf(SECTION_ANSWER_TAG) === -1) return s;
+    var out = "";
+    var i = 0;
+    var changed = false;
+    while (i < s.length) {
+      var a = s.indexOf(SECTION_ANSWER_TAG, i);
+      if (a === -1) {
+        out += s.slice(i);
+        break;
+      }
+      var r = a > 0 ? s.lastIndexOf(SECTION_REASONING_TAG, a - 1) : -1;
+      if (r === -1 || r < i) {
+        out += s.slice(i, a + SECTION_ANSWER_TAG.length);
+        i = a + SECTION_ANSWER_TAG.length;
+        continue;
+      }
+      out += s.slice(i, r);
+      i = a + SECTION_ANSWER_TAG.length;
+      if (s.charAt(i) === "\r" && s.charAt(i + 1) === "\n") i += 2;
+      else if (s.charAt(i) === "\n") i += 1;
+      changed = true;
+    }
+    return changed ? out : s;
+  }
+  function diagTag(tag, fields) {
+    try {
+      if (typeof aiCmDiagLine !== "function") return false;
+      return aiCmDiagLine(tag, fields) !== false;
+    } catch (eDiag) {
+      return false;
+    }
+  }
+  function splitReasoningSections(text) {
+    var s = typeof text === "string" ? text : String(text == null ? "" : text);
+    var m = REASONING_SECTION_PAIR_RE.exec(s);
+    if (m) return { reasoning: m[1].replace(/\s+$/, ""), answer: m[2] };
+    var r = s.indexOf(SECTION_REASONING_TAG);
+    var a = s.indexOf(SECTION_ANSWER_TAG);
+    if (r !== -1 && a !== -1) {
+      diagTag("reasoning-marker-in-prose", { len: s.length, r, a });
+    }
+    return { reasoning: "", answer: s };
+  }
+  function applyReasoningExportFields(messages, enabled) {
+    var changed = 0;
+    try {
+      if (enabled !== true || !Array.isArray(messages)) return { changed: 0 };
+      for (var i = 0; i < messages.length; i++) {
+        var m = messages[i];
+        if (!m || typeof m !== "object") continue;
+        var text = typeof m.text === "string" ? m.text : "";
+        var reasoning = typeof m.reasoning === "string" ? m.reasoning : "";
+        var captured = typeof m.hiddenReasoning === "string" ? m.hiddenReasoning : "";
+        if (!reasoning) reasoning = captured;
+        if (!reasoning && text && m.role !== "user") {
+          var pair = splitReasoningSections(text);
+          if (pair && pair.reasoning) {
+            reasoning = pair.reasoning;
+            text = pair.answer;
+          }
+        }
+        if (!reasoning) continue;
+        if (!captured && text === m.text) continue;
+        var next = {};
+        for (var k in m) {
+          if (Object.prototype.hasOwnProperty.call(m, k)) next[k] = m[k];
+        }
+        next.text = text;
+        next.reasoning = reasoning;
+        if (next.hiddenReasoning) delete next.hiddenReasoning;
+        messages[i] = next;
+        changed++;
+      }
+    } catch (eApply) {
+      return { changed };
+    }
+    return { changed };
+  }
+  function isToolResultsOnlyText(text) {
+    try {
+      var s = typeof text === "string" ? text : String(text == null ? "" : text);
+      var t = s.trim();
+      if (t.indexOf(TOOL_RESULTS_OPEN) !== 0) return false;
+      var close = t.indexOf(TOOL_RESULTS_CLOSE);
+      if (close === -1) return false;
+      var rest = t.slice(close + TOOL_RESULTS_CLOSE.length).trim();
+      if (rest === TOOL_RESULTS_TAIL) rest = "";
+      return rest === "";
+    } catch (e) {
+      return false;
+    }
+  }
+  function stripToolCallBlocks(text) {
+    var s = typeof text === "string" ? text : String(text == null ? "" : text);
+    if (s.indexOf("<") === -1) return s;
+    RE_TOOL_CALL_BLOCK.lastIndex = 0;
+    var out = s.replace(RE_TOOL_CALL_BLOCK, "");
+    if (out === s) return s;
+    return out.replace(/\s+$/, "");
+  }
+  function isEmptyExportText(text) {
+    try {
+      return String(text == null ? "" : text).trim() === "";
+    } catch (e) {
+      return false;
+    }
+  }
+  function isReasoningOnlyAssistantTurn(message) {
+    try {
+      if (!message || typeof message !== "object") return false;
+      if (message.role !== "assistant") return false;
+      var reasoning = typeof message.reasoning === "string" ? message.reasoning : "";
+      return reasoning.trim() !== "";
+    } catch (e) {
+      return false;
+    }
+  }
+  function copyMessageWithText(message, text) {
+    var keep = {};
+    for (var k in message) {
+      if (Object.prototype.hasOwnProperty.call(message, k)) keep[k] = message[k];
+    }
+    keep.text = text;
+    return keep;
+  }
+  function sanitizeEmitMessages(messages) {
+    var out = [];
+    var sanitized = 0;
+    var skipped = [];
+    var dropped = 0;
+    var bdsRemoved = 0;
+    var bdsForms = [];
+    var tcRemoved = 0;
+    var tcForms = [];
+    try {
+      var src = Array.isArray(messages) ? messages : [];
+      for (var i = 0; i < src.length; i++) {
+        var m = stripHiddenFields(src[i]);
+        if (!m || typeof m !== "object") {
+          bdsDiagLine("o40-emit-msg", { i, len: 0, head: bdsDiagSlice("", 0, 40), tail: bdsDiagSlice("", 1, 40), called: 0, removed: 0 });
+          out.push(m);
+          continue;
+        }
+        var raw = typeof m.text === "string" ? m.text : "";
+        if (typeof aiCmDiagOn === "function" && aiCmDiagOn() && m.role === "user" && isToolResultsOnlyText(raw)) {
+          bdsDiagLine("o40-emit-msg", { i, len: raw.length, head: bdsDiagSlice(raw, 0, 40), tail: bdsDiagSlice(raw, 1, 40), called: 0, removed: 0 });
+        }
+        if (m.role === "user" && isToolResultsOnlyText(raw)) {
+          dropped++;
+          continue;
+        }
+        var bare = stripReasoningSections(raw);
+        if (bare !== raw) m = copyMessageWithText(m, bare);
+        var bdsIn = typeof m.text === "string" ? m.text : "";
+        var bds = sanitizeBetterDeepSeekText(bdsIn);
+        bdsDiagLine("o40-emit-msg", { i, len: bdsIn.length, head: bdsDiagSlice(bdsIn, 0, 40), tail: bdsDiagSlice(bdsIn, 1, 40), called: 1, removed: bds.removed });
+        if (bds.removed > 0) {
+          m = copyMessageWithText(m, bds.text);
+          bdsRemoved += bds.removed;
+          for (var bf = 0; bf < bds.forms.length; bf++) bdsForms.push(bds.forms[bf]);
+        }
+        var tc = sanitizeToolContinuationText(typeof m.text === "string" ? m.text : "");
+        if (tc.removed > 0) {
+          m = copyMessageWithText(m, tc.text);
+          tcRemoved += tc.removed;
+          for (var tf = 0; tf < tc.forms.length; tf++) tcForms.push(tc.forms[tf]);
+        }
+        if (m.role !== "user") {
+          var cut = stripToolCallBlocks(typeof m.text === "string" ? m.text : "");
+          if (cut !== m.text) m = copyMessageWithText(m, cut);
+        } else {
+          var text = typeof m.text === "string" ? m.text : "";
+          var reason = injectedUserTextSkipReason(text);
+          if (reason !== null) {
+            skipped.push(reason);
+          } else {
+            m = copyMessageWithText(m, sanitizeInjectedUserText(text));
+            sanitized++;
+          }
+        }
+        if (isEmptyExportText(typeof m.text === "string" ? m.text : "") && !isReasoningOnlyAssistantTurn(m)) {
+          dropped++;
+          continue;
+        }
+        out.push(m);
+      }
+    } catch (e) {
+      return {
+        messages: Array.isArray(messages) ? messages : [],
+        sanitized: 0,
+        skipped: [],
+        dropped: 0,
+        bdsRemoved: 0,
+        bdsForms: [],
+        tcRemoved: 0,
+        tcForms: []
+      };
+    }
+    return {
+      messages: out,
+      sanitized,
+      skipped,
+      dropped,
+      bdsRemoved,
+      bdsForms,
+      tcRemoved,
+      tcForms
+    };
+  }
+  function hasHiddenFields(message) {
+    try {
+      if (!message || typeof message !== "object") return false;
+      return Object.prototype.hasOwnProperty.call(message, "hiddenReasoning") || Object.prototype.hasOwnProperty.call(message, "hiddenInjection");
+    } catch (e) {
+      return false;
+    }
+  }
+  function hiddenReasoningOf(message) {
+    try {
+      var r = message && typeof message.hiddenReasoning === "string" ? message.hiddenReasoning : "";
+      return r.trim();
+    } catch (e) {
+      return "";
+    }
+  }
+  function withoutHiddenFields(message) {
+    var keep = {};
+    for (var k in message) {
+      if (!Object.prototype.hasOwnProperty.call(message, k)) continue;
+      if (k === "hiddenReasoning" || k === "hiddenInjection") continue;
+      keep[k] = message[k];
+    }
+    return keep;
+  }
+  function stripHiddenFields(message) {
+    if (!message || typeof message !== "object") return message;
+    return hasHiddenFields(message) ? withoutHiddenFields(message) : message;
+  }
+  function hasReasoningInSource(messages) {
+    var src = Array.isArray(messages) ? messages : [];
+    for (var i = 0; i < src.length; i++) {
+      var m = src[i];
+      if (!m || typeof m !== "object") continue;
+      var reasoning = typeof m.reasoning === "string" ? m.reasoning : "";
+      if (reasoning.trim() !== "") return true;
+      var text = typeof m.text === "string" ? m.text : "";
+      if (text.indexOf(SECTION_REASONING_TAG) !== -1) return true;
+    }
+    return false;
+  }
+  function effectiveReasoningToggle(userToggle, sourceHasReasoning, site) {
+    if (userToggle === true) return true;
+    if (site === "qwen" || site === "deepseek") return false;
+    return sourceHasReasoning === true;
+  }
+  function includeHiddenExportBlocks(messages) {
+    var src = Array.isArray(messages) ? messages : [];
+    var out = [];
+    for (var i = 0; i < src.length; i++) {
+      var m = src[i];
+      if (!m || typeof m !== "object" || !hasHiddenFields(m)) {
+        out.push(m);
+        continue;
+      }
+      var keep = withoutHiddenFields(m);
+      var reasoning = hiddenReasoningOf(m);
+      var text = typeof keep.text === "string" ? keep.text : "";
+      if (reasoning && text.indexOf(reasoning) === -1) {
+        keep.text = HIDDEN_REASONING_TAG + "\n" + reasoning + "\n\n" + HIDDEN_ANSWER_TAG + "\n" + text;
+      }
+      out.push(keep);
+    }
+    return out;
+  }
+  function unionTurnsById(existing, incoming) {
+    var seen = {};
+    var out = [];
+    var i, t;
+    for (i = 0; existing && i < existing.length; i++) {
+      t = existing[i];
+      if (!t || t.id == null || seen[t.id]) continue;
+      seen[t.id] = true;
+      out.push(t);
+    }
+    for (i = 0; incoming && i < incoming.length; i++) {
+      t = incoming[i];
+      if (!t || t.id == null || seen[t.id]) continue;
+      seen[t.id] = true;
+      out.push(t);
+    }
+    return out;
+  }
+  var FIRED_SESSION_PREFIX, RE_RAW_HEADING_LINE, RE_MARKER_RESIDUE_LINE, RE_CODE_FENCE_LINE, RE_LIST_MARK, RE_ANY_SPACE, INTRA_CORE_MIN_LEN, CROSS_RAW_MIN_LINES, CROSS_RAW_MIN_CHARS, VISIBLE_USER_PROMPT_START, VISIBLE_USER_PROMPT_END, VISIBLE_USER_PROMPT_VALUE, BDS_OPEN_TAG, BDS_CLOSE_TAG, BDS_TRUNCATION_MARK, BDS_BOM, BDS_INJECTION_FORMS, BDS_WRAPPER_ID, TC_LFR_OPEN, TC_LFR_CLOSE, TC_TASK_OPEN, TC_TASK_CLOSE, TC_RESULTS_OPEN, TC_RESULTS_CLOSE, TC_PROSE_ANCHOR, TC_ENVELOPE_FORMS, SECTION_REASONING_TAG, SECTION_ANSWER_TAG, REASONING_SECTION_PAIR_RE, TOOL_RESULTS_OPEN, TOOL_RESULTS_CLOSE, TOOL_RESULTS_TAIL, TOOL_CALL_TAG_NAMES, TOOL_CALL_TAG_ALT, RE_TOOL_CALL_BLOCK, HIDDEN_REASONING_TAG, HIDDEN_ANSWER_TAG, betterDeepSeekForms, bdsWrapperFormId, toolContinuationForms, Api2, export_emit_pipeline_default;
+  var init_export_emit_pipeline = __esm({
+    "../utils/export-emit-pipeline.ts"() {
+      "use strict";
+      FIRED_SESSION_PREFIX = "aiCmFired:";
+      RE_RAW_HEADING_LINE = /^[\s>*+\-\d.)\]]*#{1,}(?=\s|$)/;
+      RE_MARKER_RESIDUE_LINE = /^[\s>*+\-\d.)\]]*#{1,}[\s]*$/;
+      RE_CODE_FENCE_LINE = /^[\s>*+\-\d.)\]]*(`{3,}|~{3,})/;
+      RE_LIST_MARK = /^(?:[-*+]|\d+[.)])[ \t]+/;
+      RE_ANY_SPACE = /[\u00a0\u1680\u2000-\u200a\u202f\u205f\u3000\ufeff]/g;
+      INTRA_CORE_MIN_LEN = 20;
+      CROSS_RAW_MIN_LINES = 2;
+      CROSS_RAW_MIN_CHARS = 80;
+      VISIBLE_USER_PROMPT_START = "<!-- deepseek-pp-visible-user-prompt:start -->";
+      VISIBLE_USER_PROMPT_END = "<!-- deepseek-pp-visible-user-prompt:end -->";
+      VISIBLE_USER_PROMPT_VALUE = "<!-- deepseek-pp-visible-user-prompt:value=";
+      BDS_OPEN_TAG = "<BetterDeepSeek>";
+      BDS_CLOSE_TAG = "</BetterDeepSeek>";
+      BDS_TRUNCATION_MARK = "...[truncated]";
+      BDS_BOM = "\uFEFF";
+      BDS_INJECTION_FORMS = [
+        {
+          id: "bds-deep-code-prompt",
+          match: "exact",
+          head: "[DEEP_CODE_MODE_ACTIVE]",
+          basis: "artifact 1-257 (message), 999-1191 / 1223-1415 (span in <original_task>)"
+        },
+        {
+          id: "bds-tool-system-prompt",
+          match: "exact",
+          head: "You are Better DeepSeek. You have access to specialized tools.",
+          basis: "artifact 259-947 (message)"
+        },
+        {
+          id: "bds-system-datetime",
+          match: "prefix",
+          head: "User's System Date & Time: ",
+          basis: "artifact 980-982 (message; line 981)"
+        }
+      ];
+      BDS_WRAPPER_ID = "bds-prompt-wrapper";
+      TC_LFR_OPEN = "<local_file_read>";
+      TC_LFR_CLOSE = "</local_file_read>";
+      TC_TASK_OPEN = "<original_task>";
+      TC_TASK_CLOSE = "</original_task>";
+      TC_RESULTS_OPEN = "<tool_results>";
+      TC_RESULTS_CLOSE = "</tool_results>";
+      TC_PROSE_ANCHOR = "These are the tool results just executed for the tool-continuation task.";
+      TC_ENVELOPE_FORMS = [
+        {
+          id: "tc-local-file-read",
+          rule: "pair",
+          open: TC_LFR_OPEN,
+          close: TC_LFR_CLOSE,
+          boundary: "\u043E\u0442 \u0441\u0442\u0440\u043E\u043A\u0438 \u043E\u0442\u043A\u0440\u044B\u0432\u0430\u044E\u0449\u0435\u0433\u043E \u0442\u0435\u0433\u0430 \u0434\u043E \u0441\u0442\u0440\u043E\u043A\u0438 \u0437\u0430\u043A\u0440\u044B\u0432\u0430\u044E\u0449\u0435\u0433\u043E; \u0441\u043D\u0438\u043C\u0430\u0435\u0442\u0441\u044F, \u043A\u043E\u0433\u0434\u0430 \u043F\u0430\u0440\u0430 \u2014 \u0446\u0435\u043B\u043E\u0435 \u0441\u043E\u043E\u0431\u0449\u0435\u043D\u0438\u0435 (\u0441\u043F\u0430\u043D \u0432\u043D\u0443\u0442\u0440\u0438 \u0441\u043E\u043E\u0431\u0449\u0435\u043D\u0438\u044F \u2014 \u0431\u0430\u0439\u0442\u043E\u0432\u043E: \u0438\u0437\u043C\u0435\u0440\u0435\u043D\u0438\u044F \u0441\u043F\u0430\u043D\u0430 \u0432 \u0430\u0440\u0442\u0435\u0444\u0430\u043A\u0442\u0435 \u043D\u0435\u0442)",
+          scope: "tool-request",
+          basis: "artifact 10-19 msg 1/3/9/11/13 lines 1-3 (whole message, role=assistant)"
+        },
+        {
+          id: "tc-prose-continuation",
+          rule: "run",
+          openPrefix: TC_PROSE_ANCHOR,
+          boundary: "\u043E\u0442 \u0441\u0442\u0440\u043E\u043A\u0438-\u044F\u043A\u043E\u0440\u044F \u0434\u043E \u043F\u043E\u0441\u043B\u0435\u0434\u043D\u0435\u0439 \u043D\u0435\u043F\u0443\u0441\u0442\u043E\u0439 \u0441\u0442\u0440\u043E\u043A\u0438 \u043F\u0440\u043E\u0437\u044B (\u043F\u0435\u0440\u0435\u0434 \u043F\u0443\u0441\u0442\u043E\u0439 \u0441\u0442\u0440\u043E\u043A\u043E\u0439)",
+          scope: "envelope",
+          basis: "artifact 10-19 msg 2/4/7/8/10/12/14 lines 1-9"
+        },
+        {
+          id: "tc-original-task",
+          rule: "pair",
+          open: TC_TASK_OPEN,
+          close: TC_TASK_CLOSE,
+          boundary: "\u043E\u0442 <original_task> \u0434\u043E </original_task>; \u043F\u0443\u0441\u0442\u0430\u044F \u043F\u0430\u0440\u0430 11-12 \u2014 \u0442\u0430 \u0436\u0435 \u0433\u0440\u0430\u043D\u0438\u0446\u0430",
+          scope: "envelope",
+          basis: "artifact 10-19 msg 2/4 lines 11-12 (empty), msg 7/8/10/12/14 lines 11-17"
+        },
+        {
+          id: "tc-tool-results",
+          rule: "pair",
+          open: TC_RESULTS_OPEN,
+          close: TC_RESULTS_CLOSE,
+          boundary: "\u043E\u0442 <tool_results> \u0434\u043E </tool_results>; \u0432 \u0430\u0440\u0442\u0435\u0444\u0430\u043A\u0442\u0435 \u0437\u0430\u043A\u0440\u044B\u0432\u0430\u044E\u0449\u0438\u0439 \u0442\u0435\u0433 \u2014 \u043F\u043E\u0441\u043B\u0435\u0434\u043D\u044F\u044F \u0441\u0442\u0440\u043E\u043A\u0430 \u0441\u043E\u043E\u0431\u0449\u0435\u043D\u0438\u044F (7/7)",
+          scope: "envelope",
+          basis: "artifact 10-19 msg 2/4 lines 14-26 / 14-35, msg 7/8/10/12/14 lines 19-66"
+        }
+      ];
+      SECTION_REASONING_TAG = "[REASONING]";
+      SECTION_ANSWER_TAG = "[ANSWER]";
+      REASONING_SECTION_PAIR_RE = /^\s*\[REASONING\]\r?\n([\s\S]*?)\r?\n\r?\n\[ANSWER\]\r?\n([\s\S]*)$/;
+      TOOL_RESULTS_OPEN = "[TOOL_RESULTS]";
+      TOOL_RESULTS_CLOSE = "[/TOOL_RESULTS]";
+      TOOL_RESULTS_TAIL = "Continue answering based on the tool results above.";
+      TOOL_CALL_TAG_NAMES = [
+        "browser_navigate",
+        "browser_go_back",
+        "browser_go_forward",
+        "browser_refresh",
+        "browser_list_tabs",
+        "browser_select_tab",
+        "browser_close_tab",
+        "browser_snapshot",
+        "browser_click",
+        "browser_hover",
+        "browser_fill",
+        "browser_fill_form",
+        "browser_key",
+        "browser_type",
+        "browser_attach_file",
+        "browser_wait_for",
+        "browser_handle_dialog",
+        "browser_evaluate_script",
+        "memory_save",
+        "memory_update",
+        "memory_delete",
+        "web_search",
+        "web_fetch"
+      ];
+      TOOL_CALL_TAG_ALT = "(?:" + TOOL_CALL_TAG_NAMES.join("|") + "|shell_\\w+|python_\\w+|skill_\\w+)";
+      RE_TOOL_CALL_BLOCK = new RegExp(
+        "<(" + TOOL_CALL_TAG_ALT + ")(?:\\s[^>]*)?>[\\s\\S]*?<\\/\\1\\s*>\\s*",
+        "g"
+      );
+      HIDDEN_REASONING_TAG = SECTION_REASONING_TAG;
+      HIDDEN_ANSWER_TAG = SECTION_ANSWER_TAG;
+      betterDeepSeekForms = BDS_INJECTION_FORMS;
+      bdsWrapperFormId = BDS_WRAPPER_ID;
+      toolContinuationForms = TC_ENVELOPE_FORMS;
+      Api2 = {
+        buildAutoExportFileName,
+        disambiguateFileName,
+        isFileNameTaken,
+        buildExportFileName,
+        buildGsaExportFileName,
+        resolveAutoExportConvId,
+        notCompleteReason,
+        shouldSkipGsaPageGuard,
+        shouldSkipAutoExport,
+        shouldSkipBaseCompleteTrigger,
+        effectiveAutoExportThreshold,
+        pickExportSource,
+        resolveExportSource,
+        // Two-Tier (v89): метка достоверности источника файла — чистая функция наружу
+        // (её зовёт core/export-manager.js:aiCmGetSourceTier).
+        sourceTierOf,
+        markAutoExportFired,
+        getAutoExportFired,
+        resetAutoExportFired,
+        firedSessionKey,
+        isFiredInSession,
+        sessionFiredPatch,
+        extractConvIdFromUrl,
+        normalizeExportMessages,
+        coreText,
+        stripMarkerResidue,
+        dedupeMessages,
+        dedupeIntraMessage,
+        dedupeCrossRawCopies,
+        separateRawBlocks,
+        prepareExportMessages,
+        sanitizeInjectedUserText,
+        injectedUserTextSkipReason,
+        sanitizeEmitMessages,
+        // O-40: инъекции соседнего расширения Better DeepSeek — чистые функции и таблица
+        // измеренных форм наружу (пины D/R нового тест-файла читают формы из таблицы).
+        sanitizeBetterDeepSeekText,
+        betterDeepSeekForms: BDS_INJECTION_FORMS,
+        bdsWrapperFormId: BDS_WRAPPER_ID,
+        // O-42: агентный конверт Better DeepSeek (tool-continuation) — чистая функция и таблица
+        // измеренных дескрипторов конверта наружу (пины D/R нового тест-файла читают таблицу).
+        sanitizeToolContinuationText,
+        toolContinuationForms: TC_ENVELOPE_FORMS,
+        // O-7 (OFF): урезание секций reasoning на выходе экспорта — чистая функция наружу.
+        stripReasoningSections,
+        // O-37 (C): обратное преобразование пары [REASONING]/[ANSWER] в отдельные поля
+        // (reasoning/answer) — чистая функция наружу (переиспользуется точкой сбора экспорта).
+        splitReasoningSections,
+        // O-37 (C): нормализация размышления на выходе точки сбора экспорта (по месту, по флагу
+        // сайта) — чистая функция наружу; на боевом пути её зовёт core/export-manager.js.
+        applyReasoningExportFields,
+        // O-7 (OFF, S3/S4): служебный тул-мусор DeepSeek++ — чистые функции наружу.
+        isToolResultsOnlyText,
+        stripToolCallBlocks,
+        // O-7: hidden-блоки DeepSeek (сырой режим экспорта) — чистые функции наружу.
+        includeHiddenExportBlocks,
+        stripHiddenFields,
+        hiddenReasoningOf,
+        // D-O41: авто-ON тумблера при наличии reasoning в источнике — чистые функции наружу
+        // (пины S/D нового тест-файла; на боевом пути их зовёт core/export-manager.js).
+        hasReasoningInSource,
+        effectiveReasoningToggle,
+        unionTurnsById,
+        latchKey
+      };
+      export_emit_pipeline_default = Api2;
+    }
+  });
+
+  // ../utils/gemini-batchexecute-parser.ts
+  function logSegmentParseFail(e, where) {
+    try {
+      console.log("[AI CM][batchexecute] segment parse fail " + where + ": " + (e && e.message || e));
+    } catch (e2) {
+    }
+  }
+  function stripAttachmentTokens2(s) {
+    if (typeof s !== "string") return s;
+    return s.replace(ATTACH_TOKEN_RE2, " ").replace(/[ \t\f\v]+/g, " ");
+  }
+  function sanitizeGeminiText(s) {
+    if (typeof s !== "string") return s;
+    return s.replace(/\$AXzLiR[A-Za-z0-9+\/=\s]+/g, " ").replace(/File attachment was not previously registered/g, "").replace(/\[cite:\s*\d+\]/g, "");
+  }
+  function isIdLike(s) {
+    return typeof s === "string" && /^(c_|r_|rc_|fbb[0-9a-f]|[0-9a-f]{16})/.test(s);
+  }
+  function isFileLike(s) {
+    return typeof s === "string" && /\.(pdf|png|jpe?g|gif|docx?|txt|webp|csv|xlsx?)(\b|$)/i.test(s);
+  }
+  function isUrlLike(s) {
+    return typeof s === "string" && /^https?:\/\//i.test(s);
+  }
+  function isTokenLike(s) {
+    return typeof s === "string" && /^\$?AVuib/.test(s);
+  }
+  function isMimeLike(s) {
+    return typeof s === "string" && /^(image|application|video|audio)\//i.test(s);
+  }
+  function isJunk(s) {
+    if (typeof s !== "string") return true;
+    var t = s.trim();
+    if (t.length === 0) return true;
+    if (UI_BLACKLIST[t]) return true;
+    return isIdLike(t) || isFileLike(t) || isUrlLike(t) || isTokenLike(t) || isMimeLike(t);
+  }
+  function isUserQuestionJunk(s) {
+    if (typeof s !== "string") return true;
+    var t = s.trim();
+    if (!t) return true;
+    if (UI_BLACKLIST[t]) return true;
+    return isIdLike(t) || isUrlLike(t) || isTokenLike(t) || isMimeLike(t);
+  }
+  function hasCyrillic(s) {
+    for (var i = 0; i < s.length; i++) {
+      var c = s.charCodeAt(i);
+      if (c >= 1024 && c <= 1279) return true;
+    }
+    return false;
+  }
+  function isThinkingStart(s) {
+    if (typeof s !== "string") return false;
+    var t = s.trim();
+    if (!t) return false;
+    if (hasCyrillic(t)) return false;
+    if (THINKING_TITLE_RE.test(t)) return true;
+    if (THINKING_BODY_RE.test(t)) return true;
+    if (THINKING_BODY_EXTRA_RE.test(t)) return true;
+    if (THINKING_GERUND_RE.test(t)) return true;
+    return false;
+  }
+  function isResponseSegment(s) {
+    if (typeof s !== "string") return false;
+    var t = s.trim();
+    if (!t) return false;
+    if (hasCyrillic(t)) return true;
+    if (/```/.test(t)) return true;
+    if (/^\s*\|.+\|\s*$/m.test(t)) return true;
+    return false;
+  }
+  function collectTurnText(node, out, state) {
+    state = state || { inThinking: false };
+    if (typeof node === "string") {
+      var s = sanitizeGeminiText(node);
+      var t = s.trim();
+      if (!t) return;
+      if (FILE_ATTACHMENT_RE.test(t)) return;
+      if (isJunk(t)) return;
+      if (state.inThinking) {
+        if (!isResponseSegment(t)) return;
+        state.inThinking = false;
+        out.push(s);
+        return;
+      }
+      if (isThinkingStart(t)) {
+        state.inThinking = true;
+        return;
+      }
+      out.push(s);
+      return;
+    }
+    if (!Array.isArray(node)) return;
+    for (var k = 0; k < node.length; k++) collectTurnText(node[k], out, state);
+  }
+  function extractUserQuestion(turn) {
+    var q = "";
+    try {
+      q = turn[2][0][0];
+    } catch (e) {
+      q = "";
+    }
+    if (typeof q === "string") {
+      var s = sanitizeGeminiText(q).trim();
+      if (s && !isUserQuestionJunk(s) && !isThinkingStart(s)) return s;
+    }
+    return "";
+  }
+  function extractModelName(node) {
+    var found = null;
+    (function walk(n) {
+      if (found) return;
+      if (typeof n === "string") {
+        if (n.length < 60 && n.indexOf("\n") < 0 && MODEL_NAME_RE.test(n)) {
+          found = n.trim();
+          return;
+        }
+      } else if (Array.isArray(n)) {
+        for (var i = 0; i < n.length; i++) {
+          walk(n[i]);
+          if (found) return;
+        }
+      }
+    })(node);
+    return found || "";
+  }
+  function extractTurnId(node) {
+    var found = null;
+    (function walk(n) {
+      if (found) return;
+      if (typeof n === "string" && /^r_[0-9a-f]+$/.test(n)) {
+        found = n;
+        return;
+      } else if (Array.isArray(n)) {
+        for (var i = 0; i < n.length; i++) {
+          walk(n[i]);
+          if (found) return;
+        }
+      }
+    })(node);
+    return found;
+  }
+  function extractTurnR1(t) {
+    try {
+      if (Array.isArray(t) && Array.isArray(t[1]) && typeof t[1][1] === "string") return t[1][1];
+    } catch (e) {
+    }
+    return null;
+  }
+  function extractTurnTs(t) {
+    try {
+      if (Array.isArray(t) && Array.isArray(t[4]) && typeof t[4][0] === "number" && t[4][0] > 1e9) return t[4][0];
+    } catch (e) {
+    }
+    return 0;
+  }
+  function fileRefFromNode(n) {
+    try {
+      if (!Array.isArray(n)) return null;
+      var name = typeof n[2] === "string" ? n[2].trim() : "";
+      if (!name) return null;
+      var mime = typeof n[11] === "string" ? n[11] : "";
+      var type = typeof n[1] === "number" ? n[1] : 0;
+      var token = typeof n[5] === "string" ? n[5] : "";
+      var img = typeof n[3] === "string" ? n[3] : "";
+      var tail = n ? n[15] : null;
+      var size = Array.isArray(tail) && typeof tail[2] === "number" && isFinite(tail[2]) && tail[2] > 0 ? tail[2] : 0;
+      var dl = "";
+      var urls = [];
+      (function walk(v) {
+        if (typeof v === "string") {
+          if (v) urls.push(v);
+          if (!dl && v.indexOf("contribution.usercontent.google.com/download") !== -1) dl = v;
+        } else if (Array.isArray(v)) {
+          for (var i = 0; i < v.length; i++) walk(v[i]);
+        }
+      })(n[7]);
+      return {
+        name,
+        mime,
+        type,
+        token,
+        size,
+        img,
+        dl,
+        urls,
+        isImage: type === 1 || /^image\//i.test(mime)
+      };
+    } catch (e) {
+      return null;
+    }
+  }
+  function collectTurnFiles(turn) {
+    var out = [];
+    try {
+      var arr = turn[2][0][4][0][4];
+      if (!Array.isArray(arr)) return out;
+      for (var i = 0; i < arr.length; i++) {
+        var ref = fileRefFromNode(arr[i]);
+        if (ref) {
+          ref.pos = i;
+          out.push(ref);
+        }
+      }
+    } catch (e) {
+    }
+    return out;
+  }
+  function fileOwnerTs(ts) {
+    return typeof ts === "number" && isFinite(ts) && ts > 0 ? ts : 0;
+  }
+  function fileOwnerOrder(order) {
+    return typeof order === "number" && isFinite(order) && order >= 0 ? order : -1;
+  }
+  function filePoolForConv(convId, create) {
+    var cid = typeof convId === "string" ? convId : "";
+    var pool = filePoolsByConv[cid];
+    if (!pool && create) {
+      pool = { turns: {}, seq: 0 };
+      filePoolsByConv[cid] = pool;
+    }
+    return pool || null;
+  }
+  function fileRefPoolName(ref) {
+    return ref && typeof ref.name === "string" ? ref.name : "";
+  }
+  function poolSharedPrefixLen(a, b) {
+    var n = Math.min(a.length, b.length);
+    var k = 0;
+    while (k < n && fileRefPoolName(a[k]) === fileRefPoolName(b[k])) k++;
+    return k;
+  }
+  function isTurnBefore(a, b) {
+    var aTs = fileOwnerTs(a.ts);
+    var bTs = fileOwnerTs(b.ts);
+    if (aTs > 0 && bTs > 0 && aTs !== bTs) return aTs < bTs;
+    if (aTs > 0 && bTs === 0) return true;
+    if (aTs === 0 && bTs > 0) return false;
+    var aRefs = Array.isArray(a.refs) ? a.refs : null;
+    var bRefs = Array.isArray(b.refs) ? b.refs : null;
+    if (aRefs && bRefs && aRefs.length !== bRefs.length) {
+      var nest = poolSharedPrefixLen(aRefs, bRefs);
+      if (nest === Math.min(aRefs.length, bRefs.length)) return aRefs.length < bRefs.length;
+    }
+    var aTid = typeof a.turnId === "string" ? a.turnId : "";
+    var bTid = typeof b.turnId === "string" ? b.turnId : "";
+    if (aTid && bTid && aTid !== bTid) return aTid < bTid;
+    var aOrd = fileOwnerOrder(a.order);
+    var bOrd = fileOwnerOrder(b.order);
+    if (aOrd >= 0 && bOrd >= 0 && aOrd !== bOrd) return aOrd < bOrd;
+    return a.seq < b.seq;
+  }
+  function fileRefIdentityKey(ref) {
+    var name = ref && typeof ref.name === "string" ? ref.name : "";
+    var size = ref && typeof ref.size === "number" && isFinite(ref.size) ? ref.size : 0;
+    return name + "|" + size;
+  }
+  function registerTurnFileOwner(turn, convId, turnId, ts, order) {
+    var own = typeof turnId === "string" ? turnId : "";
+    if (!own) return 0;
+    var all = collectTurnFiles(turn);
+    var pool = filePoolForConv(convId, true);
+    if (!all.length) {
+      if (pool && pool.turns[own]) delete pool.turns[own];
+      return 0;
+    }
+    var nTs = fileOwnerTs(ts);
+    var nOrd = fileOwnerOrder(order);
+    var prev = pool.turns[own];
+    if (prev) {
+      prev.refs = all;
+      if (nTs > 0) prev.ts = nTs;
+      if (nOrd >= 0) prev.order = nOrd;
+      return all.length;
+    }
+    pool.seq++;
+    pool.turns[own] = { turnId: own, ts: nTs, order: nOrd, seq: pool.seq, refs: all };
+    return all.length;
+  }
+  function previousPoolTurn(pool, rec, all) {
+    var ids = Object.keys(pool.turns);
+    var chrono = null;
+    var i;
+    for (i = 0; i < ids.length; i++) {
+      if (ids[i] === rec.turnId) continue;
+      var cand = pool.turns[ids[i]];
+      if (!cand || !Array.isArray(cand.refs)) continue;
+      if (!isTurnBefore(cand, rec)) continue;
+      if (!chrono || isTurnBefore(chrono, cand)) chrono = cand;
+    }
+    var donor = null;
+    for (i = 0; i < ids.length; i++) {
+      if (ids[i] === rec.turnId) continue;
+      var reg = pool.turns[ids[i]];
+      if (!reg || !Array.isArray(reg.refs)) continue;
+      var len = reg.refs.length;
+      if (!len || len >= all.length) continue;
+      if (poolSharedPrefixLen(reg.refs, all) !== len) continue;
+      if (!donor || len > donor.refs.length) donor = reg;
+    }
+    if (donor && (!chrono || donor.refs.length > chrono.refs.length)) return donor;
+    return chrono;
+  }
+  function poolDelta(prevRefs, all) {
+    var k = poolSharedPrefixLen(prevRefs, all);
+    if (k === prevRefs.length || k === all.length) return all.slice(k);
+    var spent = {};
+    var i;
+    for (i = 0; i < prevRefs.length; i++) {
+      var pk = fileRefIdentityKey(prevRefs[i]);
+      spent[pk] = (spent[pk] || 0) + 1;
+    }
+    var out = [];
+    for (i = 0; i < all.length; i++) {
+      var ck = fileRefIdentityKey(all[i]);
+      if (spent[ck] > 0) {
+        spent[ck]--;
+        continue;
+      }
+      out.push(all[i]);
+    }
+    return out;
+  }
+  function assignPoolOwners(turns) {
+    var list = Array.isArray(turns) ? turns : [];
+    var out = [];
+    var prevPool = [];
+    for (var i = 0; i < list.length; i++) {
+      var item = list[i];
+      if (!item) continue;
+      var pool = Array.isArray(item.refs) ? item.refs : [];
+      var own = [];
+      if (pool.length) {
+        own = prevPool.length ? poolDelta(prevPool, pool) : pool.slice(0);
+        prevPool = pool;
+      }
+      out.push({ id: item.id, own });
+    }
+    return out;
+  }
+  function collectTurnFilesForOwner(turn, convId, ownerId, ts, order) {
+    var all = collectTurnFiles(turn);
+    var own = typeof ownerId === "string" ? ownerId : "";
+    if (!own) return all;
+    if (!all.length) return [];
+    var pool = filePoolForConv(convId, true);
+    var rec = pool.turns[own];
+    if (!rec) {
+      pool.seq++;
+      rec = { turnId: own, ts: fileOwnerTs(ts), order: fileOwnerOrder(order), seq: pool.seq, refs: all };
+      pool.turns[own] = rec;
+    }
+    rec.refs = all;
+    if (fileOwnerTs(ts) > 0) rec.ts = fileOwnerTs(ts);
+    if (fileOwnerOrder(order) >= 0) rec.order = fileOwnerOrder(order);
+    var prev = previousPoolTurn(pool, rec, all);
+    if (!prev) return all;
+    return poolDelta(prev.refs, all);
+  }
+  function __resetFileOwners(convId) {
+    if (convId === void 0 || convId === null || convId === "") {
+      filePoolsByConv = {};
+      return;
+    }
+    delete filePoolsByConv[typeof convId === "string" ? convId : String(convId)];
+  }
+  function isThinkingAssistant(s) {
+    if (typeof s !== "string") return false;
+    var t = s.trim();
+    if (!t) return false;
+    if (hasCyrillic(t)) return false;
+    return THINKING_ASSISTANT_RE.test(t);
+  }
+  function firstCyrillicIndex(s) {
+    for (var i = 0; i < s.length; i++) {
+      var c = s.charCodeAt(i);
+      if (c >= 1024 && c <= 1279) return i;
+    }
+    return -1;
+  }
+  function stripLeadingThinking(s) {
+    if (typeof s !== "string") return s;
+    var t = s.trim();
+    if (!LEADING_THINKING_RE.test(t)) return s;
+    var idx = firstCyrillicIndex(t);
+    if (idx < 0) return "";
+    return t.slice(idx);
+  }
+  function hasMarkdownMarkup(t) {
+    if (typeof t !== "string") return false;
+    if (/\*\*[^*\n]+\*\*/.test(t)) return true;
+    if (/^\s*#{1,6}\s/m.test(t)) return true;
+    if (/^\s*\|.+\|\s*$/m.test(t)) return true;
+    if (/```/.test(t)) return true;
+    if (/^\s*[-*+]\s/m.test(t)) return true;
+    if (/^\s*>\s/m.test(t)) return true;
+    if (/\[[^\]]+\]\([^)]+\)/.test(t)) return true;
+    if (/^\s*(---+|\*\*\*+|___+)\s*$/m.test(t)) return true;
+    return false;
+  }
+  function pickCanonicalAnswer(parts) {
+    if (!parts || !parts.length) return "";
+    for (var i = 0; i < parts.length; i++) {
+      if (hasMarkdownMarkup(parts[i])) return parts[i];
+    }
+    return parts[0];
+  }
+  function extractCanonicalAnswer(turn) {
+    var cands = [];
+    var isFallback = false;
+    try {
+      var box = Array.isArray(turn[3]) && Array.isArray(turn[3][0]) && Array.isArray(turn[3][0][0]) ? turn[3][0][0][1] : null;
+      if (Array.isArray(box)) {
+        for (var i = 0; i < box.length; i++) cands.push(box[i]);
+      } else if (typeof box === "string") {
+        cands.push(box);
+      }
+    } catch (e) {
+    }
+    if (!cands.length) {
+      isFallback = true;
+      try {
+        collectTurnText(turn[3], cands);
+      } catch (e) {
+        swallowSoft2(e, "gemini-utils:extractCanonicalAnswer-fallback");
+      }
+    }
+    var cleaned = [];
+    for (i = 0; i < cands.length; i++) {
+      if (typeof cands[i] !== "string") continue;
+      var s = sanitizeGeminiText(cands[i]).trim();
+      if (s) cleaned.push(s);
+    }
+    return { text: pickCanonicalAnswer(cleaned), isFallback };
+  }
+  function collectDrStrings(node, out, minLen, depth) {
+    try {
+      if (typeof node === "string") {
+        if (node.length >= minLen) out.push(node);
+        return;
+      }
+      if (Array.isArray(node) && depth < 40) {
+        for (var i = 0; i < node.length; i++) collectDrStrings(node[i], out, minLen, depth + 1);
+      }
+    } catch (e) {
+      swallowSoft2(e, "gemini-utils:collectDrStrings");
+    }
+  }
+  function ctText(s) {
+    return sanitizeGeminiText(s).trim();
+  }
+  function extractDrTexts(realTurns) {
+    var res = { planText: "", reportText: "" };
+    try {
+      if (!Array.isArray(realTurns)) return res;
+      var cands = [];
+      for (var i = 0; i < realTurns.length; i++) collectDrStrings(realTurns[i], cands, DR_REPORT_MIN_LEN, 0);
+      var best = "";
+      for (var j = 0; j < cands.length; j++) {
+        var s = cands[j];
+        if (isUrlLike(s) || isJunk(s)) continue;
+        if (!best || s.length > best.length) best = s;
+      }
+      if (best) res.reportText = ctText(best);
+      var pc = [];
+      for (var k = 0; k < realTurns.length; k++) collectDrStrings(realTurns[k], pc, DR_PLAN_MIN_LEN, 0);
+      var pbest = "";
+      for (var q = 0; q < pc.length; q++) {
+        var ps = pc[q];
+        if (isUrlLike(ps) || isJunk(ps)) continue;
+        if (res.reportText && ps === res.reportText) continue;
+        if (ps.indexOf("deep_research_confirmation_content") !== -1) continue;
+        if (ps.indexOf("immersive_entry_chip") !== -1) continue;
+        if (res.reportText && ps.length >= res.reportText.length) continue;
+        if (!pbest || ps.length > pbest.length) pbest = ps;
+      }
+      if (pbest) res.planText = ctText(pbest);
+    } catch (e) {
+      swallowSoft2(e, "gemini-utils:extractDrTexts");
+    }
+    return res;
+  }
+  function __setDrTexts(d) {
+    try {
+      lastDrTexts = d || { planText: "", reportText: "" };
+    } catch (e) {
+    }
+  }
+  function injectDrLinks(text, dr) {
+    try {
+      if (typeof text !== "string") return text;
+      var t = text;
+      if (dr && dr.reportText && t.indexOf("immersive_entry_chip/0") !== -1) {
+        t = t.replace(/https?:\/\/googleusercontent\.com\/immersive_entry_chip\/0/gi, dr.reportText);
+      }
+      if (dr && dr.planText && t.indexOf("deep_research_confirmation_content/0") !== -1) {
+        t = t.replace(/https?:\/\/googleusercontent\.com\/deep_research_confirmation_content\/0/gi, dr.planText);
+      }
+      return t;
+    } catch (e) {
+      return text;
+    }
+  }
+  function splitTurnMessages(turn) {
+    var question = extractUserQuestion(turn);
+    var canon = extractCanonicalAnswer(turn);
+    var answer = canon.text.replace(/\n{3,}/g, "\n\n").trim();
+    var msgs = [];
+    if (question) msgs.push({ role: "user", text: question });
+    if (answer) {
+      var drAn = injectDrLinks(answer, lastDrTexts);
+      if (canon.isFallback) {
+        if (isThinkingAssistant(drAn)) {
+        } else {
+          var kept = stripLeadingThinking(drAn);
+          if (kept) msgs.push({ role: "assistant", text: kept });
+        }
+      } else {
+        msgs.push({ role: "assistant", text: drAn });
+      }
+    }
+    return msgs;
+  }
+  function handleOuter(outer, out) {
+    try {
+      if (!Array.isArray(outer) || !Array.isArray(outer[0])) return;
+      if (outer[0][1] !== "hNvQHb") return;
+      var inner = outer[0][2];
+      if (typeof inner !== "string") return;
+      var turns = JSON.parse(inner);
+      if (!Array.isArray(turns)) return;
+      var realTurns = Array.isArray(turns[0]) && Array.isArray(turns[0][0]) ? turns[0] : turns;
+      try {
+        lastDrTexts = extractDrTexts(realTurns);
+      } catch (eD13) {
+      }
+      var rawCount = realTurns.length;
+      for (var i = rawCount - 1; i >= 0; i--) {
+        var t = realTurns[i];
+        if (!Array.isArray(t)) continue;
+        var modelName = extractModelName(t);
+        var turnId = extractTurnId(t) || "idx" + i;
+        var turnTs = extractTurnTs(t);
+        var r1 = extractTurnR1(t);
+        var msgs = splitTurnMessages(t);
+        for (var m = 0; m < msgs.length; m++) {
+          var role = msgs[m].role === "user" ? "user" : "assistant";
+          out.push({
+            role,
+            content: msgs[m].text,
+            model: modelName || "",
+            id: turnId + "_" + role,
+            ts: turnTs,
+            r1
+          });
+        }
+      }
+    } catch (e) {
+      logSegmentParseFail(e, "handleOuter");
+    }
+  }
+  function parseByBytes(raw, out) {
+    var bytes;
+    try {
+      bytes = new TextEncoder().encode(raw);
+    } catch (e) {
+      return;
+    }
+    var pos = 0;
+    if (bytes.length >= 4 && bytes[0] === 41 && bytes[1] === 93 && bytes[2] === 125 && bytes[3] === 39) pos = 4;
+    var dec = new TextDecoder("utf-8");
+    var guard = 0;
+    while (pos < bytes.length && guard++ < 200) {
+      while (pos < bytes.length && (bytes[pos] < 48 || bytes[pos] > 57)) pos++;
+      if (pos >= bytes.length) break;
+      var n = 0;
+      while (pos < bytes.length && bytes[pos] >= 48 && bytes[pos] <= 57) {
+        n = n * 10 + (bytes[pos] - 48);
+        pos++;
+      }
+      if (n <= 0) {
+        pos++;
+        continue;
+      }
+      if (pos < bytes.length && bytes[pos] === 10) pos++;
+      var end = pos + n;
+      if (end > bytes.length) end = bytes.length;
+      var payloadStr = dec.decode(bytes.subarray(pos, end));
+      pos = end;
+      if (pos < bytes.length && bytes[pos] === 10) pos++;
+      if (payloadStr.indexOf("hNvQHb") !== -1) {
+        try {
+          handleOuter(JSON.parse(payloadStr), out);
+        } catch (e) {
+          logSegmentParseFail(e, "parseByBytes");
+        }
+      }
+    }
+  }
+  function parseByLines(raw, out) {
+    var lines = raw.split("\n");
+    for (var i = 0; i < lines.length; i++) {
+      var ln = lines[i];
+      if (!ln || ln === ")]}'") continue;
+      var c0 = ln.charAt(0);
+      if (c0 !== "[" && c0 !== "{") continue;
+      if (ln.indexOf("hNvQHb") === -1) continue;
+      try {
+        handleOuter(JSON.parse(ln), out);
+      } catch (e) {
+        logSegmentParseFail(e, "parseByLines");
+      }
+    }
+  }
+  function parseGeminiHistory(raw) {
+    var parsed = [];
+    parseByBytes(raw, parsed);
+    if (!parsed.length) parseByLines(raw, parsed);
+    var model = "";
+    for (var i = 0; i < parsed.length; i++) {
+      if (parsed[i].model) {
+        model = parsed[i].model;
+        break;
+      }
+    }
+    var totalChars = 0;
+    var messages = [];
+    var texts = [];
+    for (var j = 0; j < parsed.length; j++) {
+      var txt = parsed[j].content || "";
+      totalChars += txt.length;
+      messages.push({ role: parsed[j].role, text: txt, model: parsed[j].model || "", id: parsed[j].id, ts: parsed[j].ts || 0, r1: parsed[j].r1 || null });
+      texts.push(txt);
+    }
+    return {
+      messages,
+      model: model || "Gemini 2.5 Pro",
+      tokens: Math.ceil(totalChars / 4),
+      text: texts.join("\n"),
+      count: messages.length
+    };
+  }
+  var PARSER_VERSION, ATTACH_TOKEN_RE2, UI_BLACKLIST, THINKING_TITLE_RE, THINKING_BODY_RE, THINKING_BODY_EXTRA_RE, THINKING_GERUND_RE, FILE_ATTACHMENT_RE, MODEL_NAME_RE, filePoolsByConv, THINKING_ASSISTANT_RE, LEADING_THINKING_RE, DR_REPORT_MIN_LEN, DR_PLAN_MIN_LEN, lastDrTexts, api;
+  var init_gemini_batchexecute_parser = __esm({
+    "../utils/gemini-batchexecute-parser.ts"() {
+      init_debug();
+      PARSER_VERSION = "g3";
+      ATTACH_TOKEN_RE2 = /\$AXzLiR[A-Za-z0-9+\/=]+/g;
+      UI_BLACKLIST = {
+        "DE": 1,
+        "ru": 1,
+        "mk": 1,
+        "generic": 1,
+        "personal_context": 1,
+        "google": 1,
+        "\u0418\u0449\u0443 \u0432 \u0438\u043D\u0442\u0435\u0440\u043D\u0435\u0442\u0435": 1,
+        "\u041F\u0435\u0440\u0441\u043E\u043D\u0430\u043B\u044C\u043D\u044B\u0439 \u043A\u043E\u043D\u0442\u0435\u043A\u0441\u0442": 1,
+        "Google Search": 1,
+        "true": 1,
+        "false": 1
+      };
+      THINKING_TITLE_RE = /^\s*\*\*[^*\n]{1,120}\*\*/;
+      THINKING_BODY_RE = /^(I'm now|I've been|I am going|I'm currently|I'm focusing|I'm working|I will now|I've fleshed|I've got|I need to|I'm going to|I've shifted|My focus is|I've settled|I've outlined|I've started|I'm aiming|My approach is|I'm leaning|I'm choosing|I'm prioritizing)\b/i;
+      THINKING_BODY_EXTRA_RE = /^(I'm (?:currently|now|also|still) (?:focused|zeroing|analyzing|integrating|identifying|assessing|refining|evaluating|structuring|addressing|considering|formulating|prioritizing|parsing)|I've (?:been|now) (?:analyzing|noted|shifted|outlined|fleshed)|My (?:focus|goal) is|Specifically, I've)\b/i;
+      THINKING_GERUND_RE = /^(Assessing|Defining|Refining|Outlining|Constructing|Uncovering|Tracing|Confirming|Reassuring|Clarifying|Deepening|Integrating|Evaluating|Formulating|Focusing|Prioritizing|Solidifying|Exploring|Analyzing|Reviewing|Validating|Synthesizing|Considering|Identifying|Structuring|Addressing|Reconstructing)\b/;
+      FILE_ATTACHMENT_RE = /File attachment was not previously registered/;
+      MODEL_NAME_RE = /^\s*(?:Gemini\s*[\d.]?|\d+(?:\.\d+)?\s+(?:Flash|Pro|Ultra|Gemini))/i;
+      filePoolsByConv = {};
+      THINKING_ASSISTANT_RE = /^([A-Z][a-z]+ing\b|I'm\b|I've\b|My (?:focus|goal)\b|sr |Ev )/;
+      LEADING_THINKING_RE = /^\s*\*?\*?([A-Z][a-z]+ing\b|I'm|I've|My (focus|goal)|sr |Ev )/;
+      DR_REPORT_MIN_LEN = 1e3;
+      DR_PLAN_MIN_LEN = 60;
+      lastDrTexts = { planText: "", reportText: "" };
+      api = {
+        PARSER_VERSION,
+        stripAttachmentTokens: stripAttachmentTokens2,
+        sanitizeGeminiText,
+        collectTurnText,
+        isThinkingAssistant,
+        firstCyrillicIndex,
+        stripLeadingThinking,
+        splitTurnMessages,
+        extractDrTexts,
+        injectDrLinks,
+        __setDrTexts,
+        fileRefFromNode,
+        fileRefIdentityKey,
+        collectTurnFiles,
+        registerTurnFileOwner,
+        collectTurnFilesForOwner,
+        assignPoolOwners,
+        __resetFileOwners,
+        parseGeminiHistory
+      };
+      if (typeof window !== "undefined") {
+        window.GeminiBatchexecuteParser = api;
+      }
+    }
+  });
+
+  // ../utils/google-search-folwr-parser.ts
+  var google_search_folwr_parser_exports = {};
+  __export(google_search_folwr_parser_exports, {
+    answerDomNodes: () => answerDomNodes,
+    answerTextOf: () => answerTextOf,
+    bodiesPrefixCompatible: () => bodiesPrefixCompatible,
+    canonicalAnswerBody: () => canonicalAnswerBody,
+    canonicalTurnKeyOf: () => canonicalTurnKeyOf,
+    canonicalizeTurnForThread: () => canonicalizeTurnForThread,
+    classifyFolwrContinuation: () => classifyFolwrContinuation,
+    countTurnContainers: () => countTurnContainers,
+    dedupeTurns: () => dedupeTurns,
+    extractContinuationToken: () => extractContinuationToken,
+    extractTurnsFromDocument: () => extractTurnsFromDocument,
+    isCodeBlockElement: () => isCodeBlockElement,
+    mergeTurnsById: () => mergeTurnsById,
+    mergeTurnsByKey: () => mergeTurnsByKey,
+    mergeTurnsMonotone: () => mergeTurnsMonotone,
+    normalizeTurnKeyPart: () => normalizeTurnKeyPart,
+    parseGoogleFolwrOpen: () => parseGoogleFolwrOpen,
+    renderCodeBlock: () => renderCodeBlock,
+    turnIdentityParts: () => turnIdentityParts
+  });
+  function decodeEntities(s) {
+    if (!s) return "";
+    var out = String(s);
+    out = out.replace(new RegExp("&quot;", "g"), '"');
+    out = out.replace(new RegExp("&amp;", "g"), "&");
+    out = out.replace(new RegExp("&#39;", "g"), "'");
+    out = out.replace(new RegExp("&lt;", "g"), "<");
+    out = out.replace(new RegExp("&gt;", "g"), ">");
+    out = out.replace(new RegExp("&nbsp;", "g"), " ");
+    out = out.replace(/&#(\d+);/g, function(m, d) {
+      try {
+        return String.fromCharCode(parseInt(d, 10));
+      } catch (e) {
+        return m;
+      }
+    });
+    return out;
+  }
+  function mapOutsideFences(s, fn) {
+    var str = String(s == null ? "" : s);
+    var out = "";
+    var last = 0;
+    var m;
+    FENCE_RE.lastIndex = 0;
+    while ((m = FENCE_RE.exec(str)) !== null) {
+      out += fn(str.slice(last, m.index)) + m[0];
+      last = m.index + m[0].length;
+    }
+    return out + fn(str.slice(last));
+  }
+  function stripTagsSeg(seg) {
+    return String(seg).replace(/<script[\s\S]*?<\/script>/gi, " ").replace(/<style[\s\S]*?<\/style>/gi, " ").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ");
+  }
+  function stripTags(html) {
+    if (!html) return "";
+    return mapOutsideFences(html, stripTagsSeg).replace(/^\s+/, "").replace(/\s+$/, "");
+  }
+  function sanitizeAssistantSeg(seg) {
+    return String(seg).replace(/<script[\s\S]*?<\/script>/gi, " ").replace(/<style[\s\S]*?<\/style>/gi, " ").replace(/<[^>]+>/g, " ").replace(/[ \t\f\v]+/g, " ").split("\n").map(function(ln) {
+      return ln.trim();
+    }).join("\n").replace(/\n{3,}/g, "\n\n");
+  }
+  function sanitizeAssistant(s) {
+    if (!s) return "";
+    return mapOutsideFences(s, sanitizeAssistantSeg).replace(/^\s+/, "").replace(/\s+$/, "");
+  }
+  function tableCellText(cellEl) {
+    var clone = cellEl.cloneNode(true);
+    clone.querySelectorAll("script, style, button, svg").forEach(function(el) {
+      el.remove();
+    });
+    return stripTags(decodeEntities(clone.innerHTML)).trim();
+  }
+  function tableToMarkdown2(tableEl) {
+    var rows = tableEl.querySelectorAll("tr");
+    var lines = [];
+    for (var r = 0; r < rows.length; r++) {
+      var cells = rows[r].querySelectorAll("th, td");
+      var cellTexts = [];
+      for (var c = 0; c < cells.length; c++) {
+        cellTexts.push(tableCellText(cells[c]));
+      }
+      if (cellTexts.length === 0) continue;
+      lines.push("| " + cellTexts.join(" | ") + " |");
+    }
+    return lines.join("\n");
+  }
+  function isQuestionHeading(el) {
+    return el.tagName === "H2" && el.className && String(el.className).indexOf("iMqumd") !== -1;
+  }
+  function classOf(el) {
+    try {
+      return String(el && el.className || "");
+    } catch (e) {
+      return "";
+    }
+  }
+  function isCodeLikeNode(el) {
+    if (!el || !el.tagName) return false;
+    var tag = String(el.tagName).toUpperCase();
+    return tag === "PRE" || tag === "CODE" || /code-?block/i.test(classOf(el));
+  }
+  function codeTextOf(el) {
+    if (!el || typeof el.cloneNode !== "function") return "";
+    var clone;
+    try {
+      clone = el.cloneNode(true);
+    } catch (e) {
+      return "";
+    }
+    try {
+      var junk = clone.querySelectorAll("script, style, button, svg");
+      for (var i = 0; i < junk.length; i++) {
+        if (junk[i].parentNode) junk[i].parentNode.removeChild(junk[i]);
+      }
+      var brs = clone.querySelectorAll("br");
+      var doc = clone.ownerDocument || (typeof document !== "undefined" ? document : null);
+      for (var b = 0; b < brs.length; b++) {
+        if (brs[b].parentNode && doc && doc.createTextNode) {
+          brs[b].parentNode.replaceChild(doc.createTextNode("\n"), brs[b]);
+        }
+      }
+    } catch (e2) {
+    }
+    var txt = "";
+    try {
+      txt = String(clone.textContent || "");
+    } catch (e3) {
+      txt = "";
+    }
+    if (txt.indexOf("\n") === -1 && clone.children && clone.children.length > 1) {
+      var allBlock = true;
+      for (var k = 0; k < clone.children.length; k++) {
+        if (!/^(DIV|P|LI|TR|SECTION|ARTICLE|FIGURE|BLOCKQUOTE|H[1-6])$/.test(String(clone.children[k].tagName || "").toUpperCase())) {
+          allBlock = false;
+          break;
+        }
+      }
+      if (allBlock) {
+        var lines = [];
+        for (var k2 = 0; k2 < clone.children.length; k2++) {
+          lines.push(String(clone.children[k2].textContent || ""));
+        }
+        var joined = lines.join("\n");
+        if (joined.replace(/\s+/g, "")) txt = joined;
+      }
+    }
+    return txt.replace(/[ \t]+$/gm, "").replace(/^\n+/, "").replace(/\s+$/, "");
+  }
+  function codeBodyElement(el) {
+    try {
+      var inner = el.querySelectorAll ? el.querySelectorAll("pre, code") : null;
+      if (inner && inner.length) return inner[inner.length - 1];
+    } catch (e) {
+    }
+    return el;
+  }
+  function detectCodeLang(el, langHint) {
+    if (langHint != null && CODE_LANG_RE.test(String(langHint).trim())) return String(langHint).trim();
+    var attrNames = ["code-lang", "data-lang", "data-code-lang"];
+    try {
+      for (var a = 0; a < attrNames.length; a++) {
+        var v = el && el.getAttribute ? el.getAttribute(attrNames[a]) : null;
+        if (v && CODE_LANG_RE.test(String(v).trim())) return String(v).trim();
+      }
+    } catch (e) {
+    }
+    var m = classOf(el).match(/(?:^|[\s_-])(?:language|lang)[-_]([A-Za-z][A-Za-z0-9+#._-]{0,19})/);
+    if (m && CODE_LANG_RE.test(m[1])) return m[1];
+    var cur = el;
+    for (var up = 0; cur && up < 4; up++) {
+      var prev = cur.previousSibling;
+      for (var hops = 0; prev && hops < 3; hops++) {
+        var t = "";
+        try {
+          t = String(prev.textContent || "").trim();
+        } catch (e2) {
+          t = "";
+        }
+        if (t) {
+          if (CODE_LANG_RE.test(t)) return t;
+          break;
+        }
+        prev = prev.previousSibling;
+      }
+      cur = cur.parentNode;
+    }
+    return "";
+  }
+  function isCodeBlockElement(el) {
+    if (!el || !el.tagName) return false;
+    var tag = String(el.tagName).toUpperCase();
+    if (/code-?block/i.test(classOf(el))) return true;
+    if (tag === "PRE") return true;
+    if (tag !== "CODE") return false;
+    if (/(?:^|[\s_-])(?:language|lang)[-_]/.test(classOf(el))) return true;
+    return codeTextOf(el).indexOf("\n") !== -1;
+  }
+  function renderCodeBlock(node, langHint) {
+    if (!node) return "";
+    var body = codeBodyElement(node);
+    var text = codeTextOf(body);
+    if (!text) text = codeTextOf(node);
+    if (!text) return "";
+    var lang = detectCodeLang(node, langHint) || detectCodeLang(body, langHint);
+    var fence = "```";
+    while (text.indexOf(fence) !== -1) fence += "`";
+    return fence + lang + "\n" + text + "\n" + fence;
+  }
+  function answerTextOf(node) {
+    if (!node) return "";
+    if (isCodeBlockElement(node)) return renderCodeBlock(node);
+    if (typeof node.cloneNode !== "function") return "";
+    var clone;
+    try {
+      clone = node.cloneNode(true);
+    } catch (e) {
+      return "";
+    }
+    try {
+      var junk = clone.querySelectorAll("script, style, button, svg");
+      for (var i = 0; i < junk.length; i++) {
+        if (junk[i].parentNode) junk[i].parentNode.removeChild(junk[i]);
+      }
+      var found = clone.querySelectorAll ? clone.querySelectorAll(CODE_CONTAINER_SEL) : [];
+      var outer = [];
+      for (var f = 0; f < found.length; f++) {
+        if (!isCodeBlockElement(found[f])) continue;
+        var nested = false;
+        for (var o = 0; o < outer.length; o++) {
+          if (outer[o].contains && outer[o].contains(found[f])) {
+            nested = true;
+            break;
+          }
+        }
+        if (!nested) outer.push(found[f]);
+      }
+      var doc = clone.ownerDocument || (typeof document !== "undefined" ? document : null);
+      for (var c = outer.length - 1; c >= 0; c--) {
+        var fenced = renderCodeBlock(outer[c]);
+        if (!fenced || !outer[c].parentNode || !doc || !doc.createTextNode) continue;
+        outer[c].parentNode.replaceChild(doc.createTextNode("\n" + fenced + "\n"), outer[c]);
+      }
+    } catch (e2) {
+    }
+    var txt = "";
+    try {
+      txt = String(clone.textContent || "");
+    } catch (e3) {
+      txt = "";
+    }
+    return txt.trim();
+  }
+  function answerDomNodes(root) {
+    var doc = root || (typeof document !== "undefined" ? document : null);
+    if (!doc || typeof doc.querySelectorAll !== "function") return [];
+    var nodes = doc.querySelectorAll(".n6owBd.awi2gc, " + CODE_CONTAINER_SEL);
+    var out = [];
+    for (var i = 0; i < nodes.length; i++) {
+      var el = nodes[i];
+      if (isCodeLikeNode(el) && !isCodeBlockElement(el)) continue;
+      var nested = false;
+      for (var j = 0; j < out.length; j++) {
+        if (out[j].contains && out[j].contains(el)) {
+          nested = true;
+          break;
+        }
+      }
+      if (nested) continue;
+      out.push(el);
+    }
+    return out;
+  }
+  function nodeText(node) {
+    try {
+      return (node.textContent || "").trim();
+    } catch (e) {
+      return "";
+    }
+  }
+  function isWebSearchChipNode(node) {
+    return WEB_SEARCH_CHIP_RE.test(nodeText(node));
+  }
+  function isForeignQuestionNode(node) {
+    return FOREIGN_QUESTION_RE.test(nodeText(node));
+  }
+  function listItemToMarkdown(liEl) {
+    var clone = liEl.cloneNode(true);
+    clone.querySelectorAll("script, style, button, svg").forEach(function(el) {
+      el.remove();
+    });
+    var label = null;
+    var b = clone.querySelector("strong, b");
+    if (b) {
+      label = (b.textContent || "").replace(/\s+/g, " ").trim();
+      b.remove();
+    }
+    var rest = stripTags(decodeEntities(clone.innerHTML)).trim();
+    if (label) {
+      return "- **" + label + "**" + (rest ? ": " + rest : "");
+    }
+    return rest ? "- " + rest : "";
+  }
+  function listToText(listEl) {
+    var items = listEl.querySelectorAll("li");
+    var lines = [];
+    for (var r = 0; r < items.length; r++) {
+      var t = listItemToMarkdown(items[r]);
+      if (t) lines.push(t);
+    }
+    return lines.join("\n");
+  }
+  function gatherAnswerContentNodes(doc) {
+    var raw = doc.querySelectorAll('.n6owBd.awi2gc, table, [role="heading"], h2, h3, h4, ul, ol, li, [role="list"], [role="listitem"], ' + CODE_CONTAINER_SEL);
+    var out = [];
+    for (var i = 0; i < raw.length; i++) {
+      var el = raw[i];
+      if (isQuestionHeading(el)) continue;
+      if (isCodeLikeNode(el) && !isCodeBlockElement(el)) continue;
+      var nested = false;
+      for (var j = 0; j < out.length; j++) {
+        if (out[j].contains && out[j].contains(el)) {
+          nested = true;
+          break;
+        }
+      }
+      if (nested) continue;
+      out.push(el);
+    }
+    return out;
+  }
+  function assignContentToTurns(turnsArr, contentNodes) {
+    var answers = [];
+    var skipAfterChip = [];
+    for (var ti = 0; ti < turnsArr.length; ti++) {
+      answers[ti] = [];
+      skipAfterChip[ti] = false;
+    }
+    for (var n = 0; n < contentNodes.length; n++) {
+      var node = contentNodes[n];
+      var assigned = -1;
+      for (var t2 = 0; t2 < turnsArr.length; t2++) {
+        if (turnsArr[t2].compareDocumentPosition(node) & Node.DOCUMENT_POSITION_FOLLOWING) {
+          assigned = t2;
+        } else {
+          break;
+        }
+      }
+      if (assigned < 0) continue;
+      if (isForeignQuestionNode(node)) continue;
+      if (isWebSearchChipNode(node)) {
+        skipAfterChip[assigned] = true;
+        continue;
+      }
+      if (skipAfterChip[assigned]) continue;
+      var part = null;
+      if (node.tagName === "TABLE") {
+        var md = tableToMarkdown2(node);
+        if (md) part = md;
+      } else if (node.tagName === "UL" || node.tagName === "OL") {
+        var lt = listToText(node);
+        if (lt) part = lt;
+      } else {
+        var ct = answerTextOf(node).trim();
+        if (ct) part = ct;
+      }
+      if (part) answers[assigned].push(part);
+    }
+    return answers;
+  }
+  function readThreadId(doc) {
+    try {
+      var el = doc.querySelector("[data-session-thread-id]");
+      if (el) {
+        var v = el.getAttribute("data-session-thread-id");
+        return v ? v.trim() : "";
+      }
+    } catch (e) {
+    }
+    return "";
+  }
+  function parseGoogleFolwrOpen(htmlText) {
+    var turns = [];
+    var messages = [];
+    if (!htmlText || typeof htmlText !== "string") {
+      return { threadId: "", turns, messages, text: "", count: 0 };
+    }
+    var doc;
+    try {
+      doc = new DOMParser().parseFromString(htmlText, "text/html");
+    } catch (e) {
+      return { threadId: "", turns, messages, text: "", count: 0 };
+    }
+    var threadId = readThreadId(doc);
+    var turnEls = doc.querySelectorAll('[data-scope-id="turn"]');
+    var allAimfl = doc.querySelectorAll('[data-subtree="aimfl"]');
+    var turnsArr = Array.prototype.slice.call(turnEls);
+    var tgQuestions = [];
+    try {
+      var tgRe = /<!--TgQPHd\|[\s\S]*?-->/g;
+      var m;
+      while ((m = tgRe.exec(htmlText)) !== null) {
+        var c = decodeEntities(m[0]);
+        var longRe = /"([^"]{20,})"/g;
+        var lm;
+        var found = null;
+        while ((lm = longRe.exec(c)) !== null) {
+          var cand = lm[1];
+          if (cand.indexOf("\\u0026") !== -1) continue;
+          if (cand.indexOf("OLOoOd") !== -1) continue;
+          if (cand.indexOf("dRog6c") !== -1) continue;
+          if (cand.indexOf("TgQPHd") !== -1) continue;
+          if (!/[а-яёА-ЯЁ]/.test(cand) && cand.indexOf(" ") === -1) continue;
+          found = cand;
+          break;
+        }
+        tgQuestions.push(found);
+      }
+    } catch (e) {
+      swallowSoft(e, "gsa-utils:parseGoogleFolwrOpen-tgqphd");
+    }
+    var contentNodes = gatherAnswerContentNodes(doc);
+    var answers = assignContentToTurns(turnsArr, contentNodes);
+    for (var i = 0; i < turnsArr.length; i++) {
+      var turn = turnsArr[i];
+      var question = null;
+      var h2 = turn.querySelector("h2.iMqumd");
+      if (h2) {
+        var raw = (h2.textContent || "").trim();
+        var qm = raw.match(/^Вы сказали:\s*"([\s\S]*)"$/);
+        question = qm ? qm[1].trim() : raw;
+      }
+      var assistantText = answers[i].length > 0 ? answers[i].join("\n\n") : null;
+      if (!assistantText) {
+        var nestedAimfl = turn.querySelector('[data-subtree="aimfl"]');
+        if (nestedAimfl) {
+          var nat = (nestedAimfl.textContent || "").trim();
+          if (nat) assistantText = nat;
+        }
+      }
+      if (!assistantText && allAimfl[i]) {
+        var at = (allAimfl[i].textContent || "").trim();
+        if (at) assistantText = at;
+      }
+      if (!question && tgQuestions[i]) question = tgQuestions[i];
+      turns.push({
+        id: turn.getAttribute && turn.getAttribute("jsuid") || "idx" + i,
+        userText: question || null,
+        assistantText: assistantText || null
+      });
+    }
+    if (turns.length === 0) {
+      var folifAnswer = null;
+      for (var aa = 0; aa < allAimfl.length; aa++) {
+        var at2 = (allAimfl[aa].textContent || "").trim();
+        if (at2) {
+          folifAnswer = at2;
+          break;
+        }
+      }
+      if (!folifAnswer && contentNodes.length > 0) {
+        var firstNode = contentNodes[0];
+        if (firstNode.tagName === "TABLE") {
+          folifAnswer = tableToMarkdown2(firstNode);
+        } else {
+          folifAnswer = answerTextOf(firstNode).trim() || null;
+        }
+      }
+      var folifQuestion = tgQuestions.length > 0 ? tgQuestions[0] : null;
+      if (folifQuestion || folifAnswer) {
+        turns.push({ id: "folif_" + Date.now(), userText: folifQuestion, assistantText: folifAnswer });
+      }
+    }
+    for (var t = 0; t < turns.length; t++) {
+      var t2 = turns[t];
+      if (t2.userText) messages.push({ role: "user", text: stripTags(decodeEntities(t2.userText)) });
+      if (t2.assistantText) messages.push({ role: "assistant", text: sanitizeAssistant(t2.assistantText) });
+    }
+    var text = "";
+    for (var mi = 0; mi < messages.length; mi++) {
+      text += (mi > 0 ? "\n" : "") + messages[mi].text;
+    }
+    return { threadId, turns, messages, text, count: messages.length };
+  }
+  function countTurnContainers(htmlText) {
+    if (!htmlText || typeof htmlText !== "string") return 0;
+    try {
+      var doc = new DOMParser().parseFromString(htmlText, "text/html");
+      return doc.querySelectorAll('[data-scope-id="turn"]').length;
+    } catch (e) {
+      return 0;
+    }
+  }
+  function extractTurnsFromDocument(doc) {
+    if (!doc || typeof doc.querySelectorAll !== "function") return [];
+    var turns = [];
+    try {
+      var turnEls = doc.querySelectorAll('[data-scope-id="turn"]');
+      var allAimfl = doc.querySelectorAll('[data-subtree="aimfl"]');
+      var turnsArr = Array.prototype.slice.call(turnEls);
+      var questions = [];
+      for (var i = 0; i < turnsArr.length; i++) {
+        var h2 = turnsArr[i].querySelector("h2.iMqumd");
+        var q = null;
+        if (h2) {
+          var raw = (h2.textContent || "").trim();
+          var m = raw.match(/^Вы сказали:\s*"([\s\S]*)"$/);
+          q = m ? m[1].trim() : raw;
+        }
+        questions.push(q);
+      }
+      var answers = [];
+      for (var t = 0; t < turnsArr.length; t++) answers[t] = [];
+      var blocks = answerDomNodes(doc);
+      for (var b = 0; b < blocks.length; b++) {
+        var blk = blocks[b];
+        var assigned = -1;
+        for (var t2 = 0; t2 < turnsArr.length; t2++) {
+          if (turnsArr[t2].compareDocumentPosition(blk) & Node.DOCUMENT_POSITION_FOLLOWING) assigned = t2;
+          else break;
+        }
+        if (assigned >= 0 && assigned < turnsArr.length) {
+          var txt = answerTextOf(blk).trim();
+          if (txt) answers[assigned].push(txt);
+        }
+      }
+      for (var k = 0; k < turnsArr.length; k++) {
+        var joined = answers[k].length ? answers[k].join("\n\n") : null;
+        if (!joined && allAimfl[k]) {
+          var at = (allAimfl[k].textContent || "").trim();
+          if (at) joined = at;
+        }
+        turns.push({
+          id: turnsArr[k].getAttribute && turnsArr[k].getAttribute("jsuid") || "idx" + k,
+          userText: questions[k] || null,
+          assistantText: joined || null
+        });
+      }
+    } catch (e) {
+      swallowSoft(e, "gsa-utils:extractTurnsFromDocument");
+    }
+    return turns;
+  }
+  function extractContinuationToken(htmlText) {
+    if (!htmlText || typeof htmlText !== "string") return null;
+    try {
+      var doc = new DOMParser().parseFromString(htmlText, "text/html");
+      var els = doc.querySelectorAll("[data-mstk]");
+      var last = null;
+      for (var i = 0; i < els.length; i++) {
+        var v = els[i].getAttribute("data-mstk");
+        if (v) last = v.trim();
+      }
+      return last;
+    } catch (e) {
+      return null;
+    }
+  }
+  function normalizeTurnKeyPart(s) {
+    return String(s == null ? "" : s).toLowerCase().replace(/\u00a0/g, " ").replace(/[^a-zа-яё0-9]+/g, "");
+  }
+  function isAnswerWrapperTail(tail) {
+    var t = String(tail == null ? "" : tail);
+    var body = t.replace(/^["»”']{0,2}/, "").replace(/^[\s.,:;-]{0,4}/, "");
+    return body.replace(/\s+/g, "").length > 0;
+  }
+  function wrapperPrefix(text) {
+    var s = String(text == null ? "" : text);
+    var head = s.slice(0, 96);
+    var at = head.indexOf(":");
+    if (at === -1) return null;
+    var after = head.slice(at + 1);
+    var m = /^\s*"/.exec(after);
+    if (!m) return null;
+    return s.slice(0, at + 1 + m[0].length);
+  }
+  function answerWrapperParts(text) {
+    var s = String(text == null ? "" : text);
+    var prefix = wrapperPrefix(s);
+    if (!prefix) return null;
+    var rest = s.slice(prefix.length);
+    var close = rest.indexOf('"');
+    if (close === -1) return null;
+    var tail = rest.slice(close + 1);
+    if (!isAnswerWrapperTail(tail)) return null;
+    var question = rest.slice(0, close).trim();
+    if (!question) return null;
+    var body = tail.replace(/^["»”']{0,2}/, "").replace(/^[\s.,:;-]+/, "");
+    if (!body) return null;
+    return { question, body };
+  }
+  function canonicalAnswerBody(text) {
+    var wrapper = answerWrapperParts(text);
+    if (wrapper) return wrapper.body;
+    var s = String(text == null ? "" : text);
+    try {
+      var q = QUESTION_ASK_RE.exec(s);
+      if (q) {
+        var rest2 = s.slice(q[0].length);
+        var close2 = rest2.indexOf('"?');
+        if (close2 !== -1 && close2 < 200) {
+          var body2 = rest2.slice(close2 + 2).replace(/^[\s.,:;-]+/, "");
+          if (body2) s = body2;
+        }
+      }
+    } catch (e) {
+      return String(text == null ? "" : text);
+    }
+    return s;
+  }
+  function turnIdentityParts(turn) {
+    if (!turn) return { u: "", a: "" };
+    var wrapper = answerWrapperParts(turn.assistantText);
+    var u = normalizeTurnKeyPart(turn.userText);
+    if (!u && wrapper) u = normalizeTurnKeyPart(wrapper.question);
+    var a = normalizeTurnKeyPart(wrapper ? wrapper.body : canonicalAnswerBody(turn.assistantText));
+    return { u, a };
+  }
+  function canonicalTurnKeyOf(turn) {
+    if (!turn) return "";
+    var parts = turnIdentityParts(turn);
+    return parts.u + "||" + parts.a;
+  }
+  function canonicalizeTurnForThread(turn) {
+    if (!turn) return turn;
+    var question = turn.userText == null ? "" : String(turn.userText).trim();
+    if (!question) {
+      var wrapper = answerWrapperParts(turn.assistantText);
+      if (wrapper) question = wrapper.question;
+    }
+    return {
+      id: turn.id,
+      userText: question || null,
+      assistantText: turn.assistantText == null ? null : turn.assistantText
+    };
+  }
+  function isBetterTurn(candidate, current) {
+    if (!current) return true;
+    var la = String(candidate && candidate.assistantText || "").length;
+    var lb = String(current && current.assistantText || "").length;
+    if (la !== lb) return la > lb;
+    return String(candidate && candidate.userText || "").length > String(current && current.userText || "").length;
+  }
+  function turnRecord(t, idFallback) {
+    return {
+      id: t && t.id != null ? t.id : idFallback,
+      userText: t && t.userText || null,
+      assistantText: t && t.assistantText || null
+    };
+  }
+  function bodiesPrefixCompatible(a, b) {
+    var x = String(a == null ? "" : a);
+    var y = String(b == null ? "" : b);
+    if (!x || !y) return false;
+    if (x === y) return true;
+    var n = Math.min(x.length, y.length);
+    if (n < PREFIX_MIN_CHARS) return false;
+    var common = 0;
+    while (common < n && x.charCodeAt(common) === y.charCodeAt(common)) common++;
+    if (common === n) return true;
+    return common / n >= PREFIX_FUZZY_RATIO;
+  }
+  function isFullerTurn(candidate, current) {
+    var la = turnIdentityParts(candidate).a.length;
+    var lb = turnIdentityParts(current).a.length;
+    if (la !== lb) return la > lb;
+    return isBetterTurn(candidate, current);
+  }
+  function answerBodyParagraphs(turn) {
+    var wrapper = answerWrapperParts(turn && turn.assistantText);
+    var body = wrapper ? wrapper.body : canonicalAnswerBody(turn && turn.assistantText);
+    var lines = String(body == null ? "" : body).split(String.fromCharCode(10));
+    var out = [];
+    var cur = "";
+    for (var i = 0; i < lines.length; i++) {
+      var line = lines[i];
+      if (line.trim() === "") {
+        var p = normalizeTurnKeyPart(cur);
+        if (p) out.push(p);
+        cur = "";
+        continue;
+      }
+      cur = cur ? cur + String.fromCharCode(10) + line : line;
+    }
+    var tail = normalizeTurnKeyPart(cur);
+    if (tail) out.push(tail);
+    return out;
+  }
+  function bodiesParagraphPermutation(aTurn, bTurn) {
+    var pa = answerBodyParagraphs(aTurn);
+    var pb = answerBodyParagraphs(bTurn);
+    if (pa.length < PARAGRAPH_PERMUTATION_MIN || pa.length !== pb.length) return false;
+    pa.sort();
+    pb.sort();
+    for (var i = 0; i < pa.length; i++) {
+      if (pa[i] !== pb[i]) return false;
+    }
+    return true;
+  }
+  function findPrefixCompatibleIndex(turns, turn) {
+    var parts = turnIdentityParts(turn);
+    if (!parts.u || !parts.a) return -1;
+    for (var i = 0; i < turns.length; i++) {
+      var other = turnIdentityParts(turns[i]);
+      if (other.u !== parts.u) continue;
+      if (bodiesPrefixCompatible(other.a, parts.a)) return i;
+      if (other.a.length === parts.a.length && bodiesParagraphPermutation(turns[i], turn)) return i;
+    }
+    return -1;
+  }
+  function reindexTurnKey(byKey, turns, at) {
+    var k;
+    for (k in byKey) {
+      if (byKey[k] === at) delete byKey[k];
+    }
+    var key = canonicalTurnKeyOf(turns[at]);
+    if (key !== "||") byKey[key] = at;
+  }
+  function mergeTurnsById(baseTurns, extraTurns) {
+    baseTurns = Array.isArray(baseTurns) ? baseTurns : [];
+    extraTurns = Array.isArray(extraTurns) ? extraTurns : [];
+    var byId = {};
+    var byKey = {};
+    var out = [];
+    function add(t) {
+      if (!t) return;
+      var id = t.id != null ? String(t.id) : "x" + out.length;
+      var key = canonicalTurnKeyOf(t);
+      var hasId = Object.prototype.hasOwnProperty.call(byId, id);
+      var hasKey = key !== "||" && Object.prototype.hasOwnProperty.call(byKey, key);
+      var at = hasId ? byId[id] : hasKey ? byKey[key] : findPrefixCompatibleIndex(out, t);
+      if (at !== -1) {
+        var richer = hasId || hasKey ? isBetterTurn(t, out[at]) : isFullerTurn(t, out[at]);
+        if (richer) {
+          out[at] = turnRecord(t, out[at].id);
+          reindexTurnKey(byKey, out, at);
+        }
+        return;
+      }
+      byId[id] = out.length;
+      if (key !== "||") byKey[key] = out.length;
+      out.push(turnRecord(t, id));
+    }
+    var i;
+    for (i = 0; i < baseTurns.length; i++) add(baseTurns[i]);
+    for (i = 0; i < extraTurns.length; i++) add(extraTurns[i]);
+    return out;
+  }
+  function mergeTurnsMonotone(baseTurns, extraTurns) {
+    return mergeTurnsById(baseTurns, extraTurns);
+  }
+  function mergeTurnsByKey(baseTurns, extraTurns) {
+    baseTurns = Array.isArray(baseTurns) ? baseTurns : [];
+    extraTurns = Array.isArray(extraTurns) ? extraTurns : [];
+    var byKey = {};
+    var out = [];
+    function add(t) {
+      if (!t) return;
+      var key = canonicalTurnKeyOf(t);
+      if (key === "||") return;
+      var hasKey = Object.prototype.hasOwnProperty.call(byKey, key);
+      var at = hasKey ? byKey[key] : findPrefixCompatibleIndex(out, t);
+      if (at === -1) {
+        byKey[key] = out.length;
+        out.push(turnRecord(t, "x" + out.length));
+        return;
+      }
+      var richer = hasKey ? isBetterTurn(t, out[at]) : isFullerTurn(t, out[at]);
+      if (richer) {
+        out[at] = turnRecord(t, out[at].id);
+        reindexTurnKey(byKey, out, at);
+      }
+    }
+    for (var i = 0; i < baseTurns.length; i++) add(baseTurns[i]);
+    for (var j = 0; j < extraTurns.length; j++) add(extraTurns[j]);
+    return out;
+  }
+  function dedupeTurns(turns) {
+    var list = Array.isArray(turns) ? turns : [];
+    var byKey = {};
+    var out = [];
+    for (var i = 0; i < list.length; i++) {
+      var t = list[i];
+      if (!t) continue;
+      var key = canonicalTurnKeyOf(t);
+      var hasKey = key !== "||" && Object.prototype.hasOwnProperty.call(byKey, key);
+      var at = hasKey ? byKey[key] : findPrefixCompatibleIndex(out, t);
+      if (at === -1) {
+        if (key !== "||") byKey[key] = out.length;
+        out.push(t);
+        continue;
+      }
+      var richer = hasKey ? isBetterTurn(t, out[at]) : isFullerTurn(t, out[at]);
+      if (richer) {
+        out[at] = t;
+        reindexTurnKey(byKey, out, at);
+      }
+    }
+    return out;
+  }
+  function classifyFolwrContinuation(input) {
+    var i = input || {};
+    var ok = i.ok === true;
+    var status = i.status == null ? 0 : i.status;
+    var bodyLength = typeof i.bodyLength === "number" && i.bodyLength >= 0 ? i.bodyLength : 0;
+    var newTurns = typeof i.newTurns === "number" && i.newTurns > 0 ? i.newTurns : 0;
+    var cursor = i.cursor ? String(i.cursor) : null;
+    var sentCursor = i.sentCursor ? String(i.sentCursor) : null;
+    var cursorRepeated = !!(cursor && sentCursor && cursor === sentCursor);
+    var kind;
+    var complete, canContinue;
+    if (!ok) {
+      kind = "http-error";
+      complete = false;
+      canContinue = false;
+    } else if (bodyLength === 0) {
+      kind = "empty-body";
+      complete = true;
+      canContinue = false;
+    } else if (cursorRepeated) {
+      kind = "cursor-repeat";
+      complete = true;
+      canContinue = false;
+    } else if (newTurns > 0) {
+      kind = "new-turns";
+      complete = false;
+      canContinue = true;
+    } else {
+      kind = "no-new-turns";
+      complete = true;
+      canContinue = false;
+    }
+    return {
+      kind,
+      complete,
+      canContinue,
+      status,
+      ok,
+      bodyLength,
+      newTurns,
+      cursor,
+      cursorRepeated,
+      log: "kind=" + kind + " status=" + status + " ok=" + (ok ? 1 : 0) + " len=" + bodyLength + "B \u0445\u043E\u0434\u043E\u0432=+" + newTurns + " \u043A\u0443\u0440\u0441\u043E\u0440=" + (cursor ? "\u0435\u0441\u0442\u044C(" + (cursorRepeated ? "\u043F\u043E\u0432\u0442\u043E\u0440" : "\u043D\u043E\u0432\u044B\u0439") + ")" : "\u043D\u0435\u0442")
+    };
+  }
+  var FENCE_RE, CODE_CONTAINER_SEL, CODE_LANG_RE, WEB_SEARCH_CHIP_RE, FOREIGN_QUESTION_RE, QUESTION_ASK_RE, PREFIX_MIN_CHARS, PREFIX_FUZZY_RATIO, PARAGRAPH_PERMUTATION_MIN;
+  var init_google_search_folwr_parser = __esm({
+    "../utils/google-search-folwr-parser.ts"() {
+      FENCE_RE = /(`{3,})[\s\S]*?\1/g;
+      CODE_CONTAINER_SEL = 'pre, code, [class*="code-block"], [class*="codeBlock"], [class*="codeblock"]';
+      CODE_LANG_RE = /^[A-Za-z][A-Za-z0-9+#._-]{0,19}$/;
+      WEB_SEARCH_CHIP_RE = /(?:Самые популярные результаты веб-поиска по этой теме|People also search|Related searches|Похожие запросы|Связанные запросы)/i;
+      FOREIGN_QUESTION_RE = /^Вы сказали:\s*"/;
+      QUESTION_ASK_RE = /^(?:в\s+)?(?:ответ(?:е)?(?:\s+на\s+вопрос)?|на\s+вопрос|вопрос)\s*:?\s*/i;
+      PREFIX_MIN_CHARS = 12;
+      PREFIX_FUZZY_RATIO = 0.8;
+      PARAGRAPH_PERMUTATION_MIN = 2;
+      if (typeof window !== "undefined") {
+        window.parseGoogleFolwrOpen = parseGoogleFolwrOpen;
+        window.GoogleFolwrUtils = {
+          countTurnContainers,
+          extractTurnsFromDocument,
+          mergeTurnsByKey,
+          extractContinuationToken,
+          mergeTurnsById,
+          mergeTurnsMonotone,
+          classifyFolwrContinuation,
+          // O-32: каноническая идентичность/форма хода — ОДИН источник правды для сетевого пути,
+          // DOM-добора перехватчика и DOM-пути адаптера (см. блок «O-32» ниже по файлу).
+          canonicalTurnKeyOf,
+          canonicalAnswerBody,
+          canonicalizeTurnForThread,
+          normalizeTurnKeyPart,
+          // O-32 (фикс A/C): префикс-терпимая идентичность хода и дедуп списка перед кэшем.
+          turnIdentityParts,
+          bodiesPrefixCompatible,
+          dedupeTurns,
+          // O-45: общий рендер код-блоков (```lang … ```) и отбор узлов DOM-пути —
+          // переиспользуются адаптером (adapters/google-search-adapter.js) и тестами.
+          renderCodeBlock,
+          answerTextOf,
+          answerDomNodes,
+          isCodeBlockElement
+        };
+      }
+    }
+  });
+
+  // entry-content.js
+  var require_entry_content = __commonJS({
+    "entry-content.js"(exports, module) {
+      init_gemini_dom_parser();
+      init_platform();
+      init_debug();
+      init_tokenizer();
+      init_model_config();
+      init_export_text_builders();
+      init_export_emit_pipeline();
+      init_gemini_batchexecute_parser();
+      init_google_search_folwr_parser();
       var BaseAdapter = class {
         constructor() {
           this.siteName = "base";
@@ -8747,53 +11230,46 @@ if (typeof module !== 'undefined' && module.exports) {
         }
         /**
          * Проверяет, находимся ли мы на странице диалога этого сайта.
-         * @returns {boolean}
          */
         isOnDialogPage() {
           throw new Error("\u041C\u0435\u0442\u043E\u0434 isOnDialogPage() \u0434\u043E\u043B\u0436\u0435\u043D \u0431\u044B\u0442\u044C \u043F\u0435\u0440\u0435\u043E\u043F\u0440\u0435\u0434\u0435\u043B\u0451\u043D");
         }
         /**
          * Извлекает все сообщения из диалога.
-         * @returns {BaseExtractedMessage[]}
+         * Аргумент опций не читается — поведение то же, что до типизации.
          */
-        extractMessages() {
+        extractMessages(_options) {
           throw new Error("\u041C\u0435\u0442\u043E\u0434 extractMessages() \u0434\u043E\u043B\u0436\u0435\u043D \u0431\u044B\u0442\u044C \u043F\u0435\u0440\u0435\u043E\u043F\u0440\u0435\u0434\u0435\u043B\u0451\u043D");
         }
         /**
          * Собирает полный текст диалога для оценки токенов.
-         * @returns {string}
          */
         getFullDialogText() {
           const messages = this.extractMessages();
-          return messages.map((msg) => msg.content).join("\n");
+          return messages.map((msg) => msg.content).join("\\n");
         }
         /**
          * Возвращает количество сообщений в диалоге.
-         * @returns {number}
          */
         getMessageCount() {
           return this.extractMessages().length;
         }
         /**
          * Определяет модель ИИ по DOM (если возможно).
-         * @returns {string|null} - название модели или null
+         * @returns название модели или null
          */
         detectModel() {
           return null;
         }
         /**
          * Безопасное получение текста из элемента.
-         * @param {Element} element
-         * @returns {string}
          */
         _getTextContent(element) {
           return element ? element.textContent.trim() : "";
         }
         /**
          * Безопасный querySelector с проверкой.
-         * @param {string} selector
-         * @param {ParentNode} [parent] - Document по умолчанию
-         * @returns {Element|null}
+         * @param parent - Document по умолчанию
          */
         _safeQuerySelector(selector, parent = document) {
           try {
@@ -8805,12 +11281,10 @@ if (typeof module !== 'undefined' && module.exports) {
         }
         /**
          * Безопасный querySelectorAll с проверкой.
-         * Ветка ошибки возвращает пустой массив, а не NodeList: у NodeList есть .item(),
-         * у массива нет (TS2741). Потребители берут только .length и срез в массив
-         * (Array.prototype.slice.call в qwen-adapter.js:143), поэтому обе формы годятся.
-         * @param {string} selector
-         * @param {ParentNode} [parent] - Document по умолчанию
-         * @returns {NodeList|Element[]}
+         * Ветка ошибки возвращает пустой массив: у NodeList есть .item(), у массива нет,
+         * поэтому форма возврата — объединение, а потребители берут только .length и срез
+         * в массив (Array.prototype.slice.call в qwen-adapter.ts), где годятся обе формы.
+         * @param parent - Document по умолчанию
          */
         _safeQuerySelectorAll(selector, parent = document) {
           try {
@@ -8841,9 +11315,6 @@ if (typeof module !== 'undefined' && module.exports) {
         /**
          * Есть ли в className узла хоть один из маркеров (подстрока — как в исходной версии:
          * хеш-суффиксы Tailwind являются частью того же класса-токена).
-         * @param {string} className
-         * @param {string[]} markers
-         * @returns {boolean}
          */
         _markerHit(className, markers) {
           const cls = String(className || "");
@@ -8858,8 +11329,6 @@ if (typeof module !== 'undefined' && module.exports) {
          * (в исходной версии маркер жил именно на предке) или внутри своего поддерева.
          * Служит и определению роли, и ИСКЛЮЧЕНИЮ обёрток: узел, внутри которого лежит
          * реплика пользователя, ответом быть не может (иначе в ответ попал бы и вопрос).
-         * @param {Element} element
-         * @returns {boolean}
          */
         _hasUserMarker(element) {
           if (!element) return false;
@@ -8877,8 +11346,6 @@ if (typeof module !== 'undefined' && module.exports) {
         /**
          * Первая непустая реплика пользователя внутри узла. Кандидаты — по порядку
          * `_userSelectors`: первый непустой набор выигрывает (форма донора qwen-adapter.js).
-         * @param {Document|Element} scope
-         * @returns {Element|null}
          */
         _firstUserNode(scope) {
           for (let i = 0; i < this._userSelectors.length; i++) {
@@ -8892,9 +11359,6 @@ if (typeof module !== 'undefined' && module.exports) {
         /**
          * Структурный фолбэк: самый длинный текстовый узел поддерева, не являющийся репликой
          * пользователя и не содержащий её.
-         * @param {Element} scope
-         * @param {Element|null} userEl
-         * @returns {Element|null}
          */
         _longestTextNode(scope, userEl) {
           const nodes = scope.querySelectorAll("*");
@@ -8921,9 +11385,6 @@ if (typeof module !== 'undefined' && module.exports) {
          * Уровень 2 (структурный) — самый длинный текстовый узел хода ПОСЛЕ реплики; он
          * включается, только если реплика пользователя найдена (иначе роль ответа угадывалась
          * бы длиной, а это тот же дефект, что и нормализация 'unknown' → 'user').
-         * @param {Element} turn
-         * @param {Element|null} userEl
-         * @returns {Element|null}
          */
         _assistantInTurn(turn, userEl) {
           let best = null;
@@ -8954,7 +11415,6 @@ if (typeof module !== 'undefined' && module.exports) {
          * только если живой отбор не дал ничего: на новых сборках он дал бы дубли.
          * Роль 'unknown' в результат НЕ попадает — исходная нормализация 'unknown' → 'user'
          * и была корнем дефекта (ответ записывался в базу как реплика пользователя).
-         * @returns {{role: string, element: Element}[]}
          */
         _findMessageElements() {
           const found = [];
@@ -9016,8 +11476,6 @@ if (typeof module !== 'undefined' && module.exports) {
          * Возвращаем string, а не литеральный union 'user'|'assistant': пока тип узкий, tsc
          * (TS2367) счёл бы сверку `role === 'unknown'` в extractMessages заведомо ложной, а она —
          * живой детектор дрейфа разметки. TODO: уточнить тип в шаге 5 (контракт ролей адаптера).
-         * @param {Element} element
-         * @returns {string}
          */
         _detectRole(element) {
           const classAttr = String(element.className || "");
@@ -9032,8 +11490,6 @@ if (typeof module !== 'undefined' && module.exports) {
          * Заменяет `clone.textContent`, который склеивал абзацы БЕЗ разделителя («первыйвторой»)
          * и тем самым ломал формат многострочного ответа. trim — только на краях результата:
          * значимые переводы строк ВНУТРИ текста сохраняются.
-         * @param {Element} root
-         * @returns {string}
          */
         _blockText(root) {
           let out = "";
@@ -9082,8 +11538,6 @@ if (typeof module !== 'undefined' && module.exports) {
         /**
          * Текст хода. markdown-рендер (легаси-разметка) — абзацы построчно. Иначе — клон без
          * кнопок/svg (как в исходной версии) и структурная нормализация блочных границ.
-         * @param {Element} element
-         * @returns {string}
          */
         _extractText(element) {
           const classAttr = String(element.className || "");
@@ -9097,10 +11551,7 @@ if (typeof module !== 'undefined' && module.exports) {
               return lines.join("\n").trim();
             }
           }
-          const clone = (
-            /** @type {Element} */
-            element.cloneNode(true)
-          );
+          const clone = element.cloneNode(true);
           clone.querySelectorAll('button, [role="button"], svg').forEach((el) => el.remove());
           return this._blockText(clone);
         }
@@ -9109,10 +11560,9 @@ if (typeof module !== 'undefined' && module.exports) {
          * отбрасываются, а роль 'unknown' (легаси-узел не опознан) ПРОПУСКАЕТСЯ: нормализации
          * 'unknown' → 'user' больше нет — это и был корень дефекта. Диагностика — ТОЛЬКО под
          * гейтом (typeof-гард: в срез-песочницах тестов хелперов гейта может не быть).
-         * @returns {ChatGPTExtractedMessage[]}
          */
         extractMessages() {
-          const diagOn = typeof aiCmDiagOn === "function" ? aiCmDiagOn() : false;
+          const diagOn2 = typeof aiCmDiagOn2 === "function" ? aiCmDiagOn2() : false;
           const elements = this._findMessageElements();
           const messages = [];
           for (let i = 0; i < elements.length; i++) {
@@ -9122,7 +11572,7 @@ if (typeof module !== 'undefined' && module.exports) {
             if (role === "unknown") continue;
             messages.push({ role, content });
           }
-          if (diagOn && typeof aiCmDiagLine2 === "function") {
+          if (diagOn2 && typeof aiCmDiagLine2 === "function") {
             const stats = this._lastTurnStats;
             aiCmDiagLine2("chatgpt-adapter-turn", {
               turns: stats.turns,
@@ -9147,7 +11597,6 @@ if (typeof module !== 'undefined' && module.exports) {
         /**
          * Полный текст диалога: содержимое ходов, склеенное переводом строки.
          * Явное переопределение базового (у ChatGPT свой путь отбора узлов).
-         * @returns {string}
          */
         getFullDialogText() {
           const messages = this.extractMessages();
@@ -9156,7 +11605,6 @@ if (typeof module !== 'undefined' && module.exports) {
         /**
          * Находимся ли мы на странице диалога: есть ход ([data-turn-key]) либо реплика
          * пользователя (в т.ч. хвост без атрибута) либо легаси-узел содержимого.
-         * @returns {boolean}
          */
         isOnDialogPage() {
           if (document.querySelector(this._turnSelectors.join(", "))) return true;
@@ -9170,7 +11618,6 @@ if (typeof module !== 'undefined' && module.exports) {
         /**
          * Имя модели из шапки/селектора; если шапка показывает только бренд — null
          * (не захардкоженное имя), иначе модель возьмётся из сети/дефолта.
-         * @returns {string|null}
          */
         detectModel() {
           if (this._modelDetectLogged === void 0) this._modelDetectLogged = false;
@@ -9186,10 +11633,7 @@ if (typeof module !== 'undefined' && module.exports) {
               "header button"
             ];
             for (let i = 0; i < selectors.length && !found; i++) {
-              const els = (
-                /** @type {NodeListOf<HTMLElement>} */
-                document.querySelectorAll(selectors[i])
-              );
+              const els = document.querySelectorAll(selectors[i]);
               for (let j = 0; j < els.length; j++) {
                 const txt = (els[j].innerText || els[j].textContent || "").trim();
                 const m = txt.match(re);
@@ -9229,7 +11673,6 @@ if (typeof module !== 'undefined' && module.exports) {
         }
         /**
          * Находимся ли мы на диалоге (контейнер диалога ИЛИ поле ввода).
-         * @returns {boolean}
          */
         isOnDialogPage() {
           try {
@@ -9246,7 +11689,6 @@ if (typeof module !== 'undefined' && module.exports) {
         /**
          * Ходы диалога: сперва по turn-контейнерам, при пустом результате — общий запасной
          * отбор по классам/дата-атрибутам роли. При ошибке — пустой массив.
-         * @returns {GeminiExtractedMessage[]}
          */
         extractMessages() {
           try {
@@ -9301,7 +11743,6 @@ if (typeof module !== 'undefined' && module.exports) {
         }
         /**
          * Модель: из DOM (.model-name и т.п.), затем localStorage, затем this.defaultModel.
-         * @returns {string}
          */
         detectModel() {
           try {
@@ -9325,8 +11766,6 @@ if (typeof module !== 'undefined' && module.exports) {
         }
         /**
          * Нормализация текста хода (схлопывание пробелов и пустых строк).
-         * @param {string} text
-         * @returns {string}
          */
         _cleanText(text) {
           if (!text) return "";
@@ -9342,7 +11781,6 @@ if (typeof module !== 'undefined' && module.exports) {
         }
         /**
          * Находимся ли мы на диалоге: признак — узлы реплик ms-cmark-node.
-         * @returns {boolean}
          */
         isOnDialogPage() {
           try {
@@ -9364,7 +11802,6 @@ if (typeof module !== 'undefined' && module.exports) {
          * Ходы диалога: все ms-cmark-node.v3-font-body, кроме вложенных в другой
          * ms-cmark-node (иначе текст реплики попал бы в счёт дважды — родитель и ребёнок).
          * Роль: класс user-chunk → 'user', иначе — 'assistant'.
-         * @returns {AistudioExtractedMessage[]}
          */
         extractMessages() {
           try {
@@ -9416,7 +11853,6 @@ if (typeof module !== 'undefined' && module.exports) {
          * ПОЧЕМУ НЕ DOM. Индикатор модели в панели Run settings не имеет стабильного класса, а
          * текстовая догадка по «Gemini <версия> <семейство>» ловила бы упоминания модели в самой
          * реплике и подписывала чат чужой моделью. Сеть — единственный недвусмысленный источник.
-         * @returns {string}
          */
         detectModel() {
           try {
@@ -9438,7 +11874,6 @@ if (typeof module !== 'undefined' && module.exports) {
          * Снимок принимается только для ТЕКУЩЕГО пути (SPA: AI Studio меняет /prompts/<id>
          * без перезагрузки) — иначе история прошлого разговора питала бы счётчик нового.
          * Нет снимка/путь не тот → [] и обычный DOM-парсинг.
-         * @returns {AistudioExtractedMessage[]}
          */
         _netMessages() {
           try {
@@ -9457,10 +11892,7 @@ if (typeof module !== 'undefined' && module.exports) {
             }
             const messages = [];
             Array.prototype.forEach.call(raw.msgs, (m) => {
-              const rec = (
-                /** @type {any} */
-                m
-              );
+              const rec = m;
               if (!rec || typeof rec.text !== "string") return;
               const sections = typeof rec.sections === "string" ? rec.sections : "";
               const content = this._cleanText(rec.text) + sections;
@@ -9478,7 +11910,6 @@ if (typeof module !== 'undefined' && module.exports) {
          * ленты DOM короче уже виденного снимка. core/content.js пишет пик в
          * ai_cm_aistudio_history_<convId> ({ v, href, msgs, count, ... }) — читаем его
          * только для ТЕКУЩЕГО пути (SPA-гард, как у _netMessages) и только как фолбэк.
-         * @returns {AistudioExtractedMessage[]}
          */
         _domPeakMessages() {
           try {
@@ -9503,10 +11934,7 @@ if (typeof module !== 'undefined' && module.exports) {
             }
             const messages = [];
             Array.prototype.forEach.call(cached.msgs, (msg) => {
-              const rec = (
-                /** @type {any} */
-                msg
-              );
+              const rec = msg;
               if (!rec || typeof rec.text !== "string") return;
               const sections = typeof rec.sections === "string" ? rec.sections : "";
               const content = this._cleanText(rec.text) + sections;
@@ -9522,15 +11950,10 @@ if (typeof module !== 'undefined' && module.exports) {
         /**
          * Текст узла реплики. innerText предпочтителен (видимый текст, как в браузере);
          * textContent — фолбэк для окружений без innerText (jsdom, песочницы тестов).
-         * @param {Element} node
-         * @returns {string}
          */
         _readNodeText(node) {
           try {
-            const inner = (
-              /** @type {HTMLElement} */
-              node.innerText
-            );
+            const inner = node.innerText;
             if (typeof inner === "string" && inner.length > 0) return inner;
             return typeof node.textContent === "string" ? node.textContent : "";
           } catch (error) {
@@ -9540,8 +11963,6 @@ if (typeof module !== 'undefined' && module.exports) {
         }
         /**
          * Вложенный ли узел: у него есть предок ms-cmark-node (текст уже учтён предком).
-         * @param {Element} node
-         * @returns {boolean}
          */
         _isNestedNode(node) {
           try {
@@ -9555,8 +11976,6 @@ if (typeof module !== 'undefined' && module.exports) {
         }
         /**
          * Реплика пользователя? В AI Studio её единственный признак — класс user-chunk.
-         * @param {Element} node
-         * @returns {boolean}
          */
         _isUserChunk(node) {
           try {
@@ -9578,7 +11997,6 @@ if (typeof module !== 'undefined' && module.exports) {
         }
         /**
         * Находимся ли мы на странице диалога: есть узлы ds-message ИЛИ поле ввода.
-        * @returns {boolean}
         */
         isOnDialogPage() {
           const hasMessages = document.querySelectorAll('div[class*="ds-message"]').length > 0;
@@ -9600,8 +12018,6 @@ if (typeof module !== 'undefined' && module.exports) {
         }
         /**
          * Признак панели размышлений: класс узла, вложенный think-узел либо маркер в начале текста.
-         * @param {Element} element
-         * @returns {boolean}
          */
         _hasThinkMarker(element) {
           try {
@@ -9617,8 +12033,6 @@ if (typeof module !== 'undefined' && module.exports) {
         }
         /**
          * Узел markdown-рендера ответа (сам узел либо вложенный .ds-markdown), иначе null.
-         * @param {Element} element
-         * @returns {Element|null}
          */
         _answerMarkdown(element) {
           try {
@@ -9633,8 +12047,6 @@ if (typeof module !== 'undefined' && module.exports) {
         // Узел — ТОЛЬКО панель размышлений (ответа в нём нет): сообщением хода не является.
         /**
          * Узел — только панель размышлений (ответа в нём нет): сообщением хода не является.
-         * @param {Element} element
-         * @returns {boolean}
          */
         _isReasoningOnly(element) {
           try {
@@ -9647,8 +12059,6 @@ if (typeof module !== 'undefined' && module.exports) {
         }
         /**
          * Находится ли узел внутри панели размышлений (сам think-класс либо ближайший think-предок).
-         * @param {Element} element
-         * @returns {boolean}
          */
         _isInsideReasoning(element) {
           try {
@@ -9661,15 +12071,10 @@ if (typeof module !== 'undefined' && module.exports) {
         }
         /**
          * Текст элемента БЕЗ панелей размышлений и служебных кнопок/иконок.
-         * @param {Element} element
-         * @returns {string}
          */
         _textWithoutReasoning(element) {
           try {
-            const clone = (
-              /** @type {Element} */
-              element.cloneNode(true)
-            );
+            const clone = element.cloneNode(true);
             Array.prototype.slice.call(clone.querySelectorAll(this._thinkSelector())).forEach((el) => el.remove());
             clone.querySelectorAll('button, svg, [class*="avatar"], [class*="icon"], [class*="toolbar"]').forEach((el) => el.remove());
             return clone.textContent.trim();
@@ -9683,12 +12088,10 @@ if (typeof module !== 'undefined' && module.exports) {
         // терялся на ЗАХВАТЕ. Здесь он сохраняется рядом с текстом (hiddenReasoning) и НЕ
         // попадает ни в content, ни в метрики/токены: базовый текст байтово прежний, а в
         // экспорт блок уходит только при включённом тумблере aiCmIncludeHiddenInExport
-        // (сырой режим, utils/export-emit-pipeline.js:includeHiddenExportBlocks).
+        // (сырой режим, utils/export-emit-pipeline.ts:includeHiddenExportBlocks).
         // Служебная шапка свёрнутой панели («DeepThink · 12 с», «Размышления:», «Thought for 3s») —
         /**
          * Снимает служебную шапку панели в начале текста («DeepThink · 12 с», «Размышления:»).
-         * @param {string} text
-         * @returns {string}
          */
         _stripReasoningHeader(text) {
           try {
@@ -9704,8 +12107,6 @@ if (typeof module !== 'undefined' && module.exports) {
         /**
          * Текст панели размышлений узла (сама панель либо вложенные think-узлы),
          * склеенный пустой строкой; пустые/служебные части отброшены.
-         * @param {Element} element
-         * @returns {string}
          */
         _reasoningText(element) {
           try {
@@ -9732,8 +12133,6 @@ if (typeof module !== 'undefined' && module.exports) {
         /**
          * Есть ли в тексте реальные символы (буква/цифра), а не только артефакт интерфейса
          * вроде «.» свёрнутой панели.
-         * @param {string} text
-         * @returns {boolean}
          */
         _hasRealContent(text) {
           return /[0-9A-Za-z\u00C0-\u024F\u0400-\u04FF\u4E00-\u9FFF]/.test(String(text == null ? "" : text));
@@ -9741,8 +12140,6 @@ if (typeof module !== 'undefined' && module.exports) {
         /**
          * Первый дочерний узел с текстом, годный как текст хода (без avatar/button/icon,
          * без панелей размышлений), иначе null.
-         * @param {Element} element
-         * @returns {Element|null}
          */
         _firstContentChild(element) {
           try {
@@ -9768,8 +12165,6 @@ if (typeof module !== 'undefined' && module.exports) {
          * «ожить», если _detectRole снова начнёт отдавать 'unknown'. Тип string оставляет
          * гейт живым и типизирует функцию честно — она отдаёт произвольную строку роли.
          * TODO: уточнить тип в шаге 5 (контракт ролей адаптера).
-         * @param {Element} element
-         * @returns {string}
          */
         _detectRole(element) {
           const classes = element.className || "";
@@ -9779,15 +12174,13 @@ if (typeof module !== 'undefined' && module.exports) {
             if (element.querySelector && element.querySelector(".ds-markdown, .ds-markdown-paragraph")) return "assistant";
             if (this._isReasoningOnly(element)) return "assistant";
           } catch (e) {
-            swallow(e, "adapter:deepseek:detectRole");
+            swallow2(e, "adapter:deepseek:detectRole");
           }
           return "user";
         }
         /**
          * Текст хода: markdown-абзацы ответа построчно, иначе первый текстовый узел
          * пузыря без панелей размышлений.
-         * @param {Element} element
-         * @returns {string}
          */
         _extractText(element) {
           const markdown = this._answerMarkdown(element);
@@ -9807,13 +12200,12 @@ if (typeof module !== 'undefined' && module.exports) {
          * Узлы-панели reasoning сообщениями НЕ являются: их текст переносится в
          * hiddenReasoning ближайшего assistant-хода (висячий — предыдущего, иначе
          * последнего). Возвращает пустой массив при ошибке.
-         * @returns {DeepSeekExtractedMessage[]}
          */
         extractMessages() {
           try {
             const messages = [];
             const messageElements = document.querySelectorAll('div[class*="ds-message"]');
-            const o21DiagOn = typeof aiCmDiagOn === "function" ? aiCmDiagOn() : false;
+            const o21DiagOn = typeof aiCmDiagOn2 === "function" ? aiCmDiagOn2() : false;
             const o21Stats = o21DiagOn ? {
               totalFound: messageElements.length,
               extracted: 0,
@@ -9906,7 +12298,6 @@ if (typeof module !== 'undefined' && module.exports) {
         }
         /**
          * Полный текст диалога: содержимое ходов, склеенное переводом строки.
-         * @returns {string}
          */
         getFullDialogText() {
           return this.extractMessages().map((msg) => msg.content).join("\n");
@@ -9914,7 +12305,6 @@ if (typeof module !== 'undefined' && module.exports) {
         /**
          * Модель: DeepThink (R1) по aria-pressed, затем UI-селекторы, затем localStorage,
          * иначе 'deepseek-v3'.
-         * @returns {string}
          */
         detectModel() {
           try {
@@ -9936,13 +12326,7 @@ if (typeof module !== 'undefined' && module.exports) {
             for (const selector of modelSelectors) {
               const el = document.querySelector(selector);
               if (el) {
-                let text = el.tagName === "SELECT" ? (
-                  /** @type {HTMLSelectElement} */
-                  el.options[
-                    /** @type {HTMLSelectElement} */
-                    el.selectedIndex
-                  ]?.text || ""
-                ) : el.textContent.trim();
+                let text = el.tagName === "SELECT" ? el.options[el.selectedIndex]?.text || "" : el.textContent.trim();
                 if (text) {
                   debugLog("log", "[DeepSeekAdapter] \u041C\u043E\u0434\u0435\u043B\u044C \u0438\u0437 UI:", text);
                   if (text.toLowerCase().includes("r1")) return "deepseek-r1";
@@ -9972,7 +12356,7 @@ if (typeof module !== 'undefined' && module.exports) {
         }
         try {
           if (typeof __require === "function") {
-            var mod = require_google_search_folwr_parser();
+            var mod = (init_google_search_folwr_parser(), __toCommonJS(google_search_folwr_parser_exports));
             if (mod && typeof mod.answerTextOf === "function" && typeof mod.answerDomNodes === "function") {
               return mod;
             }
@@ -9991,10 +12375,7 @@ if (typeof module !== 'undefined' && module.exports) {
           }
         }
         try {
-          var clone = (
-            /** @type {Element} */
-            el.cloneNode(true)
-          );
+          var clone = el.cloneNode(true);
           clone.querySelectorAll("script, style, button, svg").forEach(function(n) {
             n.remove();
           });
@@ -10031,10 +12412,7 @@ if (typeof module !== 'undefined' && module.exports) {
             var self = this;
             try {
               window.addEventListener("ai-cm-full-history", function(ev) {
-                var evt = (
-                  /** @type {CustomEvent} */
-                  ev
-                );
+                var evt = ev;
                 var detail = evt && evt.detail;
                 if (detail && detail.modelSlug) {
                   self._lastNetworkModel = detail.modelSlug;
@@ -10048,7 +12426,6 @@ if (typeof module !== 'undefined' && module.exports) {
         /**
          * Находимся ли мы на странице диалога AI-режима: есть turn-контейнеры,
          * блок ответа aimfl или поле ввода.
-         * @returns {boolean}
          */
         isOnDialogPage() {
           var hasTurns = document.querySelector('[data-scope-id="turn"]') !== null;
@@ -10061,7 +12438,6 @@ if (typeof module !== 'undefined' && module.exports) {
         /**
          * Ходы диалога: вопрос из заголовка turn'а, ответ — блоки ответа, отнесённые к
          * тому же turn'у. Пустые вопросы/ответы пропускаются; при ошибке — пустой массив.
-         * @returns {GoogleSearchExtractedMessage[]}
          */
         extractMessages() {
           try {
@@ -10101,18 +12477,14 @@ if (typeof module !== 'undefined' && module.exports) {
                 }
               }
               if (assignedIdx >= 0 && assignedIdx < turns.length) {
-                var blockText = gsaAnswerText(
-                  /** @type {Element} */
-                  /** @type {unknown} */
-                  block
-                ).trim();
+                var blockText = gsaAnswerText(block).trim();
                 if (blockText) {
                   answerBlocks[assignedIdx].push(blockText);
                 }
               }
             }
             try {
-              if (typeof aiCmDiagOn === "function" && aiCmDiagOn() && typeof aiCmDiagLine2 === "function") {
+              if (typeof aiCmDiagOn2 === "function" && aiCmDiagOn2() && typeof aiCmDiagLine2 === "function") {
                 var codeSels = [
                   ".n6owBd.awi2gc pre",
                   ".n6owBd.awi2gc code",
@@ -10183,7 +12555,6 @@ if (typeof module !== 'undefined' && module.exports) {
         }
         /**
          * Полный текст диалога: содержимое ходов, склеенное переводом строки.
-         * @returns {string}
          */
         getFullDialogText() {
           return this.extractMessages().map(function(msg) {
@@ -10193,7 +12564,6 @@ if (typeof module !== 'undefined' && module.exports) {
         /**
          * Модель: ТОЛЬКО из сети (активный/пассивный ответ, detail.modelSlug), иначе ''.
          * DOM-догадка сознательно не возвращается — см. комментарий в теле метода.
-         * @returns {string}
          */
         detectModel() {
           if (this._lastNetworkModel) return this._lastNetworkModel;
@@ -10213,10 +12583,7 @@ if (typeof module !== 'undefined' && module.exports) {
             var self = this;
             try {
               window.addEventListener("ai-cm-full-history", function(ev) {
-                var evt = (
-                  /** @type {CustomEvent} */
-                  ev
-                );
+                var evt = ev;
                 var detail = evt && evt.detail;
                 if (detail && detail.modelSlug && self.siteName === "claude") {
                   self._lastNetworkModel = detail.modelSlug;
@@ -10228,7 +12595,6 @@ if (typeof module !== 'undefined' && module.exports) {
         }
         /**
          * Находимся ли мы на диалоге claude.ai (хост + префикс пути /chat/).
-         * @returns {boolean}
          */
         isOnDialogPage() {
           try {
@@ -10244,7 +12610,6 @@ if (typeof module !== 'undefined' && module.exports) {
         }
         /**
          * Запасной DOM-парсинг: всегда пустой (основной источник — сеть).
-         * @returns {ClaudeExtractedMessage[]}
          */
         extractMessages() {
           var stubConvId = "";
@@ -10261,7 +12626,6 @@ if (typeof module !== 'undefined' && module.exports) {
         }
         /**
          * Модель: сначала последняя из сети (точнее), иначе this.defaultModel.
-         * @returns {string}
          */
         detectModel() {
           try {
@@ -10278,8 +12642,6 @@ if (typeof module !== 'undefined' && module.exports) {
         }
         /**
          * Нормализация текста хода (схлопывание пробелов и пустых строк).
-         * @param {string} text
-         * @returns {string}
          */
         _cleanText(text) {
           if (!text) return "";
@@ -10299,10 +12661,7 @@ if (typeof module !== 'undefined' && module.exports) {
             var self = this;
             try {
               window.addEventListener("ai-cm-full-history", function(ev) {
-                var evt = (
-                  /** @type {CustomEvent} */
-                  ev
-                );
+                var evt = ev;
                 var detail = evt && evt.detail;
                 if (detail && detail.modelSlug && self.siteName === "perplexity") {
                   self._lastNetworkModel = detail.modelSlug;
@@ -10313,14 +12672,14 @@ if (typeof module !== 'undefined' && module.exports) {
           }
         }
         /**
-         * Находимся ли мы на диалоге perplexity.ai (хост + префикс /search/ или /thread/).
-         * @returns {boolean}
+         * Находимся ли мы на диалоге perplexity.ai (хост + префикс /search/, /thread/
+         * или новый /session/).
          */
         isOnDialogPage() {
           try {
             var host = window.location.hostname;
             var path = window.location.pathname;
-            var result = (host === "www.perplexity.ai" || host === "perplexity.ai") && (path.indexOf("/search/") === 0 || path.indexOf("/thread/") === 0);
+            var result = (host === "www.perplexity.ai" || host === "perplexity.ai") && (path.indexOf("/search/") === 0 || path.indexOf("/thread/") === 0 || path.indexOf("/session/") === 0);
             debugLog("debug", "[PerplexityAdapter] isOnDialogPage: " + result);
             return result;
           } catch (error) {
@@ -10330,7 +12689,6 @@ if (typeof module !== 'undefined' && module.exports) {
         }
         /**
          * Запасной DOM-парсинг: всегда пустой (основной источник — сеть).
-         * @returns {PerplexityExtractedMessage[]}
          */
         extractMessages() {
           var stubConvId = "";
@@ -10347,7 +12705,6 @@ if (typeof module !== 'undefined' && module.exports) {
         }
         /**
          * Модель: сначала последняя из сети (точнее), иначе this.defaultModel.
-         * @returns {string}
          */
         detectModel() {
           try {
@@ -10364,8 +12721,6 @@ if (typeof module !== 'undefined' && module.exports) {
         }
         /**
          * Нормализация текста хода (схлопывание пробелов и пустых строк).
-         * @param {string} text
-         * @returns {string}
          */
         _cleanText(text) {
           if (!text) return "";
@@ -10446,14 +12801,12 @@ if (typeof module !== 'undefined' && module.exports) {
         }
         /**
          * Блочные теги для структурного фолбэка innerText (перевод строки после элемента).
-         * @returns {Record<string, boolean>}
          */
         static get _BLOCK_TAGS() {
           return QWEN_BLOCK_TAGS;
         }
         /**
          * Живой признак ввода Qwen (подтверждён сниффером: textarea «Спросить Qwen»).
-         * @returns {boolean}
          */
         _hasComposer() {
           try {
@@ -10465,7 +12818,6 @@ if (typeof module !== 'undefined' && module.exports) {
         /**
          * Находимся ли мы на странице чата Qwen: хост qwen.ai И (поле ввода ИЛИ узлы реплик
          * ИЛИ адрес вида /c/<id>). Иначе адаптер не считается активным.
-         * @returns {boolean}
          */
         isOnDialogPage() {
           try {
@@ -10478,7 +12830,6 @@ if (typeof module !== 'undefined' && module.exports) {
         /**
          * Узлы сообщений: первый непустой набор кандидатов (точные классы — первым, см. шапку),
          * с отсевом обёрток turn-selection. Пусто, если не отрисовано ни одной реплики.
-         * @returns {Element[]}
          */
         _messageNodes() {
           for (let i = 0; i < this._messageSelectors.length; i++) {
@@ -10494,8 +12845,6 @@ if (typeof module !== 'undefined' && module.exports) {
          * класс-независимый барьер (страховка на случай смены класса обёртки): узлом-обёрткой
          * считается ТОЛЬКО тот, чей класс содержит `select-turn`, — реальные реплики
          * (`.qwen-chat-message.qwen-chat-message-user/assistant`) не содержат его никогда.
-         * @param {Element[]} nodes
-         * @returns {Element[]}
          */
         _dropTurnOnlyNodes(nodes) {
           return nodes.filter(function(el) {
@@ -10508,8 +12857,6 @@ if (typeof module !== 'undefined' && module.exports) {
          * Живой браузер: `innerText` — 1:1 с тем, что видит пользователь (многострочность).
          * jsdom/срез: `innerText` не реализован → структурный фолбэк (тот же принцип: перевод
          * строки после блочного элемента), затем ОДНА нормализация для обоих путей.
-         * @param {Element & {innerText?: string}} element
-         * @returns {string}
          */
         _readableText(element) {
           try {
@@ -10529,8 +12876,6 @@ if (typeof module !== 'undefined' && module.exports) {
         /**
          * Структурный фолбэк innerText (jsdom/срез, где innerText не реализован): обход дерева,
          * перевод строки вокруг блочных элементов и на маркере среза; <br> — перевод строки.
-         * @param {Element} root
-         * @returns {string}
          */
         _innerTextFallback(root) {
           try {
@@ -10547,11 +12892,7 @@ if (typeof module !== 'undefined' && module.exports) {
                 return;
               }
               if (type !== 1) return;
-              const tag = String(
-                /** @type {Element} */
-                /** @type {unknown} */
-                node.tagName || ""
-              ).toUpperCase();
+              const tag = String(node.tagName || "").toUpperCase();
               if (tag === "BR") {
                 out += "\n";
                 return;
@@ -10572,8 +12913,6 @@ if (typeof module !== 'undefined' && module.exports) {
          * Схлопывание — осознанный компромисс: пустые строки верстки (`\n\n` между абзацами) не
          * размножаются, многострочность и границы блоков при этом сохраняются (дефект textContent
          * был в ПОТЕРЕ переводов строк, а не в их количестве).
-         * @param {string} text
-         * @returns {string}
          */
         _normalizeLines(text) {
           try {
@@ -10586,8 +12925,6 @@ if (typeof module !== 'undefined' && module.exports) {
          * Снятие служебного узла с сохранением границы: на месте узла остаётся маркер-комментарий,
          * который `_innerTextFallback` превращает в перевод строки. Без маркера соседние текст-узлы
          * склеились бы («привет» + снятая кнопка + «как дела» → «приветкак дела»).
-         * @param {NodeList|Element[]} nodes
-         * @returns {void}
          */
         _removeKeepingCut(nodes) {
           Array.prototype.slice.call(nodes).forEach(function(el) {
@@ -10600,15 +12937,10 @@ if (typeof module !== 'undefined' && module.exports) {
         }
         /**
          * Текст узла БЕЗ служебных элементов и БЕЗ блока размышлений (многострочность сохранена).
-         * @param {Element} element
-         * @returns {string}
          */
         _textWithoutReasoning(element) {
           try {
-            const clone = (
-              /** @type {Element} */
-              element.cloneNode(true)
-            );
+            const clone = element.cloneNode(true);
             this._removeKeepingCut(clone.querySelectorAll(this._noiseSelectors));
             this._removeKeepingCut(clone.querySelectorAll(this._reasoningSelectors));
             return this._readableText(clone);
@@ -10618,8 +12950,6 @@ if (typeof module !== 'undefined' && module.exports) {
         }
         /**
          * Служебная шапка свёрнутой панели («Завершено размышление», «Thinking… 3s») — не текст.
-         * @param {string} text
-         * @returns {string}
          */
         _stripReasoningHeader(text) {
           try {
@@ -10633,8 +12963,6 @@ if (typeof module !== 'undefined' && module.exports) {
         /**
          * Текст панели размышлений реплики (сама панель либо вложенные think-узлы), без шапки,
          * без карточек инструментов; части склеены пустой строкой.
-         * @param {Element} element
-         * @returns {string}
          */
         _reasoningText(element) {
           try {
@@ -10648,11 +12976,7 @@ if (typeof module !== 'undefined' && module.exports) {
             }
             const parts = [];
             for (let j = 0; j < nodes.length; j++) {
-              const node = (
-                /** @type {Element} */
-                /** @type {unknown} */
-                nodes[j]
-              );
+              const node = nodes[j];
               if (this._isToolStatusCard(node)) continue;
               const text = this._stripReasoningHeader(this._readableText(node));
               if (text && /[0-9A-Za-z\u00C0-\u024F\u0400-\u04FF\u4E00-\u9FFF]/.test(text)) parts.push(text);
@@ -10666,16 +12990,10 @@ if (typeof module !== 'undefined' && module.exports) {
          * Служебная карточка инструмента Qwen (не панель размышления) — по классу узла.
          * Вызывается только для элементов (узлы панели размышлений), поэтому className читаем
          * у узла как у Element.
-         * @param {Node} node
-         * @returns {boolean}
          */
         _isToolStatusCard(node) {
           try {
-            const el = (
-              /** @type {Element} */
-              /** @type {unknown} */
-              node
-            );
+            const el = node;
             const cls = String(node && el.className || "").toLowerCase();
             return cls.indexOf("tool-status-card") !== -1;
           } catch (e) {
@@ -10690,8 +13008,6 @@ if (typeof module !== 'undefined' && module.exports) {
          * Возвращаем string, а не литеральный union 'user'|'assistant': пока тип узкий,
          * tsc (TS2367) счёл бы вызовы и сверку ролей в extractMessages заведомо ложными.
          * TODO: уточнить тип в шаге 5 (контракт ролей адаптера).
-         * @param {Element} element
-         * @returns {string}
          */
         _detectRole(element) {
           try {
@@ -10703,7 +13019,7 @@ if (typeof module !== 'undefined' && module.exports) {
             if (element.querySelector && element.querySelector(this.modelMessageSelector)) return "assistant";
             if (element.querySelector && element.querySelector('[class*="markdown"], [class*="prose"]')) return "assistant";
           } catch (e) {
-            swallow(e, "adapter:qwen:detectRole");
+            swallow2(e, "adapter:qwen:detectRole");
           }
           return "user";
         }
@@ -10717,50 +13033,35 @@ if (typeof module !== 'undefined' && module.exports) {
          * адаптера, но к моменту extractMessages он уже загружен (общий ISOLATED-мир контент-скриптов).
          * Хелпера нет (Node/срез-песочница) → массив возвращается КАК ЕСТЬ: поведение 1:1, никакой
          * второй копии правил здесь нет.
-         * @param {(QwenExtractedMessage & {hiddenReasoning?: string})[]} messages
-         * @returns {(QwenExtractedMessage & {hiddenReasoning?: string})[]}
          */
         _dropContainerNodes(messages) {
           try {
-            var drop = (
-              /** @type {QwenContainerDrop<unknown>|null} */
-              this._containerDrop()
-            );
-            if (typeof drop === "function") return (
-              /** @type {(QwenExtractedMessage & {hiddenReasoning?: string})[]} */
-              /** @type {unknown} */
-              drop(messages)
-            );
+            var drop = this._containerDrop();
+            if (typeof drop === "function") return drop(messages);
           } catch (eDrop) {
-            swallow(eDrop, "adapter:qwen:dropContainerNodes");
+            swallow2(eDrop, "adapter:qwen:dropContainerNodes");
           }
           return messages;
         }
         /**
-         * Ленивый резолв общего хелпера контейнер-чистки (боевой путь — window сборщиков,
-         * Node-путь — require), иначе null (правила не дублируются локально).
-         * TODO: уточнить тип в шаге 5 (форма window.AiCmExportBuilders без @types).
-         * @returns {QwenContainerDrop<unknown>|null}
+         * Ленивый резолв общего хелпера контейнер-чистки, иначе null (правила не дублируются
+         * локально). Боевой путь — ESM-биндинг AiCmExportBuilders, который сборка втягивает
+         * в общий скоуп content-бандла (тот же модуль, что и остальные core/*.js); фолбэк на
+         * window — для песочниц, где адаптер исполняется как сырой текст (new Function).
+         * Node-путь (require) удалён вместе с UMD-хвостом сборщиков.
          */
         _containerDrop() {
+          try {
+            if (typeof export_text_builders_default !== "undefined" && export_text_builders_default && typeof export_text_builders_default.aiCmDropContainerMessages === "function") {
+              return export_text_builders_default.aiCmDropContainerMessages;
+            }
+          } catch (eEsm) {
+          }
           try {
             if (typeof window !== "undefined" && window && window.AiCmExportBuilders && typeof window.AiCmExportBuilders.aiCmDropContainerMessages === "function") {
               return window.AiCmExportBuilders.aiCmDropContainerMessages;
             }
           } catch (eWin) {
-          }
-          try {
-            var hasNodeModule = typeof module !== "undefined" && !!module && typeof __require === "function";
-            if (hasNodeModule) {
-              var builders = (
-                /** @type {any} */
-                require_export_text_builders()
-              );
-              if (builders && typeof builders.aiCmDropContainerMessages === "function") {
-                return builders.aiCmDropContainerMessages;
-              }
-            }
-          } catch (eReq) {
           }
           return null;
         }
@@ -10770,7 +13071,6 @@ if (typeof module !== 'undefined' && module.exports) {
          * Пустые и «технические» тексты (артефакт свёрнутой панели) пропускаются; текст панели
          * размышлений у assistant-хода уходит в hiddenReasoning, а не в content. Метод
          * stateless — пересъём без перезагрузки (см. комментарий O-35 C в теле).
-         * @returns {QwenExtractedMessage[]}
          */
         extractMessages() {
           try {
@@ -10807,7 +13107,6 @@ if (typeof module !== 'undefined' && module.exports) {
         /**
          * Полный текст диалога: содержимое ходов, склеенное переводом строки.
          * Явное переопределение базового (у Qwen путь отбора узлов свой).
-         * @returns {string}
          */
         getFullDialogText() {
           try {
@@ -10819,7 +13118,6 @@ if (typeof module !== 'undefined' && module.exports) {
         /**
          * Модель из UI. Живой id /chats/new — qwen3.8-max, но это НЕ дефолт: если в разметке
          * модели нет — возвращаем null («не определена»), как base-adapter.js:88-90.
-         * @returns {string|null}
          */
         detectModel() {
           try {
@@ -10841,3613 +13139,6 @@ if (typeof module !== 'undefined' && module.exports) {
       if (typeof module !== "undefined" && module.exports) {
         module.exports = QwenAdapter;
       }
-      (function() {
-        var THINK_RE = /think|thought/i;
-        var THINKING_LABEL_RE = /thinking|\bthought\b|\bдумал\b/i;
-        var ATTACH_TOKEN_RE = /\$AXzLiR[A-Za-z0-9+\/=]+/g;
-        function stripAttachmentTokens(s) {
-          if (typeof s !== "string") return s;
-          return s.replace(ATTACH_TOKEN_RE, " ").replace(/[ \t\f\v]+/g, " ");
-        }
-        function attrString(el, names) {
-          var out = "";
-          for (var i = 0; i < names.length; i++) {
-            try {
-              var v = el.getAttribute ? el.getAttribute(names[i]) : null;
-              if (v) out += " " + v;
-            } catch (e) {
-            }
-          }
-          return out;
-        }
-        function classNameId(el) {
-          try {
-            return String(el.className || "") + " " + String(el.id || "");
-          } catch (e) {
-            return "";
-          }
-        }
-        function isHiddenContainer(el) {
-          var h = classNameId(el).toLowerCase();
-          return h.indexOf("cdk-visually-hidden") !== -1 || h.indexOf("cdk-live-announcer") !== -1;
-        }
-        function isThinkingContainer(el) {
-          if (THINK_RE.test(classNameId(el))) return true;
-          var label = attrString(el, ["aria-label", "title"]);
-          return THINKING_LABEL_RE.test(label);
-        }
-        function thinkingControlLabel(el) {
-          var label = attrString(el, ["aria-label", "title"]);
-          if (el.tagName && String(el.tagName).toLowerCase() === "button") {
-            try {
-              label += " " + (el.textContent || "");
-            } catch (e) {
-            }
-          }
-          return label;
-        }
-        function containsThinkingControl(node) {
-          var found = false;
-          (function scan(n, depth) {
-            if (found || depth > 4) return;
-            if (!n || n.nodeType !== 1) return;
-            if (THINKING_LABEL_RE.test(thinkingControlLabel(n))) {
-              found = true;
-              return;
-            }
-            var ch = n.childNodes;
-            for (var i = 0; i < ch.length; i++) scan(ch[i], depth + 1);
-          })(node, 0);
-          return found;
-        }
-        function containsTable(node) {
-          try {
-            return !!node.querySelector && !!node.querySelector("table");
-          } catch (e) {
-            return false;
-          }
-        }
-        function isThinkingPanel(node) {
-          if (isHiddenContainer(node) || isThinkingContainer(node)) return true;
-          if (containsTable(node)) return false;
-          return containsThinkingControl(node);
-        }
-        function cleanCell(el) {
-          var clone;
-          try {
-            clone = el.cloneNode(true);
-          } catch (e) {
-            return "";
-          }
-          try {
-            clone.querySelectorAll("script, style, button, svg").forEach(function(x) {
-              x.remove();
-            });
-          } catch (e) {
-          }
-          try {
-            return stripAttachmentTokens((clone.textContent || "").replace(/\s+/g, " ").trim());
-          } catch (e) {
-            return "";
-          }
-        }
-        function tableToMarkdown(tableEl) {
-          var rows = [];
-          try {
-            rows = tableEl.querySelectorAll("tr");
-          } catch (e) {
-            rows = [];
-          }
-          var lines = [];
-          for (var r = 0; r < rows.length; r++) {
-            var cells = rows[r].querySelectorAll("th, td");
-            var cellTexts = [];
-            for (var c = 0; c < cells.length; c++) {
-              cellTexts.push(cleanCell(cells[c]));
-            }
-            if (cellTexts.length === 0) continue;
-            lines.push("| " + cellTexts.join(" | ") + " |");
-          }
-          return lines.join("\n");
-        }
-        var BLOCK_TAGS = {
-          "P": 1,
-          "DIV": 1,
-          "SECTION": 1,
-          "ARTICLE": 1,
-          "UL": 1,
-          "OL": 1,
-          "LI": 1,
-          "H1": 1,
-          "H2": 1,
-          "H3": 1,
-          "H4": 1,
-          "H5": 1,
-          "H6": 1,
-          "BLOCKQUOTE": 1,
-          "PRE": 1,
-          "BR": 1,
-          "HR": 1,
-          "HEADER": 1,
-          "FOOTER": 1,
-          "MAIN": 1,
-          "ASIDE": 1,
-          "TR": 1,
-          "THEAD": 1,
-          "TBODY": 1
-        };
-        function extractGeminiResponse(root) {
-          var parts = [];
-          var buf = [];
-          function flush() {
-            if (!buf.length) return;
-            var s = buf.join(" ");
-            buf = [];
-            s = s.replace(/\s+/g, " ").trim();
-            if (s) parts.push(s);
-          }
-          function pushText(str) {
-            if (typeof str !== "string") return;
-            var t = stripAttachmentTokens(str.replace(/\s+/g, " ").trim());
-            if (t) buf.push(t);
-          }
-          function walk(node) {
-            if (!node) return;
-            var type = node.nodeType;
-            if (type === 3) {
-              pushText(node.nodeValue || "");
-              return;
-            }
-            if (type !== 1) return;
-            if (isThinkingPanel(node)) {
-              flush();
-              return;
-            }
-            var tag = (node.tagName || "").toUpperCase();
-            if (tag === "TABLE") {
-              flush();
-              var md = tableToMarkdown(node);
-              if (md) parts.push(md);
-              return;
-            }
-            if (BLOCK_TAGS[tag]) flush();
-            var children = node.childNodes;
-            for (var i2 = 0; i2 < children.length; i2++) {
-              walk(children[i2]);
-            }
-            if (BLOCK_TAGS[tag]) flush();
-          }
-          if (root) {
-            var rootChildren = root.childNodes;
-            for (var i = 0; i < rootChildren.length; i++) {
-              walk(rootChildren[i]);
-            }
-          }
-          flush();
-          var text = parts.join("\n").replace(/\n{3,}/g, "\n\n").trim();
-          return { text, count: parts.length, parts };
-        }
-        var api = { extractGeminiResponse, tableToMarkdown, stripAttachmentTokens };
-        if (typeof window !== "undefined") {
-          window.GeminiDomParser = api;
-        }
-        if (typeof module !== "undefined" && module.exports) {
-          module.exports = api;
-        }
-      })();
-      (function() {
-        var PARSER_VERSION = "g3";
-        function logSegmentParseFail(e, where) {
-          try {
-            console.log("[AI CM][batchexecute] segment parse fail " + where + ": " + (e && e.message || e));
-          } catch (e2) {
-          }
-        }
-        var ATTACH_TOKEN_RE = /\$AXzLiR[A-Za-z0-9+\/=]+/g;
-        function stripAttachmentTokens(s) {
-          if (typeof s !== "string") return s;
-          return s.replace(ATTACH_TOKEN_RE, " ").replace(/[ \t\f\v]+/g, " ");
-        }
-        function sanitizeGeminiText2(s) {
-          if (typeof s !== "string") return s;
-          return s.replace(/\$AXzLiR[A-Za-z0-9+\/=\s]+/g, " ").replace(/File attachment was not previously registered/g, "").replace(/\[cite:\s*\d+\]/g, "");
-        }
-        function isIdLike(s) {
-          return typeof s === "string" && /^(c_|r_|rc_|fbb[0-9a-f]|[0-9a-f]{16})/.test(s);
-        }
-        function isFileLike(s) {
-          return typeof s === "string" && /\.(pdf|png|jpe?g|gif|docx?|txt|webp|csv|xlsx?)(\b|$)/i.test(s);
-        }
-        function isUrlLike(s) {
-          return typeof s === "string" && /^https?:\/\//i.test(s);
-        }
-        function isTokenLike(s) {
-          return typeof s === "string" && /^\$?AVuib/.test(s);
-        }
-        function isMimeLike(s) {
-          return typeof s === "string" && /^(image|application|video|audio)\//i.test(s);
-        }
-        var UI_BLACKLIST = {
-          "DE": 1,
-          "ru": 1,
-          "mk": 1,
-          "generic": 1,
-          "personal_context": 1,
-          "google": 1,
-          "\u0418\u0449\u0443 \u0432 \u0438\u043D\u0442\u0435\u0440\u043D\u0435\u0442\u0435": 1,
-          "\u041F\u0435\u0440\u0441\u043E\u043D\u0430\u043B\u044C\u043D\u044B\u0439 \u043A\u043E\u043D\u0442\u0435\u043A\u0441\u0442": 1,
-          "Google Search": 1,
-          "true": 1,
-          "false": 1
-        };
-        function isJunk(s) {
-          if (typeof s !== "string") return true;
-          var t = s.trim();
-          if (t.length === 0) return true;
-          if (UI_BLACKLIST[t]) return true;
-          return isIdLike(t) || isFileLike(t) || isUrlLike(t) || isTokenLike(t) || isMimeLike(t);
-        }
-        function isUserQuestionJunk(s) {
-          if (typeof s !== "string") return true;
-          var t = s.trim();
-          if (!t) return true;
-          if (UI_BLACKLIST[t]) return true;
-          return isIdLike(t) || isUrlLike(t) || isTokenLike(t) || isMimeLike(t);
-        }
-        var THINKING_TITLE_RE = /^\s*\*\*[^*\n]{1,120}\*\*/;
-        var THINKING_BODY_RE = /^(I'm now|I've been|I am going|I'm currently|I'm focusing|I'm working|I will now|I've fleshed|I've got|I need to|I'm going to|I've shifted|My focus is|I've settled|I've outlined|I've started|I'm aiming|My approach is|I'm leaning|I'm choosing|I'm prioritizing)\b/i;
-        var THINKING_BODY_EXTRA_RE = /^(I'm (?:currently|now|also|still) (?:focused|zeroing|analyzing|integrating|identifying|assessing|refining|evaluating|structuring|addressing|considering|formulating|prioritizing|parsing)|I've (?:been|now) (?:analyzing|noted|shifted|outlined|fleshed)|My (?:focus|goal) is|Specifically, I've)\b/i;
-        var THINKING_GERUND_RE = /^(Assessing|Defining|Refining|Outlining|Constructing|Uncovering|Tracing|Confirming|Reassuring|Clarifying|Deepening|Integrating|Evaluating|Formulating|Focusing|Prioritizing|Solidifying|Exploring|Analyzing|Reviewing|Validating|Synthesizing|Considering|Identifying|Structuring|Addressing|Reconstructing)\b/;
-        var FILE_ATTACHMENT_RE = /File attachment was not previously registered/;
-        function hasCyrillic(s) {
-          for (var i = 0; i < s.length; i++) {
-            var c = s.charCodeAt(i);
-            if (c >= 1024 && c <= 1279) return true;
-          }
-          return false;
-        }
-        function isThinkingStart(s) {
-          if (typeof s !== "string") return false;
-          var t = s.trim();
-          if (!t) return false;
-          if (hasCyrillic(t)) return false;
-          if (THINKING_TITLE_RE.test(t)) return true;
-          if (THINKING_BODY_RE.test(t)) return true;
-          if (THINKING_BODY_EXTRA_RE.test(t)) return true;
-          if (THINKING_GERUND_RE.test(t)) return true;
-          return false;
-        }
-        function isResponseSegment(s) {
-          if (typeof s !== "string") return false;
-          var t = s.trim();
-          if (!t) return false;
-          if (hasCyrillic(t)) return true;
-          if (/```/.test(t)) return true;
-          if (/^\s*\|.+\|\s*$/m.test(t)) return true;
-          return false;
-        }
-        function headIsThinking(node, depth) {
-          if (typeof node === "string") return isThinkingStart(node);
-          if (Array.isArray(node)) {
-            if (depth > 4) return false;
-            return headIsThinking(node[0], depth + 1);
-          }
-          return false;
-        }
-        function isThoughtBlock(node) {
-          if (!Array.isArray(node)) return false;
-          return headIsThinking(node[0], 0);
-        }
-        function collectTurnText(node, out, state) {
-          state = state || { inThinking: false };
-          if (typeof node === "string") {
-            var s = sanitizeGeminiText2(node);
-            var t = s.trim();
-            if (!t) return;
-            if (FILE_ATTACHMENT_RE.test(t)) return;
-            if (isJunk(t)) return;
-            if (state.inThinking) {
-              if (!isResponseSegment(t)) return;
-              state.inThinking = false;
-              out.push(s);
-              return;
-            }
-            if (isThinkingStart(t)) {
-              state.inThinking = true;
-              return;
-            }
-            out.push(s);
-            return;
-          }
-          if (!Array.isArray(node)) return;
-          for (var k = 0; k < node.length; k++) collectTurnText(node[k], out, state);
-        }
-        function extractUserQuestion(turn) {
-          var q = "";
-          try {
-            q = turn[2][0][0];
-          } catch (e) {
-            q = "";
-          }
-          if (typeof q === "string") {
-            var s = sanitizeGeminiText2(q).trim();
-            if (s && !isUserQuestionJunk(s) && !isThinkingStart(s)) return s;
-          }
-          return "";
-        }
-        var MODEL_NAME_RE = /^\s*(?:Gemini\s*[\d.]?|\d+(?:\.\d+)?\s+(?:Flash|Pro|Ultra|Gemini))/i;
-        function extractModelName(node) {
-          var found = null;
-          (function walk(n) {
-            if (found) return;
-            if (typeof n === "string") {
-              if (n.length < 60 && n.indexOf("\n") < 0 && MODEL_NAME_RE.test(n)) {
-                found = n.trim();
-                return;
-              }
-            } else if (Array.isArray(n)) {
-              for (var i = 0; i < n.length; i++) {
-                walk(n[i]);
-                if (found) return;
-              }
-            }
-          })(node);
-          return found || "";
-        }
-        function extractTurnId(node) {
-          var found = null;
-          (function walk(n) {
-            if (found) return;
-            if (typeof n === "string" && /^r_[0-9a-f]+$/.test(n)) {
-              found = n;
-              return;
-            } else if (Array.isArray(n)) {
-              for (var i = 0; i < n.length; i++) {
-                walk(n[i]);
-                if (found) return;
-              }
-            }
-          })(node);
-          return found;
-        }
-        function extractTurnR1(t) {
-          try {
-            if (Array.isArray(t) && Array.isArray(t[1]) && typeof t[1][1] === "string") return t[1][1];
-          } catch (e) {
-          }
-          return null;
-        }
-        function extractTurnTs(t) {
-          try {
-            if (Array.isArray(t) && Array.isArray(t[4]) && typeof t[4][0] === "number" && t[4][0] > 1e9) return t[4][0];
-          } catch (e) {
-          }
-          return 0;
-        }
-        function fileRefFromNode(n) {
-          try {
-            if (!Array.isArray(n)) return null;
-            var name = typeof n[2] === "string" ? n[2].trim() : "";
-            if (!name) return null;
-            var mime = typeof n[11] === "string" ? n[11] : "";
-            var type = typeof n[1] === "number" ? n[1] : 0;
-            var token = typeof n[5] === "string" ? n[5] : "";
-            var img = typeof n[3] === "string" ? n[3] : "";
-            var tail = n ? n[15] : null;
-            var size = Array.isArray(tail) && typeof tail[2] === "number" && isFinite(tail[2]) && tail[2] > 0 ? tail[2] : 0;
-            var dl = "";
-            var urls = [];
-            (function walk(v) {
-              if (typeof v === "string") {
-                if (v) urls.push(v);
-                if (!dl && v.indexOf("contribution.usercontent.google.com/download") !== -1) dl = v;
-              } else if (Array.isArray(v)) {
-                for (var i = 0; i < v.length; i++) walk(v[i]);
-              }
-            })(n[7]);
-            return {
-              name,
-              mime,
-              type,
-              token,
-              size,
-              img,
-              dl,
-              urls,
-              isImage: type === 1 || /^image\//i.test(mime)
-            };
-          } catch (e) {
-            return null;
-          }
-        }
-        function collectTurnFiles(turn) {
-          var out = [];
-          try {
-            var arr = turn[2][0][4][0][4];
-            if (!Array.isArray(arr)) return out;
-            for (var i = 0; i < arr.length; i++) {
-              var ref = fileRefFromNode(arr[i]);
-              if (ref) {
-                ref.pos = i;
-                out.push(ref);
-              }
-            }
-          } catch (e) {
-          }
-          return out;
-        }
-        var filePoolsByConv = {};
-        function fileOwnerTs(ts) {
-          return typeof ts === "number" && isFinite(ts) && ts > 0 ? ts : 0;
-        }
-        function fileOwnerOrder(order) {
-          return typeof order === "number" && isFinite(order) && order >= 0 ? order : -1;
-        }
-        function filePoolForConv(convId, create) {
-          var cid = typeof convId === "string" ? convId : "";
-          var pool = filePoolsByConv[cid];
-          if (!pool && create) {
-            pool = { turns: {}, seq: 0 };
-            filePoolsByConv[cid] = pool;
-          }
-          return pool || null;
-        }
-        function fileRefPoolName(ref) {
-          return ref && typeof ref.name === "string" ? ref.name : "";
-        }
-        function poolSharedPrefixLen(a, b) {
-          var n = Math.min(a.length, b.length);
-          var k = 0;
-          while (k < n && fileRefPoolName(a[k]) === fileRefPoolName(b[k])) k++;
-          return k;
-        }
-        function isTurnBefore(a, b) {
-          var aTs = fileOwnerTs(a.ts);
-          var bTs = fileOwnerTs(b.ts);
-          if (aTs > 0 && bTs > 0 && aTs !== bTs) return aTs < bTs;
-          if (aTs > 0 && bTs === 0) return true;
-          if (aTs === 0 && bTs > 0) return false;
-          var aRefs = Array.isArray(a.refs) ? a.refs : null;
-          var bRefs = Array.isArray(b.refs) ? b.refs : null;
-          if (aRefs && bRefs && aRefs.length !== bRefs.length) {
-            var nest = poolSharedPrefixLen(aRefs, bRefs);
-            if (nest === Math.min(aRefs.length, bRefs.length)) return aRefs.length < bRefs.length;
-          }
-          var aTid = typeof a.turnId === "string" ? a.turnId : "";
-          var bTid = typeof b.turnId === "string" ? b.turnId : "";
-          if (aTid && bTid && aTid !== bTid) return aTid < bTid;
-          var aOrd = fileOwnerOrder(a.order);
-          var bOrd = fileOwnerOrder(b.order);
-          if (aOrd >= 0 && bOrd >= 0 && aOrd !== bOrd) return aOrd < bOrd;
-          return a.seq < b.seq;
-        }
-        function fileRefIdentityKey(ref) {
-          var name = ref && typeof ref.name === "string" ? ref.name : "";
-          var size = ref && typeof ref.size === "number" && isFinite(ref.size) ? ref.size : 0;
-          return name + "|" + size;
-        }
-        function fileOwnerKey(convId, ref) {
-          var cid = typeof convId === "string" ? convId : "";
-          return cid + "|" + fileRefIdentityKey(ref);
-        }
-        function registerTurnFileOwner(turn, convId, turnId, ts, order) {
-          var own = typeof turnId === "string" ? turnId : "";
-          if (!own) return 0;
-          var all = collectTurnFiles(turn);
-          var pool = filePoolForConv(convId, true);
-          if (!all.length) {
-            if (pool && pool.turns[own]) delete pool.turns[own];
-            return 0;
-          }
-          var nTs = fileOwnerTs(ts);
-          var nOrd = fileOwnerOrder(order);
-          var prev = pool.turns[own];
-          if (prev) {
-            prev.refs = all;
-            if (nTs > 0) prev.ts = nTs;
-            if (nOrd >= 0) prev.order = nOrd;
-            return all.length;
-          }
-          pool.seq++;
-          pool.turns[own] = { turnId: own, ts: nTs, order: nOrd, seq: pool.seq, refs: all };
-          return all.length;
-        }
-        function previousPoolTurn(pool, rec, all) {
-          var ids = Object.keys(pool.turns);
-          var chrono = null;
-          var i;
-          for (i = 0; i < ids.length; i++) {
-            if (ids[i] === rec.turnId) continue;
-            var cand = pool.turns[ids[i]];
-            if (!cand || !Array.isArray(cand.refs)) continue;
-            if (!isTurnBefore(cand, rec)) continue;
-            if (!chrono || isTurnBefore(chrono, cand)) chrono = cand;
-          }
-          var donor = null;
-          for (i = 0; i < ids.length; i++) {
-            if (ids[i] === rec.turnId) continue;
-            var reg = pool.turns[ids[i]];
-            if (!reg || !Array.isArray(reg.refs)) continue;
-            var len = reg.refs.length;
-            if (!len || len >= all.length) continue;
-            if (poolSharedPrefixLen(reg.refs, all) !== len) continue;
-            if (!donor || len > donor.refs.length) donor = reg;
-          }
-          if (donor && (!chrono || donor.refs.length > chrono.refs.length)) return donor;
-          return chrono;
-        }
-        function poolDelta(prevRefs, all) {
-          var k = poolSharedPrefixLen(prevRefs, all);
-          if (k === prevRefs.length || k === all.length) return all.slice(k);
-          var spent = {};
-          var i;
-          for (i = 0; i < prevRefs.length; i++) {
-            var pk = fileRefIdentityKey(prevRefs[i]);
-            spent[pk] = (spent[pk] || 0) + 1;
-          }
-          var out = [];
-          for (i = 0; i < all.length; i++) {
-            var ck = fileRefIdentityKey(all[i]);
-            if (spent[ck] > 0) {
-              spent[ck]--;
-              continue;
-            }
-            out.push(all[i]);
-          }
-          return out;
-        }
-        function assignPoolOwners(turns) {
-          var list = Array.isArray(turns) ? turns : [];
-          var out = [];
-          var prevPool = [];
-          for (var i = 0; i < list.length; i++) {
-            var item = list[i];
-            if (!item) continue;
-            var pool = Array.isArray(item.refs) ? item.refs : [];
-            var own = [];
-            if (pool.length) {
-              own = prevPool.length ? poolDelta(prevPool, pool) : pool.slice(0);
-              prevPool = pool;
-            }
-            out.push({ id: item.id, own });
-          }
-          return out;
-        }
-        function collectTurnFilesForOwner(turn, convId, ownerId, ts, order) {
-          var all = collectTurnFiles(turn);
-          var own = typeof ownerId === "string" ? ownerId : "";
-          if (!own) return all;
-          if (!all.length) return [];
-          var pool = filePoolForConv(convId, true);
-          var rec = pool.turns[own];
-          if (!rec) {
-            pool.seq++;
-            rec = { turnId: own, ts: fileOwnerTs(ts), order: fileOwnerOrder(order), seq: pool.seq, refs: all };
-            pool.turns[own] = rec;
-          }
-          rec.refs = all;
-          if (fileOwnerTs(ts) > 0) rec.ts = fileOwnerTs(ts);
-          if (fileOwnerOrder(order) >= 0) rec.order = fileOwnerOrder(order);
-          var prev = previousPoolTurn(pool, rec, all);
-          if (!prev) return all;
-          return poolDelta(prev.refs, all);
-        }
-        function __resetFileOwners(convId) {
-          if (convId === void 0 || convId === null || convId === "") {
-            filePoolsByConv = {};
-            return;
-          }
-          delete filePoolsByConv[typeof convId === "string" ? convId : String(convId)];
-        }
-        var THINKING_ASSISTANT_RE = /^([A-Z][a-z]+ing\b|I'm\b|I've\b|My (?:focus|goal)\b|sr |Ev )/;
-        var LEADING_THINKING_RE = /^\s*\*?\*?([A-Z][a-z]+ing\b|I'm|I've|My (focus|goal)|sr |Ev )/;
-        function isThinkingAssistant(s) {
-          if (typeof s !== "string") return false;
-          var t = s.trim();
-          if (!t) return false;
-          if (hasCyrillic(t)) return false;
-          return THINKING_ASSISTANT_RE.test(t);
-        }
-        function firstCyrillicIndex(s) {
-          for (var i = 0; i < s.length; i++) {
-            var c = s.charCodeAt(i);
-            if (c >= 1024 && c <= 1279) return i;
-          }
-          return -1;
-        }
-        function stripLeadingThinking(s) {
-          if (typeof s !== "string") return s;
-          var t = s.trim();
-          if (!LEADING_THINKING_RE.test(t)) return s;
-          var idx = firstCyrillicIndex(t);
-          if (idx < 0) return "";
-          return t.slice(idx);
-        }
-        function hasMarkdownMarkup(t) {
-          if (typeof t !== "string") return false;
-          if (/\*\*[^*\n]+\*\*/.test(t)) return true;
-          if (/^\s*#{1,6}\s/m.test(t)) return true;
-          if (/^\s*\|.+\|\s*$/m.test(t)) return true;
-          if (/```/.test(t)) return true;
-          if (/^\s*[-*+]\s/m.test(t)) return true;
-          if (/^\s*>\s/m.test(t)) return true;
-          if (/\[[^\]]+\]\([^)]+\)/.test(t)) return true;
-          if (/^\s*(---+|\*\*\*+|___+)\s*$/m.test(t)) return true;
-          return false;
-        }
-        function pickCanonicalAnswer(parts) {
-          if (!parts || !parts.length) return "";
-          for (var i = 0; i < parts.length; i++) {
-            if (hasMarkdownMarkup(parts[i])) return parts[i];
-          }
-          return parts[0];
-        }
-        function extractCanonicalAnswer(turn) {
-          var cands = [];
-          var isFallback = false;
-          try {
-            var box = Array.isArray(turn[3]) && Array.isArray(turn[3][0]) && Array.isArray(turn[3][0][0]) ? turn[3][0][0][1] : null;
-            if (Array.isArray(box)) {
-              for (var i = 0; i < box.length; i++) cands.push(box[i]);
-            } else if (typeof box === "string") {
-              cands.push(box);
-            }
-          } catch (e) {
-          }
-          if (!cands.length) {
-            isFallback = true;
-            try {
-              collectTurnText(turn[3], cands);
-            } catch (e) {
-              swallowSoft2(e, "gemini-utils:extractCanonicalAnswer-fallback");
-            }
-          }
-          var cleaned = [];
-          for (i = 0; i < cands.length; i++) {
-            if (typeof cands[i] !== "string") continue;
-            var s = sanitizeGeminiText2(cands[i]).trim();
-            if (s) cleaned.push(s);
-          }
-          return { text: pickCanonicalAnswer(cleaned), isFallback };
-        }
-        var DR_REPORT_MIN_LEN = 1e3;
-        var DR_PLAN_MIN_LEN = 60;
-        function collectDrStrings(node, out, minLen, depth) {
-          try {
-            if (typeof node === "string") {
-              if (node.length >= minLen) out.push(node);
-              return;
-            }
-            if (Array.isArray(node) && depth < 40) {
-              for (var i = 0; i < node.length; i++) collectDrStrings(node[i], out, minLen, depth + 1);
-            }
-          } catch (e) {
-            swallowSoft2(e, "gemini-utils:collectDrStrings");
-          }
-        }
-        function ctText(s) {
-          return sanitizeGeminiText2(s).trim();
-        }
-        function extractDrTexts(realTurns) {
-          var res = { planText: "", reportText: "" };
-          try {
-            if (!Array.isArray(realTurns)) return res;
-            var cands = [];
-            for (var i = 0; i < realTurns.length; i++) collectDrStrings(realTurns[i], cands, DR_REPORT_MIN_LEN, 0);
-            var best = "";
-            for (var j = 0; j < cands.length; j++) {
-              var s = cands[j];
-              if (isUrlLike(s) || isJunk(s)) continue;
-              if (!best || s.length > best.length) best = s;
-            }
-            if (best) res.reportText = ctText(best);
-            var pc = [];
-            for (var k = 0; k < realTurns.length; k++) collectDrStrings(realTurns[k], pc, DR_PLAN_MIN_LEN, 0);
-            var pbest = "";
-            for (var q = 0; q < pc.length; q++) {
-              var ps = pc[q];
-              if (isUrlLike(ps) || isJunk(ps)) continue;
-              if (res.reportText && ps === res.reportText) continue;
-              if (ps.indexOf("deep_research_confirmation_content") !== -1) continue;
-              if (ps.indexOf("immersive_entry_chip") !== -1) continue;
-              if (res.reportText && ps.length >= res.reportText.length) continue;
-              if (!pbest || ps.length > pbest.length) pbest = ps;
-            }
-            if (pbest) res.planText = ctText(pbest);
-          } catch (e) {
-            swallowSoft2(e, "gemini-utils:extractDrTexts");
-          }
-          return res;
-        }
-        var lastDrTexts = { planText: "", reportText: "" };
-        function __setDrTexts(d) {
-          try {
-            lastDrTexts = d || { planText: "", reportText: "" };
-          } catch (e) {
-          }
-        }
-        function injectDrLinks(text, dr) {
-          try {
-            if (typeof text !== "string") return text;
-            var t = text;
-            if (dr && dr.reportText && t.indexOf("immersive_entry_chip/0") !== -1) {
-              t = t.replace(/https?:\/\/googleusercontent\.com\/immersive_entry_chip\/0/gi, dr.reportText);
-            }
-            if (dr && dr.planText && t.indexOf("deep_research_confirmation_content/0") !== -1) {
-              t = t.replace(/https?:\/\/googleusercontent\.com\/deep_research_confirmation_content\/0/gi, dr.planText);
-            }
-            return t;
-          } catch (e) {
-            return text;
-          }
-        }
-        function buildTurnMessages(turn) {
-          var question = extractUserQuestion(turn);
-          var canon = extractCanonicalAnswer(turn);
-          var answer = canon.text.replace(/\n{3,}/g, "\n\n").trim();
-          var msgs = [];
-          if (question) msgs.push({ role: "user", text: question });
-          if (answer) {
-            var drAn = injectDrLinks(answer, lastDrTexts);
-            if (canon.isFallback) {
-              if (isThinkingAssistant(drAn)) {
-              } else {
-                var kept = stripLeadingThinking(drAn);
-                if (kept) msgs.push({ role: "assistant", text: kept });
-              }
-            } else {
-              msgs.push({ role: "assistant", text: drAn });
-            }
-          }
-          return msgs;
-        }
-        function handleOuter(outer, out) {
-          try {
-            if (!Array.isArray(outer) || !Array.isArray(outer[0])) return;
-            if (outer[0][1] !== "hNvQHb") return;
-            var inner = outer[0][2];
-            if (typeof inner !== "string") return;
-            var turns = JSON.parse(inner);
-            if (!Array.isArray(turns)) return;
-            var realTurns = Array.isArray(turns[0]) && Array.isArray(turns[0][0]) ? turns[0] : turns;
-            try {
-              lastDrTexts = extractDrTexts(realTurns);
-            } catch (eD13) {
-            }
-            var rawCount = realTurns.length;
-            for (var i = rawCount - 1; i >= 0; i--) {
-              var t = realTurns[i];
-              if (!Array.isArray(t)) continue;
-              var modelName = extractModelName(t);
-              var turnId = extractTurnId(t) || "idx" + i;
-              var turnTs = extractTurnTs(t);
-              var r1 = extractTurnR1(t);
-              var msgs = buildTurnMessages(t);
-              for (var m = 0; m < msgs.length; m++) {
-                var role = msgs[m].role === "user" ? "user" : "assistant";
-                out.push({
-                  role,
-                  content: msgs[m].text,
-                  model: modelName || "",
-                  id: turnId + "_" + role,
-                  ts: turnTs,
-                  r1
-                });
-              }
-            }
-          } catch (e) {
-            logSegmentParseFail(e, "handleOuter");
-          }
-        }
-        function parseByBytes(raw, out) {
-          var bytes;
-          try {
-            bytes = new TextEncoder().encode(raw);
-          } catch (e) {
-            return;
-          }
-          var pos = 0;
-          if (bytes.length >= 4 && bytes[0] === 41 && bytes[1] === 93 && bytes[2] === 125 && bytes[3] === 39) pos = 4;
-          var dec = new TextDecoder("utf-8");
-          var guard = 0;
-          while (pos < bytes.length && guard++ < 200) {
-            while (pos < bytes.length && (bytes[pos] < 48 || bytes[pos] > 57)) pos++;
-            if (pos >= bytes.length) break;
-            var n = 0;
-            while (pos < bytes.length && bytes[pos] >= 48 && bytes[pos] <= 57) {
-              n = n * 10 + (bytes[pos] - 48);
-              pos++;
-            }
-            if (n <= 0) {
-              pos++;
-              continue;
-            }
-            if (pos < bytes.length && bytes[pos] === 10) pos++;
-            var end = pos + n;
-            if (end > bytes.length) end = bytes.length;
-            var payloadStr = dec.decode(bytes.subarray(pos, end));
-            pos = end;
-            if (pos < bytes.length && bytes[pos] === 10) pos++;
-            if (payloadStr.indexOf("hNvQHb") !== -1) {
-              try {
-                handleOuter(JSON.parse(payloadStr), out);
-              } catch (e) {
-                logSegmentParseFail(e, "parseByBytes");
-              }
-            }
-          }
-        }
-        function parseByLines(raw, out) {
-          var lines = raw.split("\n");
-          for (var i = 0; i < lines.length; i++) {
-            var ln = lines[i];
-            if (!ln || ln === ")]}'") continue;
-            var c0 = ln.charAt(0);
-            if (c0 !== "[" && c0 !== "{") continue;
-            if (ln.indexOf("hNvQHb") === -1) continue;
-            try {
-              handleOuter(JSON.parse(ln), out);
-            } catch (e) {
-              logSegmentParseFail(e, "parseByLines");
-            }
-          }
-        }
-        function parseGeminiHistory(raw) {
-          var parsed = [];
-          parseByBytes(raw, parsed);
-          if (!parsed.length) parseByLines(raw, parsed);
-          var model = "";
-          for (var i = 0; i < parsed.length; i++) {
-            if (parsed[i].model) {
-              model = parsed[i].model;
-              break;
-            }
-          }
-          var totalChars = 0;
-          var messages = [];
-          var texts = [];
-          for (var j = 0; j < parsed.length; j++) {
-            var txt = parsed[j].content || "";
-            totalChars += txt.length;
-            messages.push({ role: parsed[j].role, text: txt, model: parsed[j].model || "", id: parsed[j].id, ts: parsed[j].ts || 0, r1: parsed[j].r1 || null });
-            texts.push(txt);
-          }
-          return {
-            messages,
-            model: model || "Gemini 2.5 Pro",
-            tokens: Math.ceil(totalChars / 4),
-            text: texts.join("\n"),
-            count: messages.length
-          };
-        }
-        var api = {
-          PARSER_VERSION,
-          stripAttachmentTokens,
-          sanitizeGeminiText: sanitizeGeminiText2,
-          collectTurnText,
-          isThinkingAssistant,
-          firstCyrillicIndex,
-          stripLeadingThinking,
-          splitTurnMessages: buildTurnMessages,
-          extractDrTexts,
-          injectDrLinks,
-          __setDrTexts,
-          fileRefFromNode,
-          fileRefIdentityKey,
-          collectTurnFiles,
-          registerTurnFileOwner,
-          collectTurnFilesForOwner,
-          assignPoolOwners,
-          __resetFileOwners,
-          parseGeminiHistory
-        };
-        if (typeof window !== "undefined") {
-          window.GeminiBatchexecuteParser = api;
-        }
-        if (typeof module !== "undefined" && module.exports) {
-          module.exports = api;
-        }
-      })();
-      (function() {
-        function decodeEntities(s) {
-          if (!s) return "";
-          var out = String(s);
-          out = out.replace(new RegExp("&quot;", "g"), '"');
-          out = out.replace(new RegExp("&amp;", "g"), "&");
-          out = out.replace(new RegExp("&#39;", "g"), "'");
-          out = out.replace(new RegExp("&lt;", "g"), "<");
-          out = out.replace(new RegExp("&gt;", "g"), ">");
-          out = out.replace(new RegExp("&nbsp;", "g"), " ");
-          out = out.replace(/&#(\d+);/g, function(m, d) {
-            try {
-              return String.fromCharCode(parseInt(d, 10));
-            } catch (e) {
-              return m;
-            }
-          });
-          return out;
-        }
-        var FENCE_RE = /(`{3,})[\s\S]*?\1/g;
-        function mapOutsideFences(s, fn) {
-          var str = String(s == null ? "" : s);
-          var out = "";
-          var last = 0;
-          var m;
-          FENCE_RE.lastIndex = 0;
-          while ((m = FENCE_RE.exec(str)) !== null) {
-            out += fn(str.slice(last, m.index)) + m[0];
-            last = m.index + m[0].length;
-          }
-          return out + fn(str.slice(last));
-        }
-        function stripTagsSeg(seg) {
-          return String(seg).replace(/<script[\s\S]*?<\/script>/gi, " ").replace(/<style[\s\S]*?<\/style>/gi, " ").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ");
-        }
-        function stripTags(html) {
-          if (!html) return "";
-          return mapOutsideFences(html, stripTagsSeg).replace(/^\s+/, "").replace(/\s+$/, "");
-        }
-        function sanitizeAssistantSeg(seg) {
-          return String(seg).replace(/<script[\s\S]*?<\/script>/gi, " ").replace(/<style[\s\S]*?<\/style>/gi, " ").replace(/<[^>]+>/g, " ").replace(/[ \t\f\v]+/g, " ").split("\n").map(function(ln) {
-            return ln.trim();
-          }).join("\n").replace(/\n{3,}/g, "\n\n");
-        }
-        function sanitizeAssistant(s) {
-          if (!s) return "";
-          return mapOutsideFences(s, sanitizeAssistantSeg).replace(/^\s+/, "").replace(/\s+$/, "");
-        }
-        function tableCellText(cellEl) {
-          var clone = cellEl.cloneNode(true);
-          clone.querySelectorAll("script, style, button, svg").forEach(function(el) {
-            el.remove();
-          });
-          return stripTags(decodeEntities(clone.innerHTML)).trim();
-        }
-        function tableToMarkdown(tableEl) {
-          var rows = tableEl.querySelectorAll("tr");
-          var lines = [];
-          for (var r = 0; r < rows.length; r++) {
-            var cells = rows[r].querySelectorAll("th, td");
-            var cellTexts = [];
-            for (var c = 0; c < cells.length; c++) {
-              cellTexts.push(tableCellText(cells[c]));
-            }
-            if (cellTexts.length === 0) continue;
-            lines.push("| " + cellTexts.join(" | ") + " |");
-          }
-          return lines.join("\n");
-        }
-        function isQuestionHeading(el) {
-          return el.tagName === "H2" && el.className && String(el.className).indexOf("iMqumd") !== -1;
-        }
-        var CODE_CONTAINER_SEL = 'pre, code, [class*="code-block"], [class*="codeBlock"], [class*="codeblock"]';
-        var CODE_LANG_RE = /^[A-Za-z][A-Za-z0-9+#._-]{0,19}$/;
-        function classOf(el) {
-          try {
-            return String(el && el.className || "");
-          } catch (e) {
-            return "";
-          }
-        }
-        function isCodeLikeNode(el) {
-          if (!el || !el.tagName) return false;
-          var tag = String(el.tagName).toUpperCase();
-          return tag === "PRE" || tag === "CODE" || /code-?block/i.test(classOf(el));
-        }
-        function codeTextOf(el) {
-          if (!el || typeof el.cloneNode !== "function") return "";
-          var clone;
-          try {
-            clone = el.cloneNode(true);
-          } catch (e) {
-            return "";
-          }
-          try {
-            var junk = clone.querySelectorAll("script, style, button, svg");
-            for (var i = 0; i < junk.length; i++) {
-              if (junk[i].parentNode) junk[i].parentNode.removeChild(junk[i]);
-            }
-            var brs = clone.querySelectorAll("br");
-            var doc = clone.ownerDocument || (typeof document !== "undefined" ? document : null);
-            for (var b = 0; b < brs.length; b++) {
-              if (brs[b].parentNode && doc && doc.createTextNode) {
-                brs[b].parentNode.replaceChild(doc.createTextNode("\n"), brs[b]);
-              }
-            }
-          } catch (e2) {
-          }
-          var txt = "";
-          try {
-            txt = String(clone.textContent || "");
-          } catch (e3) {
-            txt = "";
-          }
-          if (txt.indexOf("\n") === -1 && clone.children && clone.children.length > 1) {
-            var allBlock = true;
-            for (var k = 0; k < clone.children.length; k++) {
-              if (!/^(DIV|P|LI|TR|SECTION|ARTICLE|FIGURE|BLOCKQUOTE|H[1-6])$/.test(String(clone.children[k].tagName || "").toUpperCase())) {
-                allBlock = false;
-                break;
-              }
-            }
-            if (allBlock) {
-              var lines = [];
-              for (var k2 = 0; k2 < clone.children.length; k2++) {
-                lines.push(String(clone.children[k2].textContent || ""));
-              }
-              var joined = lines.join("\n");
-              if (joined.replace(/\s+/g, "")) txt = joined;
-            }
-          }
-          return txt.replace(/[ \t]+$/gm, "").replace(/^\n+/, "").replace(/\s+$/, "");
-        }
-        function codeBodyElement(el) {
-          try {
-            var inner = el.querySelectorAll ? el.querySelectorAll("pre, code") : null;
-            if (inner && inner.length) return inner[inner.length - 1];
-          } catch (e) {
-          }
-          return el;
-        }
-        function detectCodeLang(el, langHint) {
-          if (langHint != null && CODE_LANG_RE.test(String(langHint).trim())) return String(langHint).trim();
-          var attrNames = ["code-lang", "data-lang", "data-code-lang"];
-          try {
-            for (var a = 0; a < attrNames.length; a++) {
-              var v = el && el.getAttribute ? el.getAttribute(attrNames[a]) : null;
-              if (v && CODE_LANG_RE.test(String(v).trim())) return String(v).trim();
-            }
-          } catch (e) {
-          }
-          var m = classOf(el).match(/(?:^|[\s_-])(?:language|lang)[-_]([A-Za-z][A-Za-z0-9+#._-]{0,19})/);
-          if (m && CODE_LANG_RE.test(m[1])) return m[1];
-          var cur = el;
-          for (var up = 0; cur && up < 4; up++) {
-            var prev = cur.previousSibling;
-            for (var hops = 0; prev && hops < 3; hops++) {
-              var t = "";
-              try {
-                t = String(prev.textContent || "").trim();
-              } catch (e2) {
-                t = "";
-              }
-              if (t) {
-                if (CODE_LANG_RE.test(t)) return t;
-                break;
-              }
-              prev = prev.previousSibling;
-            }
-            cur = cur.parentNode;
-          }
-          return "";
-        }
-        function isCodeBlockElement(el) {
-          if (!el || !el.tagName) return false;
-          var tag = String(el.tagName).toUpperCase();
-          if (/code-?block/i.test(classOf(el))) return true;
-          if (tag === "PRE") return true;
-          if (tag !== "CODE") return false;
-          if (/(?:^|[\s_-])(?:language|lang)[-_]/.test(classOf(el))) return true;
-          return codeTextOf(el).indexOf("\n") !== -1;
-        }
-        function renderCodeBlock(node, langHint) {
-          if (!node) return "";
-          var body = codeBodyElement(node);
-          var text = codeTextOf(body);
-          if (!text) text = codeTextOf(node);
-          if (!text) return "";
-          var lang = detectCodeLang(node, langHint) || detectCodeLang(body, langHint);
-          var fence = "```";
-          while (text.indexOf(fence) !== -1) fence += "`";
-          return fence + lang + "\n" + text + "\n" + fence;
-        }
-        function answerTextOf(node) {
-          if (!node) return "";
-          if (isCodeBlockElement(node)) return renderCodeBlock(node);
-          if (typeof node.cloneNode !== "function") return "";
-          var clone;
-          try {
-            clone = node.cloneNode(true);
-          } catch (e) {
-            return "";
-          }
-          try {
-            var junk = clone.querySelectorAll("script, style, button, svg");
-            for (var i = 0; i < junk.length; i++) {
-              if (junk[i].parentNode) junk[i].parentNode.removeChild(junk[i]);
-            }
-            var found = clone.querySelectorAll ? clone.querySelectorAll(CODE_CONTAINER_SEL) : [];
-            var outer = [];
-            for (var f = 0; f < found.length; f++) {
-              if (!isCodeBlockElement(found[f])) continue;
-              var nested = false;
-              for (var o = 0; o < outer.length; o++) {
-                if (outer[o].contains && outer[o].contains(found[f])) {
-                  nested = true;
-                  break;
-                }
-              }
-              if (!nested) outer.push(found[f]);
-            }
-            var doc = clone.ownerDocument || (typeof document !== "undefined" ? document : null);
-            for (var c = outer.length - 1; c >= 0; c--) {
-              var fenced = renderCodeBlock(outer[c]);
-              if (!fenced || !outer[c].parentNode || !doc || !doc.createTextNode) continue;
-              outer[c].parentNode.replaceChild(doc.createTextNode("\n" + fenced + "\n"), outer[c]);
-            }
-          } catch (e2) {
-          }
-          var txt = "";
-          try {
-            txt = String(clone.textContent || "");
-          } catch (e3) {
-            txt = "";
-          }
-          return txt.trim();
-        }
-        function answerDomNodes(root) {
-          var doc = root || (typeof document !== "undefined" ? document : null);
-          if (!doc || typeof doc.querySelectorAll !== "function") return [];
-          var nodes = doc.querySelectorAll(".n6owBd.awi2gc, " + CODE_CONTAINER_SEL);
-          var out = [];
-          for (var i = 0; i < nodes.length; i++) {
-            var el = nodes[i];
-            if (isCodeLikeNode(el) && !isCodeBlockElement(el)) continue;
-            var nested = false;
-            for (var j = 0; j < out.length; j++) {
-              if (out[j].contains && out[j].contains(el)) {
-                nested = true;
-                break;
-              }
-            }
-            if (nested) continue;
-            out.push(el);
-          }
-          return out;
-        }
-        var WEB_SEARCH_CHIP_RE = /(?:Самые популярные результаты веб-поиска по этой теме|People also search|Related searches|Похожие запросы|Связанные запросы)/i;
-        var FOREIGN_QUESTION_RE = /^Вы сказали:\s*"/;
-        function nodeText(node) {
-          try {
-            return (node.textContent || "").trim();
-          } catch (e) {
-            return "";
-          }
-        }
-        function isWebSearchChipNode(node) {
-          return WEB_SEARCH_CHIP_RE.test(nodeText(node));
-        }
-        function isForeignQuestionNode(node) {
-          return FOREIGN_QUESTION_RE.test(nodeText(node));
-        }
-        function listItemToMarkdown(liEl) {
-          var clone = liEl.cloneNode(true);
-          clone.querySelectorAll("script, style, button, svg").forEach(function(el) {
-            el.remove();
-          });
-          var label = null;
-          var b = clone.querySelector("strong, b");
-          if (b) {
-            label = (b.textContent || "").replace(/\s+/g, " ").trim();
-            b.remove();
-          }
-          var rest = stripTags(decodeEntities(clone.innerHTML)).trim();
-          if (label) {
-            return "- **" + label + "**" + (rest ? ": " + rest : "");
-          }
-          return rest ? "- " + rest : "";
-        }
-        function listToText(listEl) {
-          var items = listEl.querySelectorAll("li");
-          var lines = [];
-          for (var r = 0; r < items.length; r++) {
-            var t = listItemToMarkdown(items[r]);
-            if (t) lines.push(t);
-          }
-          return lines.join("\n");
-        }
-        function gatherAnswerContentNodes(doc) {
-          var raw = doc.querySelectorAll('.n6owBd.awi2gc, table, [role="heading"], h2, h3, h4, ul, ol, li, [role="list"], [role="listitem"], ' + CODE_CONTAINER_SEL);
-          var out = [];
-          for (var i = 0; i < raw.length; i++) {
-            var el = raw[i];
-            if (isQuestionHeading(el)) continue;
-            if (isCodeLikeNode(el) && !isCodeBlockElement(el)) continue;
-            var nested = false;
-            for (var j = 0; j < out.length; j++) {
-              if (out[j].contains && out[j].contains(el)) {
-                nested = true;
-                break;
-              }
-            }
-            if (nested) continue;
-            out.push(el);
-          }
-          return out;
-        }
-        function assignContentToTurns(turnsArr, contentNodes) {
-          var answers = [];
-          var skipAfterChip = [];
-          for (var ti = 0; ti < turnsArr.length; ti++) {
-            answers[ti] = [];
-            skipAfterChip[ti] = false;
-          }
-          for (var n = 0; n < contentNodes.length; n++) {
-            var node = contentNodes[n];
-            var assigned = -1;
-            for (var t2 = 0; t2 < turnsArr.length; t2++) {
-              if (turnsArr[t2].compareDocumentPosition(node) & Node.DOCUMENT_POSITION_FOLLOWING) {
-                assigned = t2;
-              } else {
-                break;
-              }
-            }
-            if (assigned < 0) continue;
-            if (isForeignQuestionNode(node)) continue;
-            if (isWebSearchChipNode(node)) {
-              skipAfterChip[assigned] = true;
-              continue;
-            }
-            if (skipAfterChip[assigned]) continue;
-            var part = null;
-            if (node.tagName === "TABLE") {
-              var md = tableToMarkdown(node);
-              if (md) part = md;
-            } else if (node.tagName === "UL" || node.tagName === "OL") {
-              var lt = listToText(node);
-              if (lt) part = lt;
-            } else {
-              var ct = answerTextOf(node).trim();
-              if (ct) part = ct;
-            }
-            if (part) answers[assigned].push(part);
-          }
-          return answers;
-        }
-        function readThreadId(doc) {
-          try {
-            var el = doc.querySelector("[data-session-thread-id]");
-            if (el) {
-              var v = el.getAttribute("data-session-thread-id");
-              return v ? v.trim() : "";
-            }
-          } catch (e) {
-          }
-          return "";
-        }
-        function parseGoogleFolwrOpen(htmlText) {
-          var turns = [];
-          var messages = [];
-          if (!htmlText || typeof htmlText !== "string") {
-            return { threadId: "", turns, messages, text: "", count: 0 };
-          }
-          var doc;
-          try {
-            doc = new DOMParser().parseFromString(htmlText, "text/html");
-          } catch (e) {
-            return { threadId: "", turns, messages, text: "", count: 0 };
-          }
-          var threadId = readThreadId(doc);
-          var turnEls = doc.querySelectorAll('[data-scope-id="turn"]');
-          var allAimfl = doc.querySelectorAll('[data-subtree="aimfl"]');
-          var turnsArr = Array.prototype.slice.call(turnEls);
-          var tgQuestions = [];
-          try {
-            var tgRe = /<!--TgQPHd\|[\s\S]*?-->/g;
-            var m;
-            while ((m = tgRe.exec(htmlText)) !== null) {
-              var c = decodeEntities(m[0]);
-              var longRe = /"([^"]{20,})"/g;
-              var lm;
-              var found = null;
-              while ((lm = longRe.exec(c)) !== null) {
-                var cand = lm[1];
-                if (cand.indexOf("\\u0026") !== -1) continue;
-                if (cand.indexOf("OLOoOd") !== -1) continue;
-                if (cand.indexOf("dRog6c") !== -1) continue;
-                if (cand.indexOf("TgQPHd") !== -1) continue;
-                if (!/[а-яёА-ЯЁ]/.test(cand) && cand.indexOf(" ") === -1) continue;
-                found = cand;
-                break;
-              }
-              tgQuestions.push(found);
-            }
-          } catch (e) {
-            swallowSoft2(e, "gsa-utils:parseGoogleFolwrOpen-tgqphd");
-          }
-          var contentNodes = gatherAnswerContentNodes(doc);
-          var answers = assignContentToTurns(turnsArr, contentNodes);
-          for (var i = 0; i < turnsArr.length; i++) {
-            var turn = turnsArr[i];
-            var question = null;
-            var h2 = turn.querySelector("h2.iMqumd");
-            if (h2) {
-              var raw = (h2.textContent || "").trim();
-              var qm = raw.match(/^Вы сказали:\s*"([\s\S]*)"$/);
-              question = qm ? qm[1].trim() : raw;
-            }
-            var assistantText = answers[i].length > 0 ? answers[i].join("\n\n") : null;
-            if (!assistantText) {
-              var nestedAimfl = turn.querySelector('[data-subtree="aimfl"]');
-              if (nestedAimfl) {
-                var nat = (nestedAimfl.textContent || "").trim();
-                if (nat) assistantText = nat;
-              }
-            }
-            if (!assistantText && allAimfl[i]) {
-              var at = (allAimfl[i].textContent || "").trim();
-              if (at) assistantText = at;
-            }
-            if (!question && tgQuestions[i]) question = tgQuestions[i];
-            turns.push({
-              id: turn.getAttribute && turn.getAttribute("jsuid") || "idx" + i,
-              userText: question || null,
-              assistantText: assistantText || null
-            });
-          }
-          if (turns.length === 0) {
-            var folifAnswer = null;
-            for (var aa = 0; aa < allAimfl.length; aa++) {
-              var at2 = (allAimfl[aa].textContent || "").trim();
-              if (at2) {
-                folifAnswer = at2;
-                break;
-              }
-            }
-            if (!folifAnswer && contentNodes.length > 0) {
-              var firstNode = contentNodes[0];
-              if (firstNode.tagName === "TABLE") {
-                folifAnswer = tableToMarkdown(firstNode);
-              } else {
-                folifAnswer = answerTextOf(firstNode).trim() || null;
-              }
-            }
-            var folifQuestion = tgQuestions.length > 0 ? tgQuestions[0] : null;
-            if (folifQuestion || folifAnswer) {
-              turns.push({ id: "folif_" + Date.now(), userText: folifQuestion, assistantText: folifAnswer });
-            }
-          }
-          for (var t = 0; t < turns.length; t++) {
-            var t2 = turns[t];
-            if (t2.userText) messages.push({ role: "user", text: stripTags(decodeEntities(t2.userText)) });
-            if (t2.assistantText) messages.push({ role: "assistant", text: sanitizeAssistant(t2.assistantText) });
-          }
-          var text = "";
-          for (var mi = 0; mi < messages.length; mi++) {
-            text += (mi > 0 ? "\n" : "") + messages[mi].text;
-          }
-          return { threadId, turns, messages, text, count: messages.length };
-        }
-        function countTurnContainers(htmlText) {
-          if (!htmlText || typeof htmlText !== "string") return 0;
-          try {
-            var doc = new DOMParser().parseFromString(htmlText, "text/html");
-            return doc.querySelectorAll('[data-scope-id="turn"]').length;
-          } catch (e) {
-            return 0;
-          }
-        }
-        function extractTurnsFromDocument(doc) {
-          if (!doc || typeof doc.querySelectorAll !== "function") return [];
-          var turns = [];
-          try {
-            var turnEls = doc.querySelectorAll('[data-scope-id="turn"]');
-            var allAimfl = doc.querySelectorAll('[data-subtree="aimfl"]');
-            var turnsArr = Array.prototype.slice.call(turnEls);
-            var questions = [];
-            for (var i = 0; i < turnsArr.length; i++) {
-              var h2 = turnsArr[i].querySelector("h2.iMqumd");
-              var q = null;
-              if (h2) {
-                var raw = (h2.textContent || "").trim();
-                var m = raw.match(/^Вы сказали:\s*"([\s\S]*)"$/);
-                q = m ? m[1].trim() : raw;
-              }
-              questions.push(q);
-            }
-            var answers = [];
-            for (var t = 0; t < turnsArr.length; t++) answers[t] = [];
-            var blocks = answerDomNodes(doc);
-            for (var b = 0; b < blocks.length; b++) {
-              var blk = blocks[b];
-              var assigned = -1;
-              for (var t2 = 0; t2 < turnsArr.length; t2++) {
-                if (turnsArr[t2].compareDocumentPosition(blk) & Node.DOCUMENT_POSITION_FOLLOWING) assigned = t2;
-                else break;
-              }
-              if (assigned >= 0 && assigned < turnsArr.length) {
-                var txt = answerTextOf(blk).trim();
-                if (txt) answers[assigned].push(txt);
-              }
-            }
-            for (var k = 0; k < turnsArr.length; k++) {
-              var joined = answers[k].length ? answers[k].join("\n\n") : null;
-              if (!joined && allAimfl[k]) {
-                var at = (allAimfl[k].textContent || "").trim();
-                if (at) joined = at;
-              }
-              turns.push({
-                id: turnsArr[k].getAttribute && turnsArr[k].getAttribute("jsuid") || "idx" + k,
-                userText: questions[k] || null,
-                assistantText: joined || null
-              });
-            }
-          } catch (e) {
-            swallowSoft2(e, "gsa-utils:extractTurnsFromDocument");
-          }
-          return turns;
-        }
-        function extractContinuationToken(htmlText) {
-          if (!htmlText || typeof htmlText !== "string") return null;
-          try {
-            var doc = new DOMParser().parseFromString(htmlText, "text/html");
-            var els = doc.querySelectorAll("[data-mstk]");
-            var last = null;
-            for (var i = 0; i < els.length; i++) {
-              var v = els[i].getAttribute("data-mstk");
-              if (v) last = v.trim();
-            }
-            return last;
-          } catch (e) {
-            return null;
-          }
-        }
-        function normalizeTurnKeyPart(s) {
-          return String(s == null ? "" : s).toLowerCase().replace(/\u00a0/g, " ").replace(/[^a-zа-яё0-9]+/g, "");
-        }
-        function isAnswerWrapperTail(tail) {
-          var t = String(tail == null ? "" : tail);
-          var body = t.replace(/^["»”']{0,2}/, "").replace(/^[\s.,:;-]{0,4}/, "");
-          return body.replace(/\s+/g, "").length > 0;
-        }
-        var QUESTION_ASK_RE = /^(?:в\s+)?(?:ответ(?:е)?(?:\s+на\s+вопрос)?|на\s+вопрос|вопрос)\s*:?\s*/i;
-        function wrapperPrefix(text) {
-          var s = String(text == null ? "" : text);
-          var head = s.slice(0, 96);
-          var at = head.indexOf(":");
-          if (at === -1) return null;
-          var after = head.slice(at + 1);
-          var m = /^\s*"/.exec(after);
-          if (!m) return null;
-          return s.slice(0, at + 1 + m[0].length);
-        }
-        function answerWrapperParts(text) {
-          var s = String(text == null ? "" : text);
-          var prefix = wrapperPrefix(s);
-          if (!prefix) return null;
-          var rest = s.slice(prefix.length);
-          var close = rest.indexOf('"');
-          if (close === -1) return null;
-          var tail = rest.slice(close + 1);
-          if (!isAnswerWrapperTail(tail)) return null;
-          var question = rest.slice(0, close).trim();
-          if (!question) return null;
-          var body = tail.replace(/^["»”']{0,2}/, "").replace(/^[\s.,:;-]+/, "");
-          if (!body) return null;
-          return { question, body };
-        }
-        function canonicalAnswerBody(text) {
-          var wrapper = answerWrapperParts(text);
-          if (wrapper) return wrapper.body;
-          var s = String(text == null ? "" : text);
-          try {
-            var q = QUESTION_ASK_RE.exec(s);
-            if (q) {
-              var rest2 = s.slice(q[0].length);
-              var close2 = rest2.indexOf('"?');
-              if (close2 !== -1 && close2 < 200) {
-                var body2 = rest2.slice(close2 + 2).replace(/^[\s.,:;-]+/, "");
-                if (body2) s = body2;
-              }
-            }
-          } catch (e) {
-            return String(text == null ? "" : text);
-          }
-          return s;
-        }
-        function turnIdentityParts(turn) {
-          if (!turn) return { u: "", a: "" };
-          var wrapper = answerWrapperParts(turn.assistantText);
-          var u = normalizeTurnKeyPart(turn.userText);
-          if (!u && wrapper) u = normalizeTurnKeyPart(wrapper.question);
-          var a = normalizeTurnKeyPart(wrapper ? wrapper.body : canonicalAnswerBody(turn.assistantText));
-          return { u, a };
-        }
-        function canonicalTurnKeyOf(turn) {
-          if (!turn) return "";
-          var parts = turnIdentityParts(turn);
-          return parts.u + "||" + parts.a;
-        }
-        function canonicalizeTurnForThread(turn) {
-          if (!turn) return turn;
-          var question = turn.userText == null ? "" : String(turn.userText).trim();
-          if (!question) {
-            var wrapper = answerWrapperParts(turn.assistantText);
-            if (wrapper) question = wrapper.question;
-          }
-          return {
-            id: turn.id,
-            userText: question || null,
-            assistantText: turn.assistantText == null ? null : turn.assistantText
-          };
-        }
-        function isBetterTurn(candidate, current) {
-          if (!current) return true;
-          var la = String(candidate && candidate.assistantText || "").length;
-          var lb = String(current && current.assistantText || "").length;
-          if (la !== lb) return la > lb;
-          return String(candidate && candidate.userText || "").length > String(current && current.userText || "").length;
-        }
-        function turnRecord(t, idFallback) {
-          return {
-            id: t && t.id != null ? t.id : idFallback,
-            userText: t && t.userText || null,
-            assistantText: t && t.assistantText || null
-          };
-        }
-        var PREFIX_MIN_CHARS = 12;
-        var PREFIX_FUZZY_RATIO = 0.8;
-        function bodiesPrefixCompatible(a, b) {
-          var x = String(a == null ? "" : a);
-          var y = String(b == null ? "" : b);
-          if (!x || !y) return false;
-          if (x === y) return true;
-          var n = Math.min(x.length, y.length);
-          if (n < PREFIX_MIN_CHARS) return false;
-          var common = 0;
-          while (common < n && x.charCodeAt(common) === y.charCodeAt(common)) common++;
-          if (common === n) return true;
-          return common / n >= PREFIX_FUZZY_RATIO;
-        }
-        function isFullerTurn(candidate, current) {
-          var la = turnIdentityParts(candidate).a.length;
-          var lb = turnIdentityParts(current).a.length;
-          if (la !== lb) return la > lb;
-          return isBetterTurn(candidate, current);
-        }
-        var PARAGRAPH_PERMUTATION_MIN = 2;
-        function answerBodyParagraphs(turn) {
-          var wrapper = answerWrapperParts(turn && turn.assistantText);
-          var body = wrapper ? wrapper.body : canonicalAnswerBody(turn && turn.assistantText);
-          var lines = String(body == null ? "" : body).split(String.fromCharCode(10));
-          var out = [];
-          var cur = "";
-          for (var i = 0; i < lines.length; i++) {
-            var line = lines[i];
-            if (line.trim() === "") {
-              var p = normalizeTurnKeyPart(cur);
-              if (p) out.push(p);
-              cur = "";
-              continue;
-            }
-            cur = cur ? cur + String.fromCharCode(10) + line : line;
-          }
-          var tail = normalizeTurnKeyPart(cur);
-          if (tail) out.push(tail);
-          return out;
-        }
-        function bodiesParagraphPermutation(aTurn, bTurn) {
-          var pa = answerBodyParagraphs(aTurn);
-          var pb = answerBodyParagraphs(bTurn);
-          if (pa.length < PARAGRAPH_PERMUTATION_MIN || pa.length !== pb.length) return false;
-          pa.sort();
-          pb.sort();
-          for (var i = 0; i < pa.length; i++) {
-            if (pa[i] !== pb[i]) return false;
-          }
-          return true;
-        }
-        function findPrefixCompatibleIndex(turns, turn) {
-          var parts = turnIdentityParts(turn);
-          if (!parts.u || !parts.a) return -1;
-          for (var i = 0; i < turns.length; i++) {
-            var other = turnIdentityParts(turns[i]);
-            if (other.u !== parts.u) continue;
-            if (bodiesPrefixCompatible(other.a, parts.a)) return i;
-            if (other.a.length === parts.a.length && bodiesParagraphPermutation(turns[i], turn)) return i;
-          }
-          return -1;
-        }
-        function reindexTurnKey(byKey, turns, at) {
-          var k;
-          for (k in byKey) {
-            if (byKey[k] === at) delete byKey[k];
-          }
-          var key = canonicalTurnKeyOf(turns[at]);
-          if (key !== "||") byKey[key] = at;
-        }
-        function mergeTurnsById(baseTurns, extraTurns) {
-          baseTurns = Array.isArray(baseTurns) ? baseTurns : [];
-          extraTurns = Array.isArray(extraTurns) ? extraTurns : [];
-          var byId = {};
-          var byKey = {};
-          var out = [];
-          function add(t) {
-            if (!t) return;
-            var id = t.id != null ? String(t.id) : "x" + out.length;
-            var key = canonicalTurnKeyOf(t);
-            var hasId = Object.prototype.hasOwnProperty.call(byId, id);
-            var hasKey = key !== "||" && Object.prototype.hasOwnProperty.call(byKey, key);
-            var at = hasId ? byId[id] : hasKey ? byKey[key] : findPrefixCompatibleIndex(out, t);
-            if (at !== -1) {
-              var richer = hasId || hasKey ? isBetterTurn(t, out[at]) : isFullerTurn(t, out[at]);
-              if (richer) {
-                out[at] = turnRecord(t, out[at].id);
-                reindexTurnKey(byKey, out, at);
-              }
-              return;
-            }
-            byId[id] = out.length;
-            if (key !== "||") byKey[key] = out.length;
-            out.push(turnRecord(t, id));
-          }
-          var i;
-          for (i = 0; i < baseTurns.length; i++) add(baseTurns[i]);
-          for (i = 0; i < extraTurns.length; i++) add(extraTurns[i]);
-          return out;
-        }
-        function mergeTurnsMonotone(baseTurns, extraTurns) {
-          return mergeTurnsById(baseTurns, extraTurns);
-        }
-        function mergeTurnsByKey(baseTurns, extraTurns) {
-          baseTurns = Array.isArray(baseTurns) ? baseTurns : [];
-          extraTurns = Array.isArray(extraTurns) ? extraTurns : [];
-          var byKey = {};
-          var out = [];
-          function add(t) {
-            if (!t) return;
-            var key = canonicalTurnKeyOf(t);
-            if (key === "||") return;
-            var hasKey = Object.prototype.hasOwnProperty.call(byKey, key);
-            var at = hasKey ? byKey[key] : findPrefixCompatibleIndex(out, t);
-            if (at === -1) {
-              byKey[key] = out.length;
-              out.push(turnRecord(t, "x" + out.length));
-              return;
-            }
-            var richer = hasKey ? isBetterTurn(t, out[at]) : isFullerTurn(t, out[at]);
-            if (richer) {
-              out[at] = turnRecord(t, out[at].id);
-              reindexTurnKey(byKey, out, at);
-            }
-          }
-          for (var i = 0; i < baseTurns.length; i++) add(baseTurns[i]);
-          for (var j = 0; j < extraTurns.length; j++) add(extraTurns[j]);
-          return out;
-        }
-        function dedupeTurns(turns) {
-          var list = Array.isArray(turns) ? turns : [];
-          var byKey = {};
-          var out = [];
-          for (var i = 0; i < list.length; i++) {
-            var t = list[i];
-            if (!t) continue;
-            var key = canonicalTurnKeyOf(t);
-            var hasKey = key !== "||" && Object.prototype.hasOwnProperty.call(byKey, key);
-            var at = hasKey ? byKey[key] : findPrefixCompatibleIndex(out, t);
-            if (at === -1) {
-              if (key !== "||") byKey[key] = out.length;
-              out.push(t);
-              continue;
-            }
-            var richer = hasKey ? isBetterTurn(t, out[at]) : isFullerTurn(t, out[at]);
-            if (richer) {
-              out[at] = t;
-              reindexTurnKey(byKey, out, at);
-            }
-          }
-          return out;
-        }
-        function classifyFolwrContinuation(input) {
-          var i = input || {};
-          var ok = i.ok === true;
-          var status = i.status == null ? 0 : i.status;
-          var bodyLength = typeof i.bodyLength === "number" && i.bodyLength >= 0 ? i.bodyLength : 0;
-          var newTurns = typeof i.newTurns === "number" && i.newTurns > 0 ? i.newTurns : 0;
-          var cursor = i.cursor ? String(i.cursor) : null;
-          var sentCursor = i.sentCursor ? String(i.sentCursor) : null;
-          var cursorRepeated = !!(cursor && sentCursor && cursor === sentCursor);
-          var kind;
-          var complete, canContinue;
-          if (!ok) {
-            kind = "http-error";
-            complete = false;
-            canContinue = false;
-          } else if (bodyLength === 0) {
-            kind = "empty-body";
-            complete = true;
-            canContinue = false;
-          } else if (cursorRepeated) {
-            kind = "cursor-repeat";
-            complete = true;
-            canContinue = false;
-          } else if (newTurns > 0) {
-            kind = "new-turns";
-            complete = false;
-            canContinue = true;
-          } else {
-            kind = "no-new-turns";
-            complete = true;
-            canContinue = false;
-          }
-          return {
-            kind,
-            complete,
-            canContinue,
-            status,
-            ok,
-            bodyLength,
-            newTurns,
-            cursor,
-            cursorRepeated,
-            log: "kind=" + kind + " status=" + status + " ok=" + (ok ? 1 : 0) + " len=" + bodyLength + "B \u0445\u043E\u0434\u043E\u0432=+" + newTurns + " \u043A\u0443\u0440\u0441\u043E\u0440=" + (cursor ? "\u0435\u0441\u0442\u044C(" + (cursorRepeated ? "\u043F\u043E\u0432\u0442\u043E\u0440" : "\u043D\u043E\u0432\u044B\u0439") + ")" : "\u043D\u0435\u0442")
-          };
-        }
-        if (typeof window !== "undefined") {
-          window.parseGoogleFolwrOpen = parseGoogleFolwrOpen;
-          window.GoogleFolwrUtils = {
-            countTurnContainers,
-            extractTurnsFromDocument,
-            mergeTurnsByKey,
-            extractContinuationToken,
-            mergeTurnsById,
-            mergeTurnsMonotone,
-            classifyFolwrContinuation,
-            // O-32: каноническая идентичность/форма хода — ОДИН источник правды для сетевого пути,
-            // DOM-добора перехватчика и DOM-пути адаптера (см. блок «O-32» ниже по файлу).
-            canonicalTurnKeyOf,
-            canonicalAnswerBody,
-            canonicalizeTurnForThread,
-            normalizeTurnKeyPart,
-            // O-32 (фикс A/C): префикс-терпимая идентичность хода и дедуп списка перед кэшем.
-            turnIdentityParts,
-            bodiesPrefixCompatible,
-            dedupeTurns,
-            // O-45: общий рендер код-блоков (```lang … ```) и отбор узлов DOM-пути —
-            // переиспользуются адаптером (adapters/google-search-adapter.js) и тестами.
-            renderCodeBlock,
-            answerTextOf,
-            answerDomNodes,
-            isCodeBlockElement
-          };
-        }
-        if (typeof module !== "undefined" && module.exports) {
-          module.exports = {
-            parseGoogleFolwrOpen,
-            countTurnContainers,
-            extractTurnsFromDocument,
-            mergeTurnsByKey,
-            extractContinuationToken,
-            mergeTurnsById,
-            mergeTurnsMonotone,
-            classifyFolwrContinuation,
-            canonicalTurnKeyOf,
-            canonicalAnswerBody,
-            canonicalizeTurnForThread,
-            normalizeTurnKeyPart,
-            turnIdentityParts,
-            bodiesPrefixCompatible,
-            dedupeTurns,
-            renderCodeBlock,
-            answerTextOf,
-            answerDomNodes,
-            isCodeBlockElement
-          };
-        }
-      })();
-      (function() {
-        "use strict";
-        function aiCmI18nMessage2(key, fallback, substitutions) {
-          try {
-            if (typeof chrome !== "undefined" && chrome.i18n && typeof chrome.i18n.getMessage === "function") {
-              var message = substitutions ? chrome.i18n.getMessage(key, substitutions) : chrome.i18n.getMessage(key);
-              if (message) return message;
-            }
-          } catch (eMessage) {
-          }
-          return fallback;
-        }
-        var REASONING_SECTION_TAG = "[REASONING]";
-        var ANSWER_SECTION_TAG = "[ANSWER]";
-        function reasoningOfMessage(msg) {
-          if (!msg || typeof msg !== "object") return "";
-          var r = msg.reasoning;
-          return typeof r === "string" ? r : "";
-        }
-        function withReasoningSections(text, reasoning) {
-          var t = typeof text === "string" ? text : "";
-          var r = typeof reasoning === "string" ? reasoning : "";
-          if (!r) return t;
-          if (t.indexOf(r) !== -1) return t;
-          return REASONING_SECTION_TAG + "\n" + r + "\n\n" + ANSWER_SECTION_TAG + "\n" + t;
-        }
-        function messageTextWithReasoning(msg) {
-          if (!msg || typeof msg !== "object") return "";
-          return withReasoningSections(msg.text, reasoningOfMessage(msg));
-        }
-        function reasoningOfMessageForExport(msg, useHidden) {
-          var r = reasoningOfMessage(msg);
-          if (r) return r;
-          if (useHidden !== true || !msg || typeof msg !== "object") return "";
-          return typeof msg.hiddenReasoning === "string" ? msg.hiddenReasoning : "";
-        }
-        function markersMessageTextWithReasoning(msg, useHidden) {
-          return withReasoningSections(
-            messageTextForMarkers(msg),
-            reasoningOfMessageForExport(msg, useHidden)
-          );
-        }
-        var TXT_ROLE_MARKER_SITES = ["qwen"];
-        function isTxtRoleMarkerHistory(history) {
-          try {
-            var site = String(history && history.site || "").toLowerCase();
-            return TXT_ROLE_MARKER_SITES.indexOf(site) !== -1;
-          } catch (e) {
-            return false;
-          }
-        }
-        function txtRoleMarker(role) {
-          return role === "user" ? "USER:" : "ASSISTANT:";
-        }
-        function mdRoleMarker(role) {
-          return role === "user" ? "### USER" : "### ASSISTANT";
-        }
-        var CONTAINER_MIN_CONTAINED = 2;
-        var CONTAINER_COVER_MIN = 0.8;
-        function messageTextForMarkers(msg) {
-          if (!msg || typeof msg !== "object") return "";
-          if (typeof msg.text === "string" && msg.text) return msg.text;
-          if (typeof msg.content === "string") return msg.content;
-          return typeof msg.text === "string" ? msg.text : "";
-        }
-        function dropContainerMessages(list) {
-          var src = Array.isArray(list) ? list : [];
-          var texts = [];
-          for (var t = 0; t < src.length; t++) texts.push(messageTextForMarkers(src[t]));
-          var keep = [];
-          for (var c = 0; c < src.length; c++) {
-            var candidate = texts[c];
-            var contained = 0;
-            var covered = 0;
-            var longest = 0;
-            if (candidate) {
-              for (var j = 0; j < texts.length; j++) {
-                var other = texts[j];
-                if (j === c || !other || other.length >= candidate.length) continue;
-                if (candidate.indexOf(other) === -1) continue;
-                contained++;
-                covered += other.length;
-                if (other.length > longest) longest = other.length;
-              }
-            }
-            var isContainer = contained >= CONTAINER_MIN_CONTAINED && covered >= CONTAINER_COVER_MIN * candidate.length && candidate.length >= 2 * longest;
-            if (!isContainer) keep.push(src[c]);
-          }
-          return keep;
-        }
-        function diagTxtRoleStructure(list, totalCount) {
-          if (!diagOn()) return false;
-          try {
-            var kept = Array.isArray(list) ? list.length : -1;
-            var total = typeof totalCount === "number" ? totalCount : kept;
-            var first = Array.isArray(list) && list.length > 0 ? list[0] : null;
-            var text = messageTextForMarkers(first);
-            var kind = "\u043D\u0435\u0442";
-            if (first && typeof first === "object") {
-              if (typeof first.text === "string") kind = "text";
-              else if (typeof first.content === "string") kind = "content";
-            }
-            console.log(DIAG_PREFIX + " txt-roles site=qwen isArray=" + Array.isArray(list) + " msgs=" + total + " kept=" + kept + " dropped-containers=" + (kept >= 0 && total >= kept ? total - kept : 0) + " first.role=" + (first && first.role !== void 0 && first.role !== null ? String(first.role) : "(\u043D\u0435\u0442)") + " first.kind=" + kind + " first.len=" + text.length + " first.head=" + (diagHead(text, 60) || "\u043F\u0443\u0441\u0442\u043E"));
-          } catch (eLogRoles) {
-          }
-          return true;
-        }
-        function renderReferenceText(list) {
-          return buildReferenceText(list);
-        }
-        function renderReferenceTextWithRoleMarkers(list) {
-          var src = Array.isArray(list) ? list : [];
-          var parts = [];
-          for (var i = 0; i < src.length; i++) {
-            var m = src[i] || {};
-            var text = renderReferenceText([{ role: m.role, text: messageTextForMarkers(m) }]);
-            if (text === null) return null;
-            if (!String(text).trim()) continue;
-            parts.push(txtRoleMarker(m.role) + "\n" + text);
-          }
-          return parts.join("\n\n");
-        }
-        function buildTxtFromHistory(history) {
-          var hist = history || {};
-          var site = typeof hist.site === "string" ? hist.site : "";
-          var messages = history && Array.isArray(history.messages) ? history.messages : [];
-          var marked = isTxtRoleMarkerHistory(history);
-          var kept = marked ? dropContainerMessages(messages) : messages;
-          var forTxt = kept.map(function(m) {
-            var text = marked ? markersMessageTextWithReasoning(m, true) : messageTextWithReasoning(m);
-            if (!m || typeof m !== "object" || text === m.text) return m;
-            var copy = {};
-            for (var k in m) {
-              if (Object.prototype.hasOwnProperty.call(m, k)) copy[k] = m[k];
-            }
-            copy.text = text;
-            return copy;
-          });
-          var out;
-          if (marked) {
-            diagTxtRoleStructure(forTxt, messages.length);
-            out = renderReferenceTextWithRoleMarkers(forTxt);
-          } else {
-            out = renderReferenceText(forTxt);
-          }
-          if (site === "gemini" && hist.sourceTier && out) out = hist.sourceTier + "\n\n" + out;
-          return out === null ? "" : out;
-        }
-        function exportTokenSnapshot(history) {
-          var h = history || {};
-          var tokens = typeof h.tokens === "number" ? h.tokens : 0;
-          var limit = typeof h.limit === "number" ? h.limit : 0;
-          var percent = typeof h.percent === "number" ? h.percent : 0;
-          if (limit > 0) {
-            var calc = Math.round(tokens / limit * 1e3) / 10;
-            if (calc !== percent) percent = calc;
-          }
-          return { tokens, limit, percent };
-        }
-        function buildMdFromHistory(history, platform) {
-          var h = history || {};
-          var site = typeof h.site === "string" ? h.site : "";
-          var lines = [];
-          lines.push(aiCmI18nMessage2("export_md_title", "# AI Context Monitor \u2014 \u044D\u043A\u0441\u043F\u043E\u0440\u0442 \u0438\u0441\u0442\u043E\u0440\u0438\u0438"));
-          lines.push("");
-          lines.push(aiCmI18nMessage2("export_md_platform", "\u041F\u043B\u0430\u0442\u0444\u043E\u0440\u043C\u0430: " + (platform || "AI Chat"), [platform || "AI Chat"]));
-          lines.push(aiCmI18nMessage2("export_md_model", "\u041C\u043E\u0434\u0435\u043B\u044C: " + (h.model || "\u2014"), [h.model || "\u2014"]));
-          var exportedAt = (/* @__PURE__ */ new Date()).toISOString();
-          lines.push(aiCmI18nMessage2("export_md_date", "\u0414\u0430\u0442\u0430 \u044D\u043A\u0441\u043F\u043E\u0440\u0442\u0430: " + exportedAt, [exportedAt]));
-          var snap = exportTokenSnapshot(h);
-          var tokens = snap.tokens;
-          var limit = snap.limit;
-          var percent = snap.percent;
-          if (tokens === 0 && limit === 0) {
-            lines.push("\u0422\u043E\u043A\u0435\u043D\u044B: \u043D/\u0434 (" + percent + "%)");
-          } else {
-            lines.push(aiCmI18nMessage2("export_md_tokens", "\u0422\u043E\u043A\u0435\u043D\u044B: " + tokens + " / " + limit + " (" + percent + "%)", [String(tokens), String(limit), String(percent)]));
-          }
-          lines.push("");
-          if (site === "gemini" && h.sourceTier) {
-            lines.push(h.sourceTier, "");
-          }
-          var mdMarked = isTxtRoleMarkerHistory(h);
-          var messages = Array.isArray(h.messages) ? h.messages : [];
-          if (mdMarked) messages = dropContainerMessages(messages);
-          for (var i = 0; i < messages.length; i++) {
-            var msg = messages[i] || {};
-            if (typeof aiCmDiagLine2 === "function") {
-              aiCmDiagLine2("claude-role-builder", { msgRole: msg.role, mdMarked });
-            }
-            var title = mdMarked ? mdRoleMarker(msg.role) : msg.role === "user" || msg.role === "human" ? aiCmI18nMessage2("export_md_role_user", "## \u041F\u043E\u043B\u044C\u0437\u043E\u0432\u0430\u0442\u0435\u043B\u044C") : aiCmI18nMessage2("export_md_role_assistant", "## \u0410\u0441\u0441\u0438\u0441\u0442\u0435\u043D\u0442");
-            lines.push(title);
-            lines.push("");
-            lines.push(mdMarked ? markersMessageTextWithReasoning(msg, true) : messageTextWithReasoning(msg));
-            lines.push("");
-          }
-          return lines.join("\n");
-        }
-        function buildJsonFromHistory(history, platform) {
-          var h = history || {};
-          return JSON.stringify({
-            platform: platform || "AI Chat",
-            model: h.model || "",
-            exportedAt: (/* @__PURE__ */ new Date()).toISOString(),
-            tokens: typeof h.tokens === "number" ? h.tokens : 0,
-            limit: typeof h.limit === "number" ? h.limit : 0,
-            percent: typeof h.percent === "number" ? h.percent : 0,
-            // Two-Tier (v89): аддитивное поле метаданных. undefined → JSON.stringify ключ НЕ
-            // добавляет, поэтому у прочих платформ и у Gemini без метки байты прежние.
-            sourceTier: h.sourceTier,
-            messages: Array.isArray(h.messages) ? h.messages : []
-          }, null, 2);
-        }
-        var DIAG_PREFIX = "[AI CM][diag]";
-        function diagOn() {
-          try {
-            if (typeof sessionStorage !== "undefined" && sessionStorage && sessionStorage.getItem("aiCmDebug") === "1") return true;
-          } catch (eSess) {
-          }
-          try {
-            if (typeof window !== "undefined" && window && window.__aiCmDebugLogs === true) return true;
-          } catch (eWin) {
-          }
-          return false;
-        }
-        function diagHead(v, n) {
-          try {
-            var lim = typeof n === "number" && n > 0 ? n : 100;
-            if (v === void 0 || v === null) return "";
-            var s = String(v);
-            if (!s) return "";
-            var flat = s.replace(/\s+/g, " ").trim();
-            if (!flat) return "";
-            return flat.length > lim ? flat.slice(0, lim) + "\u2026" : flat;
-          } catch (eHead) {
-            return "";
-          }
-        }
-        function diagStack() {
-          try {
-            var lines = String(new Error().stack || "").split("\n");
-            var out = [];
-            for (var i = 1; i < lines.length && out.length < 4; i++) {
-              var s = String(lines[i] || "").replace(/\s+/g, " ").trim();
-              if (!s || s.indexOf("diag") !== -1) continue;
-              out.push(s);
-            }
-            return out.join(" <- ");
-          } catch (eStack) {
-            return "";
-          }
-        }
-        function diagDownload(trigger, content, fileName, extra) {
-          try {
-            if (typeof aiCmDiagDownload2 === "function") return aiCmDiagDownload2(trigger, content, fileName, extra);
-          } catch (eGlobal) {
-          }
-          if (!diagOn()) return false;
-          try {
-            var e = extra || {};
-            var url = "";
-            try {
-              url = String(typeof location !== "undefined" && location && location.href || "");
-            } catch (eUrl) {
-            }
-            console.log(DIAG_PREFIX + " download trigger=" + (trigger || "(\u043D\u0435\u0442)") + " file=" + (fileName === void 0 || fileName === null || String(fileName) === "" ? "\u043F\u0443\u0441\u0442\u043E\u0435" : String(fileName)) + " bytes100=" + (diagHead(content, 100) || "\u043F\u0443\u0441\u0442\u043E") + " len=" + (content === void 0 || content === null ? 0 : String(content).length) + " mime=" + (e.mime === void 0 ? "(\u043D\u0435\u0442)" : e.mime) + " url=" + url + " threadId=" + (e.threadId === void 0 || e.threadId === "" ? "(\u043D\u0435\u0442)" : e.threadId) + " site=" + (e.site === void 0 ? "" : e.site) + " reason=" + (e.reason === void 0 ? "" : e.reason) + " src=" + diagStack());
-          } catch (eLog) {
-          }
-          return true;
-        }
-        var XSSI_PREFIX_LEN = 4;
-        function startsWithXssiPrefix(content) {
-          try {
-            if (content === void 0 || content === null) return false;
-            var s = String(content);
-            if (s.length < XSSI_PREFIX_LEN) return false;
-            return s.charCodeAt(0) === 41 && s.charCodeAt(1) === 93 && s.charCodeAt(2) === 125 && s.charCodeAt(3) === 39;
-          } catch (eXssi) {
-            return false;
-          }
-        }
-        function downloadBlockReason(content, fileName) {
-          if (startsWithXssiPrefix(content)) return "xssi-prefix";
-          if (fileName === void 0 || fileName === null || String(fileName).trim() === "") return "empty-name";
-          return null;
-        }
-        function diagDownloadBlocked(trigger, content, fileName, reason, extra) {
-          try {
-            if (typeof aiCmDiagDownloadBlocked2 === "function") {
-              return aiCmDiagDownloadBlocked2(trigger, content, fileName, reason, extra);
-            }
-          } catch (eGlobalBlocked) {
-          }
-          if (!diagOn()) return false;
-          try {
-            var e = extra || {};
-            var url = "";
-            try {
-              url = String(typeof location !== "undefined" && location && location.href || "");
-            } catch (eUrlB) {
-            }
-            console.log(DIAG_PREFIX + " download-blocked reason=" + (reason || "(\u043D\u0435\u0442)") + " trigger=" + (trigger || "(\u043D\u0435\u0442)") + " file=" + (fileName === void 0 || fileName === null || String(fileName) === "" ? "\u043F\u0443\u0441\u0442\u043E\u0435" : String(fileName)) + " bytes100=" + (diagHead(content, 100) || "\u043F\u0443\u0441\u0442\u043E") + " len=" + (content === void 0 || content === null ? 0 : String(content).length) + " mime=" + (e.mime === void 0 ? "(\u043D\u0435\u0442)" : e.mime) + " url=" + url + " threadId=" + (e.threadId === void 0 || e.threadId === "" ? "(\u043D\u0435\u0442)" : e.threadId) + " site=" + (e.site === void 0 ? "" : e.site) + " src=" + diagStack());
-          } catch (eLogBlocked) {
-          }
-          return true;
-        }
-        function downloadBlob(content, fileName, mimeType, trigger, extra) {
-          var ex = extra || {};
-          var blockReason = downloadBlockReason(content, fileName);
-          if (blockReason) {
-            try {
-              diagDownloadBlocked(
-                trigger || "builder-download",
-                content,
-                fileName,
-                blockReason,
-                { mime: mimeType, threadId: ex.threadId, site: ex.site }
-              );
-            } catch (eDiagBlocked) {
-            }
-            return false;
-          }
-          try {
-            diagDownload(
-              trigger || "builder-download",
-              content,
-              fileName,
-              { mime: mimeType, threadId: ex.threadId, site: ex.site, reason: ex.reason }
-            );
-          } catch (eDiag) {
-          }
-          try {
-            var blob = new Blob([content], { type: mimeType });
-            var url = URL.createObjectURL(blob);
-            var a = document.createElement("a");
-            a.href = url;
-            a.download = fileName;
-            document.body.appendChild(a);
-            a.click();
-            a.remove();
-            setTimeout(function() {
-              URL.revokeObjectURL(url);
-            }, 1e3);
-          } catch (e) {
-            console.warn("[export] \u043D\u0435 \u0443\u0434\u0430\u043B\u043E\u0441\u044C \u0441\u043A\u0430\u0447\u0430\u0442\u044C \u0444\u0430\u0439\u043B:", e);
-          }
-          return true;
-        }
-        var Api = {
-          buildTxtFromHistory,
-          buildMdFromHistory,
-          buildJsonFromHistory,
-          downloadBlob,
-          // O-27 (защитный фикс): причина отказа точки скачивания (null — выдача разрешена) и
-          // сама точка отказа наружу — для пинов тестов и переиспользования вызывающим кодом.
-          aiCmDownloadBlockReason: downloadBlockReason,
-          aiCmDiagDownloadBlocked: diagDownloadBlocked,
-          // O-27/O-32: диагностические хелперы наружу (content.js/export-manager.js зовут их
-          // через window.AiCmExportBuilders, если глобальный utils/debug.js не подключён).
-          aiCmDiagOn: diagOn,
-          aiCmDiagHead: diagHead,
-          aiCmDiagDownload: diagDownload,
-          // O-35: рендер reasoning контрактом DeepSeek — чистая функция наружу (пины тестов
-          // и переиспользование; на боевом пути вызывается только двумя сборщиками выше).
-          aiCmMessageTextWithReasoning: messageTextWithReasoning,
-          aiCmWithReasoningSections: withReasoningSections,
-          // O-37 (C): источник размышления для маркерного пути (reasoning, иначе поле захвата
-          // hiddenReasoning) и композиция «текст сообщения + секции» — чистые функции наружу;
-          // на боевом пути их зовут только buildTxtFromHistory/buildMdFromHistory выше.
-          aiCmReasoningOfMessageForExport: reasoningOfMessageForExport,
-          aiCmMarkersMessageTextWithReasoning: markersMessageTextWithReasoning,
-          // O-36 (D2): маркеры ролей txt-экспорта — чистые предикаты наружу (пины тестов;
-          // на боевом пути вызываются только сборщиком buildTxtFromHistory выше).
-          aiCmTxtRoleMarker: txtRoleMarker,
-          aiCmIsTxtRoleMarkerHistory: isTxtRoleMarkerHistory,
-          aiCmTxtRoleMarkerSites: TXT_ROLE_MARKER_SITES,
-          // O-36 (D2.1): маркер роли md (Qwen Studio), текст сообщения для маркерного пути
-          // (с фолбэком на .content) и контейнер-чистка — чистые функции наружу для пинов
-          // и переиспользования; на боевом пути их зовут только два сборщика выше.
-          aiCmMdRoleMarker: mdRoleMarker,
-          aiCmMessageTextForMarkers: messageTextForMarkers,
-          aiCmDropContainerMessages: dropContainerMessages,
-          aiCmDiagTxtRoleStructure: diagTxtRoleStructure,
-          aiCmContainerRules: { minContained: CONTAINER_MIN_CONTAINED, coverMin: CONTAINER_COVER_MIN }
-        };
-        if (typeof module !== "undefined" && module.exports) module.exports = Api;
-        if (typeof window !== "undefined") window.AiCmExportBuilders = Api;
-      })();
-      (function() {
-        "use strict";
-        function safeSeg(s) {
-          return String(s == null ? "" : s).replace(/[^a-zA-Z0-9_-]+/g, "-").replace(/^-+|-+$/g, "");
-        }
-        function extractConvIdFromUrl(pathname) {
-          try {
-            var p = String(pathname || "");
-            var mPr = p.match(/\/prompts\/(?!new(?:_chat)?(?:\/|$)|apikey(?:\/|$))([A-Za-z0-9_-]+)/);
-            if (mPr) return mPr[1];
-            var mApp = p.match(/\/app\/(?!prompts(?:\/|$)|new(?:\/|$)|apikey(?:\/|$))([A-Za-z0-9_-]+)/);
-            if (mApp) return mApp[1];
-            var mDs = p.match(/\/a\/chat\/s\/([A-Za-z0-9_-]+)/);
-            if (mDs) return mDs[1];
-            var parts = p.split("/");
-            var chatIdx = parts.indexOf("chat");
-            if (chatIdx !== -1 && chatIdx + 1 < parts.length && parts[chatIdx + 1]) return parts[chatIdx + 1];
-            var mC = p.match(/\/c\/([A-Za-z0-9_-]+)/);
-            if (mC) return mC[1];
-            var mPs = p.match(/\/search\/([A-Za-z0-9_-]{8,})/);
-            if (mPs) return mPs[1];
-            var mP = p.match(/\/thread\/([A-Za-z0-9_-]+)/);
-            if (mP) return mP[1];
-            return "";
-          } catch (e) {
-            return "";
-          }
-        }
-        function normExportFmt(fmt) {
-          return fmt === "md" ? "md" : fmt === "json" ? "json" : "txt";
-        }
-        function exportPad2(n) {
-          return (n < 10 ? "0" : "") + n;
-        }
-        function convIdStamp(d) {
-          return d.getFullYear() + "-" + exportPad2(d.getMonth() + 1) + "-" + exportPad2(d.getDate()) + "_" + exportPad2(d.getHours()) + "-" + exportPad2(d.getMinutes());
-        }
-        function manualExportStamp(d) {
-          return d.getFullYear() + "-" + exportPad2(d.getMonth() + 1) + "-" + exportPad2(d.getDate()) + "-" + exportPad2(d.getHours()) + "-" + exportPad2(d.getMinutes());
-        }
-        function safeModelSeg(model) {
-          return String(model == null ? "" : model).replace(/[^a-zA-Z0-9_.-]+/g, "-").replace(/^-+|-+$/g, "") || "model";
-        }
-        function isFileNameTaken(taken, name) {
-          try {
-            if (!taken || !name) return false;
-            if (typeof Set !== "undefined" && taken instanceof Set) return taken.has(name);
-            if (Array.isArray(taken)) return taken.indexOf(name) !== -1;
-            if (typeof taken === "object") return Object.prototype.hasOwnProperty.call(taken, name);
-            return false;
-          } catch (e) {
-            return false;
-          }
-        }
-        function disambiguateFileName(name, taken) {
-          var base = String(name == null ? "" : name);
-          try {
-            if (!isFileNameTaken(taken, base)) return base;
-            var m = base.match(/^(.*)\.([A-Za-z0-9]+)$/);
-            var stem = m ? m[1] : base;
-            var ext = m ? "." + m[2] : "";
-            for (var i = 2; i <= 999; i++) {
-              var cand = stem + "-" + i + ext;
-              if (!isFileNameTaken(taken, cand)) return cand;
-            }
-            return stem + "-" + Date.now() + ext;
-          } catch (e) {
-            return base;
-          }
-        }
-        function buildAutoExportFileName(spec) {
-          var s = spec || {};
-          var lowConfPrefix = s.isLowConfidence === true ? "[LOW CONFIDENCE]_" : "";
-          var d = /* @__PURE__ */ new Date();
-          var base;
-          if (s.mask === "manual") {
-            var siteSeg = safeSeg(s.site) || "google_search";
-            base = "ai-context-monitor-" + siteSeg + "-" + safeModelSeg(s.model) + "-" + manualExportStamp(d);
-          } else {
-            var cidSeg = safeSeg(String(s.convId || "").slice(0, 8)) || "noconv";
-            var svcSeg = safeSeg(s.service) || "chat";
-            var suffix = "";
-            if (s.reason === "pre-trim") suffix = "-pretrim";
-            else if (s.reason === "base-complete") suffix = "-base-complete";
-            base = svcSeg + "-" + cidSeg + "-" + convIdStamp(d) + suffix;
-          }
-          return disambiguateFileName(lowConfPrefix + base + "." + normExportFmt(s.fmt), s.taken);
-        }
-        function buildExportFileName(service, convId, reason, isLowConfidence, fmt) {
-          return buildAutoExportFileName({
-            mask: "convId",
-            service,
-            convId,
-            reason,
-            isLowConfidence,
-            fmt,
-            taken: arguments.length > 5 ? arguments[5] : null
-          });
-        }
-        function buildGsaExportFileName(site, model, isLowConfidence, fmt) {
-          return buildAutoExportFileName({
-            mask: "manual",
-            site,
-            model,
-            isLowConfidence,
-            fmt,
-            taken: arguments.length > 4 ? arguments[4] : null
-          });
-        }
-        function resolveAutoExportConvId(site, urlConvId, threadId) {
-          var cid = String(urlConvId == null ? "" : urlConvId);
-          if (cid) return cid;
-          if (String(site == null ? "" : site) === "google_search") {
-            return String(threadId == null ? "" : threadId);
-          }
-          return "";
-        }
-        function notCompleteReason(state) {
-          var s = state || {};
-          if (s.site === "google_search" && s.probeRunning === true) return "probe-running";
-          return "not-complete";
-        }
-        function pickExportSource(hasBaseSeen, hasNetworkTexts) {
-          return hasBaseSeen === true ? "network" : "adapter";
-        }
-        function resolveExportSource(state) {
-          var s = state || {};
-          if (s.isGemini !== true) return { action: "local", reason: "non-gemini" };
-          if (s.bridge !== true) return { action: "local", reason: "no-bridge" };
-          var arch = typeof s.archiveCount === "number" && s.archiveCount > 0 ? s.archiveCount : 0;
-          if (arch <= 0) return { action: "local", reason: "no-archive" };
-          var live = typeof s.liveCount === "number" ? s.liveCount : null;
-          if (live === 0) return { action: "block", reason: "archive-only-base" };
-          var base = typeof s.baseCount === "number" ? s.baseCount : 0;
-          var local = typeof s.localCount === "number" ? s.localCount : 0;
-          if (live !== null && live > 0 && base > local) return { action: "union", reason: "stale-local-source" };
-          return { action: "local", reason: "in-sync" };
-        }
-        function sourceTierOf(state) {
-          var s = state || {};
-          var arch = typeof s.archiveCount === "number" && s.archiveCount > 0 ? s.archiveCount : 0;
-          var live = typeof s.liveCount === "number" && s.liveCount > 0 ? s.liveCount : 0;
-          if (arch > 0 && live > 0) return "[MERGED: ARCHIVE+LIVE]";
-          if (arch > 0) return "[ARCHIVE]";
-          return "[BEST-EFFORT: LIVE CAPTURE]";
-        }
-        function shouldSkipGsaPageGuard(state) {
-          var s = state || {};
-          if (s.site !== "google_search") return { skip: false, reason: null };
-          if (s.chatPageMarker === false) return { skip: true, reason: "not-chat-page" };
-          if (typeof s.msgCount === "number" && s.msgCount < 1) return { skip: true, reason: "no-messages" };
-          if (typeof s.baseTextLen === "number" && s.baseTextLen < 1) return { skip: true, reason: "empty-base" };
-          return { skip: false, reason: null };
-        }
-        function shouldSkipAutoExport(state) {
-          var s = state || {};
-          if (s.enabled !== true) return { skip: true, reason: "not-enabled", resetFired: false };
-          if (typeof s.percentage !== "number" || !(s.percentage >= 0)) return { skip: true, reason: "no-pct", resetFired: false };
-          var gsaPage = shouldSkipGsaPageGuard(s);
-          if (gsaPage.skip) return { skip: true, reason: gsaPage.reason, resetFired: false };
-          var threshold = typeof s.threshold === "number" && s.threshold >= 1 && s.threshold <= 100 ? s.threshold : 90;
-          var domBaseTrusted = s.domBaseTrusted === true;
-          var networkCompleteLatch = s.gsaNetworkCompleteLatch === true;
-          var completeOk = s.baseComplete === true || networkCompleteLatch;
-          var baseReady = completeOk || domBaseTrusted;
-          var basePending = s.isGemini !== true && s.baseSeen !== true && !domBaseTrusted && !networkCompleteLatch;
-          if (!baseReady && !basePending) return { skip: true, reason: "not-complete", resetFired: false };
-          if (s.historyIncomplete === true) return { skip: true, reason: "not-complete", resetFired: false };
-          if (s.isGemini === true && typeof s.archiveCount === "number" && s.archiveCount > 0 && typeof s.baseCount === "number" && s.baseCount <= s.archiveCount) {
-            return { skip: true, reason: "archive-pending-live", resetFired: false };
-          }
-          if (s.isGemini === true && s.loaderRunning) return { skip: true, reason: "loader-running", resetFired: false };
-          if (s.percentage < threshold - 10) {
-            if (s.isGemini === true || s.baseSeen === true) return { skip: true, reason: "below-threshold-hysteresis", resetFired: true };
-            return { skip: true, reason: "below-threshold-unreliable", resetFired: false };
-          }
-          if (s.percentage < threshold) return { skip: true, reason: "below-threshold", resetFired: false };
-          if (!baseReady && basePending) return { skip: true, reason: "base-pending", resetFired: false };
-          if (s.fired) return { skip: true, reason: "already-fired", resetFired: false };
-          return { skip: false, reason: null, resetFired: false };
-        }
-        function shouldSkipBaseCompleteTrigger(state) {
-          var s = state || {};
-          var threshold = typeof s.threshold === "number" && s.threshold >= 1 && s.threshold <= 100 ? s.threshold : 90;
-          if (typeof s.percentage !== "number" || !(s.percentage >= 0)) {
-            return { skip: true, reason: "no-pct", threshold };
-          }
-          if (s.percentage < threshold) {
-            return { skip: true, reason: "below-threshold-base-complete", threshold };
-          }
-          return { skip: false, reason: null, threshold };
-        }
-        function effectiveAutoExportThreshold(globalPct, perSitePct) {
-          function clampPerSite(v) {
-            var n = parseInt(v, 10);
-            if (isNaN(n)) return null;
-            if (n < 1) return 1;
-            if (n > 100) return 100;
-            return n;
-          }
-          if (perSitePct !== void 0 && perSitePct !== null && String(perSitePct).trim() !== "") {
-            var per = clampPerSite(perSitePct);
-            if (per != null) return per;
-          }
-          var g = typeof globalPct === "number" && globalPct >= 1 && globalPct <= 100 ? globalPct : null;
-          return g == null ? 90 : g;
-        }
-        function latchKey(service, convId) {
-          return safeSeg(service) + "|" + String(convId || "");
-        }
-        function markAutoExportFired(store, service, convId) {
-          try {
-            store[latchKey(service, convId)] = 1;
-          } catch (e) {
-          }
-        }
-        function getAutoExportFired(store, service, convId) {
-          try {
-            return store[latchKey(service, convId)] === 1;
-          } catch (e) {
-            return false;
-          }
-        }
-        function resetAutoExportFired(store, service, convId) {
-          try {
-            delete store[latchKey(service, convId)];
-          } catch (e) {
-          }
-        }
-        var FIRED_SESSION_PREFIX = "aiCmFired:";
-        function firedSessionKey(service, convId) {
-          return FIRED_SESSION_PREFIX + latchKey(service, convId);
-        }
-        function isFiredInSession(sessionMap, service, convId) {
-          try {
-            return !!sessionMap && sessionMap[firedSessionKey(service, convId)] === 1;
-          } catch (e) {
-            return false;
-          }
-        }
-        function sessionFiredPatch(service, convId) {
-          var patch = {};
-          try {
-            patch[firedSessionKey(service, convId)] = 1;
-          } catch (e) {
-          }
-          return patch;
-        }
-        function normalizeExportMessages(raw) {
-          var out = [];
-          try {
-            if (!Array.isArray(raw)) return out;
-            for (var i = 0; i < raw.length; i++) {
-              var m = raw[i] || {};
-              var text = typeof m.text === "string" ? m.text : typeof m.content === "string" ? m.content : "";
-              if (!text) continue;
-              var norm = { role: m.role === "user" || m.role === "human" ? "user" : "assistant", text };
-              if (typeof aiCmDiagLine2 === "function") {
-                aiCmDiagLine2("claude-role-normalize", { inputRole: m.role, outputRole: norm.role });
-              }
-              if (typeof m.hiddenReasoning === "string" && m.hiddenReasoning) norm.hiddenReasoning = m.hiddenReasoning;
-              out.push(norm);
-            }
-          } catch (e) {
-            swallow(e, "export-utils:normalizeExportMessages");
-          }
-          return out;
-        }
-        var RE_RAW_HEADING_LINE = /^[\s>*+\-\d.)\]]*#{1,}(?=\s|$)/;
-        var RE_MARKER_RESIDUE_LINE = /^[\s>*+\-\d.)\]]*#{1,}[\s]*$/;
-        var RE_CODE_FENCE_LINE = /^[\s>*+\-\d.)\]]*(`{3,}|~{3,})/;
-        var RE_LIST_MARK = /^(?:[-*+]|\d+[.)])[ \t]+/;
-        var RE_ANY_SPACE = /[\u00a0\u1680\u2000-\u200a\u202f\u205f\u3000\ufeff]/g;
-        function deSpaceAny(s) {
-          return String(s == null ? "" : s).replace(RE_ANY_SPACE, " ");
-        }
-        function coreOfLine(line) {
-          try {
-            var s = deSpaceAny(line);
-            if (RE_CODE_FENCE_LINE.test(s)) return "";
-            var prev;
-            do {
-              prev = s;
-              s = s.replace(/^[ \t]+/, "");
-              if (/^>[ \t]?/.test(s)) s = s.replace(/^>[ \t]?/, "");
-              else if (RE_LIST_MARK.test(s)) s = s.replace(RE_LIST_MARK, "");
-              else if (RE_RAW_HEADING_LINE.test(s)) s = s.replace(/^#{1,}[ \t]*/, "");
-            } while (s !== prev);
-            return s.replace(/[*_`~#>]+/g, " ").replace(/\s+/g, " ").trim();
-          } catch (e) {
-            return "";
-          }
-        }
-        function coreText(text) {
-          try {
-            var lines = deSpaceAny(text).split("\n");
-            var kept = [];
-            for (var i = 0; i < lines.length; i++) {
-              var c = coreOfLine(lines[i]);
-              if (c) kept.push(c);
-            }
-            return kept.join(" ");
-          } catch (e) {
-            return "";
-          }
-        }
-        function stripMarkerResidue(text) {
-          try {
-            var s = String(text == null ? "" : text);
-            if (s.indexOf("#") === -1) return s;
-            var lines = s.split("\n");
-            var kept = [];
-            var dropped = false;
-            for (var i = 0; i < lines.length; i++) {
-              if (RE_MARKER_RESIDUE_LINE.test(lines[i])) {
-                dropped = true;
-                continue;
-              }
-              kept.push(lines[i]);
-            }
-            return dropped ? kept.join("\n") : s;
-          } catch (e) {
-            return String(text == null ? "" : text);
-          }
-        }
-        function dedupeMessages(messages) {
-          var out = [];
-          var seen = {};
-          var removed = 0;
-          try {
-            if (!Array.isArray(messages)) return { messages: out, removed: 0 };
-            for (var i = 0; i < messages.length; i++) {
-              var m = messages[i] || {};
-              var role = m.role === "user" ? "user" : "assistant";
-              var text = typeof m.text === "string" ? m.text : "";
-              var key = role + "\0" + coreText(text);
-              if (Object.prototype.hasOwnProperty.call(seen, key)) {
-                removed++;
-                continue;
-              }
-              seen[key] = true;
-              var keep = { role, text };
-              if (m.id != null) keep.id = m.id;
-              out.push(keep);
-            }
-          } catch (e) {
-            swallow(e, "export-utils:dedupeMessages");
-          }
-          return { messages: out, removed };
-        }
-        var INTRA_CORE_MIN_LEN = 20;
-        function isRawMarkdownBlock(block) {
-          try {
-            var lines = String(block == null ? "" : block).split("\n");
-            for (var i = 0; i < lines.length; i++) {
-              if (RE_RAW_HEADING_LINE.test(lines[i])) return true;
-            }
-            return false;
-          } catch (e) {
-            return false;
-          }
-        }
-        function separateRawBlocks(text) {
-          return String(text).replace(/([^#\n])[ \t]*(#{1,6})(?=[ \t])/g, function(all, prev, hashes) {
-            if (hashes.length < 2 && !/[.!?;:»")\]]$/.test(prev)) return all;
-            return prev + "\n\n" + hashes;
-          });
-        }
-        function splitRawSections(block) {
-          try {
-            var lines = String(block == null ? "" : block).split("\n");
-            var out = [];
-            var cur = null;
-            for (var i = 0; i < lines.length; i++) {
-              if (RE_RAW_HEADING_LINE.test(lines[i])) {
-                if (cur) out.push(cur.join("\n"));
-                cur = [lines[i]];
-              } else if (cur) {
-                cur.push(lines[i]);
-              } else {
-                cur = [lines[i]];
-              }
-            }
-            if (cur) out.push(cur.join("\n"));
-            return out.length ? out : [String(block == null ? "" : block)];
-          } catch (e) {
-            return [String(block == null ? "" : block)];
-          }
-        }
-        function sepForSections(block) {
-          return /\n{2,}/.test(String(block == null ? "" : block)) ? "\n\n" : "\n";
-        }
-        function cutLeadingCopy(section, folded) {
-          var lines = String(section).split("\n");
-          if (lines.length < 2) return { text: String(section), trimmed: false };
-          var head = lines[0];
-          var body = lines.slice(1).join("\n");
-          var bodyNorm = normalizeIntraBlock(body);
-          var copyNorm = normalizeIntraBlock(folded);
-          if (!bodyNorm || !copyNorm) return { text: String(section), trimmed: false };
-          if (bodyNorm === copyNorm) return null;
-          if (bodyNorm.indexOf(copyNorm) === 0) {
-            var tail = bodyNorm.slice(copyNorm.length).replace(/^\s+/, "");
-            if (!tail) return null;
-            var lastWord = copyNorm.split(" ").pop();
-            var at = body.lastIndexOf(lastWord);
-            if (at < 0) return null;
-            var rest = body.slice(at + lastWord.length).replace(/^\s+/, "");
-            if (!rest) return null;
-            return { text: head + "\n" + rest, trimmed: true };
-          }
-          var cutIdx = corePrefixCutIndex(body, coreText(folded));
-          if (cutIdx < 0) return { text: String(section), trimmed: false };
-          var restCore = body.slice(cutIdx).replace(/^\s+/, "");
-          if (!restCore) return null;
-          return { text: head + "\n" + restCore, trimmed: true };
-        }
-        function corePrefixCutIndex(body, copyCore) {
-          try {
-            if (!copyCore) return -1;
-            if (coreText(body).indexOf(copyCore) !== 0) return -1;
-            var re = /(\S+)/g;
-            var m;
-            while ((m = re.exec(body)) !== null) {
-              var end = m.index + m[0].length;
-              var probe = coreText(body.slice(0, end));
-              if (probe === copyCore) return end;
-              if (probe.length > copyCore.length) return -1;
-            }
-            return -1;
-          } catch (e) {
-            return -1;
-          }
-        }
-        function renderedBeforeRaw(blocks, i, raw) {
-          for (var b = i - 1; b >= 0; b--) {
-            if (b === i || raw[b]) continue;
-            if (!coreText(blocks[b])) continue;
-            return String(blocks[b]);
-          }
-          return null;
-        }
-        function normalizeIntraBlock(block) {
-          return String(block == null ? "" : block).replace(/\s+/g, " ").trim();
-        }
-        function intraBlocksSimilar(a, b) {
-          var x = coreText(a);
-          var y = coreText(b);
-          if (!x || !y) return false;
-          if (x === y) return true;
-          var minLen = x.length < y.length ? x.length : y.length;
-          if (minLen < INTRA_CORE_MIN_LEN) return false;
-          return x.length >= y.length ? x.indexOf(y) !== -1 : y.indexOf(x) !== -1;
-        }
-        function dedupeIntraMessage(message) {
-          var text = message && typeof message.text === "string" ? message.text : "";
-          var removedBlocks = 0;
-          try {
-            let coreDup = function(core, selfIdx, minLen) {
-              if (!core) return false;
-              if (seenCore[core]) return true;
-              if (core.length < minLen) return false;
-              for (var q = 0; q < blocks.length; q++) {
-                if (q === selfIdx || drop[q] || raw[q] || !norm[q]) continue;
-                if (intraBlocksSimilar(core, blocks[q])) return true;
-              }
-              return false;
-            };
-            if (!text) return { text, removedBlocks: 0 };
-            var seam = separateRawBlocks(text);
-            var blocks = seam.split(/\n{2,}/);
-            if (blocks.length < 2) return { text, removedBlocks: 0 };
-            var norm = [];
-            var raw = [];
-            var i;
-            for (i = 0; i < blocks.length; i++) {
-              norm.push(coreText(blocks[i]));
-              raw.push(isRawMarkdownBlock(blocks[i]));
-            }
-            var drop = {};
-            var seen = /* @__PURE__ */ Object.create(null);
-            for (i = 0; i < blocks.length; i++) {
-              if (!norm[i]) continue;
-              if (seen[norm[i]]) {
-                drop[i] = true;
-                removedBlocks++;
-                continue;
-              }
-              seen[norm[i]] = true;
-            }
-            var seenCore = /* @__PURE__ */ Object.create(null);
-            var cores = [];
-            for (i = 0; i < blocks.length; i++) {
-              cores.push(coreOfBlock(blocks[i]));
-              if (drop[i] || raw[i] || !norm[i]) continue;
-              if (cores[i]) seenCore[cores[i]] = true;
-            }
-            for (i = 0; i < blocks.length; i++) {
-              if (drop[i] || !raw[i]) continue;
-              if (coreDup(cores[i], i, INTRA_CORE_MIN_LEN)) {
-                drop[i] = true;
-                removedBlocks++;
-                continue;
-              }
-              var secs = splitRawSections(blocks[i]);
-              var folded = renderedBeforeRaw(blocks, i, raw);
-              if (folded === null) continue;
-              var cutSecs = 0;
-              var keptSecs = [];
-              for (var s = 0; s < secs.length; s++) {
-                if (coreDup(coreOfBlock(secs[s]), i, 0)) {
-                  cutSecs++;
-                  continue;
-                }
-                var cut = cutLeadingCopy(secs[s], folded);
-                if (cut === null) {
-                  cutSecs++;
-                  continue;
-                }
-                if (cut.trimmed) cutSecs++;
-                keptSecs.push(cut.text);
-              }
-              if (cutSecs === 0) continue;
-              removedBlocks += cutSecs;
-              if (keptSecs.length === 0) {
-                drop[i] = true;
-                continue;
-              }
-              blocks[i] = keptSecs.join(sepForSections(blocks[i])).replace(/^\n+/, "");
-              norm[i] = coreText(blocks[i]);
-              cores[i] = coreOfBlock(blocks[i]);
-              raw[i] = isRawMarkdownBlock(blocks[i]);
-            }
-            for (i = 0; i < blocks.length; i++) {
-              if (drop[i] || !raw[i]) continue;
-              var coreRaw = cores[i];
-              if (coreRaw.length < INTRA_CORE_MIN_LEN) continue;
-              for (var j = i + 1; j < blocks.length; j++) {
-                if (drop[j] || raw[j]) continue;
-                if (intraBlocksSimilar(coreRaw, blocks[j])) {
-                  drop[i] = true;
-                  removedBlocks++;
-                  break;
-                }
-              }
-            }
-            if (removedBlocks === 0) return { text, removedBlocks: 0 };
-            var kept = [];
-            for (i = 0; i < blocks.length; i++) {
-              if (!drop[i]) kept.push(blocks[i]);
-            }
-            return { text: kept.join("\n\n"), removedBlocks };
-          } catch (e) {
-            swallow(e, "export-utils:dedupeIntraMessage");
-          }
-          return { text, removedBlocks: 0 };
-        }
-        function coreOfBlock(block) {
-          try {
-            var lines = String(block == null ? "" : block).split("\n");
-            var kept = [];
-            for (var i = 0; i < lines.length; i++) {
-              if (RE_RAW_HEADING_LINE.test(lines[i])) continue;
-              kept.push(lines[i]);
-            }
-            return coreText(kept.join("\n"));
-          } catch (e) {
-            return coreText(block);
-          }
-        }
-        var CROSS_RAW_MIN_LINES = 2;
-        var CROSS_RAW_MIN_CHARS = 80;
-        function blockLinePair(block) {
-          var raw = deSpaceAny(block).split("\n");
-          var core = [];
-          for (var i = 0; i < raw.length; i++) core.push(coreOfLine(raw[i]));
-          return trimPairEdges(raw, core);
-        }
-        function trimPairEdges(raw, core) {
-          var a = 0, b = raw.length;
-          while (a < b && !core[a]) a++;
-          while (b > a && !core[b - 1]) b--;
-          return { raw: raw.slice(a, b), core: core.slice(a, b) };
-        }
-        function cutPairHead(pair, n) {
-          return trimPairEdges(pair.raw.slice(n), pair.core.slice(n));
-        }
-        function cutPairTail(pair, n) {
-          var k = pair.raw.length - n;
-          return trimPairEdges(pair.raw.slice(0, k), pair.core.slice(0, k));
-        }
-        function trimEdgeEmpty(lines) {
-          var a = lines.slice();
-          while (a.length && !a[0]) a.shift();
-          while (a.length && !a[a.length - 1]) a.pop();
-          return a;
-        }
-        function seqEqual(a, b) {
-          if (a.length !== b.length) return false;
-          for (var i = 0; i < a.length; i++) {
-            if (a[i] !== b[i]) return false;
-          }
-          return true;
-        }
-        function seqIsPrefix(shortArr, longArr) {
-          if (!shortArr.length || shortArr.length >= longArr.length) return false;
-          for (var i = 0; i < shortArr.length; i++) {
-            if (shortArr[i] !== longArr[i]) return false;
-          }
-          return true;
-        }
-        function seqIsSuffix(shortArr, longArr) {
-          if (!shortArr.length || shortArr.length >= longArr.length) return false;
-          var off = longArr.length - shortArr.length;
-          for (var i = 0; i < shortArr.length; i++) {
-            if (shortArr[i] !== longArr[off + i]) return false;
-          }
-          return true;
-        }
-        function crossCopyIsSubstantial(lines) {
-          var ls = trimEdgeEmpty(lines);
-          var nonEmpty = 0;
-          var chars = 0;
-          for (var i = 0; i < ls.length; i++) {
-            if (!ls[i]) continue;
-            nonEmpty++;
-            chars += ls[i].length;
-          }
-          return nonEmpty >= CROSS_RAW_MIN_LINES && chars >= CROSS_RAW_MIN_CHARS;
-        }
-        function dedupeCrossRawCopies(messages) {
-          var out = [];
-          var removed = 0;
-          var refs = [];
-          try {
-            var src = Array.isArray(messages) ? messages : [];
-            for (var i = 0; i < src.length; i++) {
-              var m = src[i] || {};
-              var text = typeof m.text === "string" ? m.text : "";
-              if (!text) {
-                out.push(m);
-                continue;
-              }
-              var blocks = separateRawBlocks(text).split(/\n{2,}/);
-              var keptBlocks = [];
-              var touched = false;
-              for (var b = 0; b < blocks.length; b++) {
-                if (!isRawMarkdownBlock(blocks[b])) {
-                  keptBlocks.push(blocks[b]);
-                  continue;
-                }
-                var pair = blockLinePair(blocks[b]);
-                var origJoin = pair.raw.join("\n");
-                var dropped = false;
-                var changed = true;
-                while (changed && !dropped) {
-                  changed = false;
-                  for (var r = 0; r < refs.length; r++) {
-                    var ref = refs[r];
-                    if (seqEqual(ref, pair.core)) {
-                      if (!crossCopyIsSubstantial(ref)) continue;
-                      dropped = true;
-                      removed++;
-                      break;
-                    }
-                    if (seqIsSuffix(ref, pair.core) && crossCopyIsSubstantial(ref)) {
-                      pair = cutPairTail(pair, ref.length);
-                      changed = true;
-                      break;
-                    }
-                    if (seqIsPrefix(ref, pair.core) && crossCopyIsSubstantial(ref)) {
-                      pair = cutPairHead(pair, ref.length);
-                      changed = true;
-                      break;
-                    }
-                  }
-                  if (!dropped && !pair.raw.length) {
-                    dropped = true;
-                    removed++;
-                  }
-                }
-                if (dropped || !pair.raw.length) {
-                  touched = true;
-                  continue;
-                }
-                var rebuilt = pair.raw.join("\n");
-                if (rebuilt !== origJoin) touched = true;
-                keptBlocks.push(rebuilt);
-                if (isRawMarkdownBlock(rebuilt)) refs.push(pair.core);
-              }
-              var keep = { role: m.role === "user" ? "user" : "assistant", text: touched ? keptBlocks.join("\n\n") : text };
-              if (m.id != null) keep.id = m.id;
-              out.push(keep);
-            }
-          } catch (e) {
-            return { messages: Array.isArray(messages) ? messages : [], removed: 0 };
-          }
-          return { messages: out, removed };
-        }
-        function prepareExportMessages(raw, onMessageDedupe) {
-          var intraRemoved = 0;
-          var out = [];
-          try {
-            var src = Array.isArray(raw) ? raw : [];
-            for (var i = 0; i < src.length; i++) {
-              var m = src[i] || {};
-              var role = m.role === "user" ? "user" : "assistant";
-              var text = typeof m.text === "string" ? m.text : "";
-              var res = dedupeIntraMessage({ role, text });
-              var next = { role, text: res.text };
-              if (m.id != null) next.id = m.id;
-              out.push(next);
-              if (res.removedBlocks > 0) {
-                intraRemoved += res.removedBlocks;
-                if (typeof onMessageDedupe === "function") {
-                  try {
-                    onMessageDedupe(role, res.removedBlocks);
-                  } catch (eCb) {
-                  }
-                }
-              }
-            }
-          } catch (e) {
-            out = Array.isArray(raw) ? raw : [];
-            intraRemoved = 0;
-          }
-          var inter = dedupeMessages(out);
-          var cross = dedupeCrossRawCopies(inter.messages);
-          var cleaned = [];
-          for (var k = 0; k < cross.messages.length; k++) {
-            var mk = cross.messages[k] || {};
-            var clean = {
-              role: mk.role === "user" ? "user" : "assistant",
-              text: stripMarkerResidue(typeof mk.text === "string" ? mk.text : "")
-            };
-            if (mk.id != null) clean.id = mk.id;
-            cleaned.push(clean);
-          }
-          return {
-            messages: cleaned,
-            intraRemoved,
-            removed: inter.removed + cross.removed,
-            crossRemoved: cross.removed
-          };
-        }
-        var VISIBLE_USER_PROMPT_START = "<!-- deepseek-pp-visible-user-prompt:start -->";
-        var VISIBLE_USER_PROMPT_END = "<!-- deepseek-pp-visible-user-prompt:end -->";
-        var VISIBLE_USER_PROMPT_VALUE = "<!-- deepseek-pp-visible-user-prompt:value=";
-        function countMarker(text, marker) {
-          var n = 0;
-          var at = text.indexOf(marker);
-          while (at !== -1) {
-            n++;
-            at = text.indexOf(marker, at + marker.length);
-          }
-          return n;
-        }
-        function injectedUserTextSkipReason(text) {
-          var s = typeof text === "string" ? text : String(text == null ? "" : text);
-          var starts = countMarker(s, VISIBLE_USER_PROMPT_START);
-          var ends = countMarker(s, VISIBLE_USER_PROMPT_END);
-          if (starts === 0 && ends === 0) {
-            return s.indexOf(VISIBLE_USER_PROMPT_VALUE) !== -1 ? "value-only" : "no-markers";
-          }
-          if (starts === 1 && ends === 1) {
-            return s.indexOf(VISIBLE_USER_PROMPT_END) < s.indexOf(VISIBLE_USER_PROMPT_START) ? "unpaired-markers" : null;
-          }
-          if (starts > 1 || ends > 1) return "multiple-pairs";
-          return "unpaired-markers";
-        }
-        function sanitizeInjectedUserText(text) {
-          var s = typeof text === "string" ? text : String(text == null ? "" : text);
-          if (injectedUserTextSkipReason(s) !== null) return s;
-          var from = s.indexOf(VISIBLE_USER_PROMPT_START) + VISIBLE_USER_PROMPT_START.length;
-          var to = s.indexOf(VISIBLE_USER_PROMPT_END, from);
-          return s.slice(from, to).trim();
-        }
-        var BDS_OPEN_TAG = "<BetterDeepSeek>";
-        var BDS_CLOSE_TAG = "</BetterDeepSeek>";
-        var BDS_TRUNCATION_MARK = "...[truncated]";
-        var BDS_BOM = "\uFEFF";
-        function bdsDiagLine(tag, fields) {
-          try {
-            if (typeof aiCmDiagLine2 !== "function") return false;
-            return aiCmDiagLine2(tag, fields) !== false;
-          } catch (eDiag) {
-            return false;
-          }
-        }
-        function bdsDiagSlice(text, from, n) {
-          try {
-            var s = typeof text === "string" ? text : String(text == null ? "" : text);
-            return JSON.stringify(from === 0 ? s.slice(0, n) : s.slice(Math.max(0, s.length - n)));
-          } catch (eSlice) {
-            return '""';
-          }
-        }
-        var BDS_INJECTION_FORMS = [
-          {
-            id: "bds-deep-code-prompt",
-            match: "exact",
-            head: "[DEEP_CODE_MODE_ACTIVE]",
-            basis: "artifact 1-257 (message), 999-1191 / 1223-1415 (span in <original_task>)"
-          },
-          {
-            id: "bds-tool-system-prompt",
-            match: "exact",
-            head: "You are Better DeepSeek. You have access to specialized tools.",
-            basis: "artifact 259-947 (message)"
-          },
-          {
-            id: "bds-system-datetime",
-            match: "prefix",
-            head: "User's System Date & Time: ",
-            basis: "artifact 980-982 (message; line 981)"
-          }
-        ];
-        var BDS_WRAPPER_ID = "bds-prompt-wrapper";
-        function isBdsOpenTagLine(line, at) {
-          if (line === BDS_OPEN_TAG) return true;
-          return at === 0 && line === BDS_BOM + BDS_OPEN_TAG;
-        }
-        function bdsFormOfHeadLine(line) {
-          var s = typeof line === "string" ? line : "";
-          for (var i = 0; i < BDS_INJECTION_FORMS.length; i++) {
-            var f = BDS_INJECTION_FORMS[i];
-            if (f.match === "prefix") {
-              if (s.slice(0, f.head.length) === f.head) return f;
-            } else if (s === f.head) return f;
-          }
-          return null;
-        }
-        function bdsFirstContentLine(lines) {
-          for (var i = 0; i < lines.length; i++) {
-            if (String(lines[i]).trim() !== "") return i;
-          }
-          return -1;
-        }
-        function bdsLastContentLine(lines) {
-          for (var i = lines.length - 1; i >= 0; i--) {
-            if (String(lines[i]).trim() !== "") return i;
-          }
-          return -1;
-        }
-        function sanitizeBetterDeepSeekText(text) {
-          var s = typeof text === "string" ? text : String(text == null ? "" : text);
-          if (s.indexOf(BDS_OPEN_TAG) === -1) return { text: s, removed: 0, forms: [] };
-          var lines = s.split("\n");
-          var drop = {};
-          var forms = [];
-          var diagRows = typeof aiCmDiagLine2 === "function" ? [] : null;
-          var firstLine = bdsFirstContentLine(lines);
-          var lastLine = bdsLastContentLine(lines);
-          for (var k = 0; k < lines.length; k++) {
-            if (!isBdsOpenTagLine(lines[k], k)) continue;
-            var form = k + 1 < lines.length ? bdsFormOfHeadLine(lines[k + 1]) : null;
-            if (form) {
-              var end = -1;
-              for (var j = k + 2; j < lines.length; j++) {
-                if (isBdsOpenTagLine(lines[j], j)) break;
-                if (lines[j] === BDS_CLOSE_TAG || lines[j] === BDS_TRUNCATION_MARK) {
-                  end = j;
-                  break;
-                }
-              }
-              if (end === -1) {
-                if (diagRows) diagRows.push({ k, first: firstLine, pair: -1, last: lastLine, form: form.id, skip: "no-boundary" });
-                continue;
-              }
-              if (diagRows) diagRows.push({ k, first: firstLine, pair: end, last: lastLine, form: form.id, skip: "(\u043D\u0435\u0442)" });
-              for (var d = k; d <= end; d++) drop[d] = true;
-              forms.push(form.id);
-              k = end;
-              continue;
-            }
-            var pair = -1;
-            for (var p = k + 1; p < lines.length; p++) {
-              if (isBdsOpenTagLine(lines[p], p)) break;
-              if (lines[p] === BDS_CLOSE_TAG) {
-                pair = p;
-                break;
-              }
-            }
-            if (pair === -1) {
-              if (diagRows) diagRows.push({ k, first: firstLine, pair: -1, last: lastLine, form: "(\u043D\u0435\u0442)", skip: "unpaired-tag" });
-              continue;
-            }
-            if (diagRows) diagRows.push({ k, first: firstLine, pair, last: lastLine, form: BDS_WRAPPER_ID, skip: "(\u043D\u0435\u0442)" });
-            drop[k] = true;
-            drop[pair] = true;
-            forms.push(BDS_WRAPPER_ID);
-            k = pair;
-          }
-          var removedTotal = forms.length;
-          if (diagRows) {
-            for (var r = 0; r < diagRows.length; r++) {
-              bdsDiagLine("o40-bds-line", {
-                k: diagRows[r].k,
-                firstLine: diagRows[r].first,
-                pair: diagRows[r].pair,
-                lastLine: diagRows[r].last,
-                form: diagRows[r].form,
-                skip: diagRows[r].skip,
-                removed: removedTotal
-              });
-            }
-          }
-          if (!forms.length) return { text: s, removed: 0, forms: [] };
-          var kept = [];
-          for (var m = 0; m < lines.length; m++) {
-            if (!drop[m]) kept.push(lines[m]);
-          }
-          return { text: kept.join("\n"), removed: forms.length, forms };
-        }
-        var TC_LFR_OPEN = "<local_file_read>";
-        var TC_LFR_CLOSE = "</local_file_read>";
-        var TC_TASK_OPEN = "<original_task>";
-        var TC_TASK_CLOSE = "</original_task>";
-        var TC_RESULTS_OPEN = "<tool_results>";
-        var TC_RESULTS_CLOSE = "</tool_results>";
-        var TC_PROSE_ANCHOR = "These are the tool results just executed for the tool-continuation task.";
-        var TC_ENVELOPE_FORMS = [
-          {
-            id: "tc-local-file-read",
-            rule: "pair",
-            open: TC_LFR_OPEN,
-            close: TC_LFR_CLOSE,
-            boundary: "\u043E\u0442 \u0441\u0442\u0440\u043E\u043A\u0438 \u043E\u0442\u043A\u0440\u044B\u0432\u0430\u044E\u0449\u0435\u0433\u043E \u0442\u0435\u0433\u0430 \u0434\u043E \u0441\u0442\u0440\u043E\u043A\u0438 \u0437\u0430\u043A\u0440\u044B\u0432\u0430\u044E\u0449\u0435\u0433\u043E; \u0441\u043D\u0438\u043C\u0430\u0435\u0442\u0441\u044F, \u043A\u043E\u0433\u0434\u0430 \u043F\u0430\u0440\u0430 \u2014 \u0446\u0435\u043B\u043E\u0435 \u0441\u043E\u043E\u0431\u0449\u0435\u043D\u0438\u0435 (\u0441\u043F\u0430\u043D \u0432\u043D\u0443\u0442\u0440\u0438 \u0441\u043E\u043E\u0431\u0449\u0435\u043D\u0438\u044F \u2014 \u0431\u0430\u0439\u0442\u043E\u0432\u043E: \u0438\u0437\u043C\u0435\u0440\u0435\u043D\u0438\u044F \u0441\u043F\u0430\u043D\u0430 \u0432 \u0430\u0440\u0442\u0435\u0444\u0430\u043A\u0442\u0435 \u043D\u0435\u0442)",
-            scope: "tool-request",
-            basis: "artifact 10-19 msg 1/3/9/11/13 lines 1-3 (whole message, role=assistant)"
-          },
-          {
-            id: "tc-prose-continuation",
-            rule: "run",
-            openPrefix: TC_PROSE_ANCHOR,
-            boundary: "\u043E\u0442 \u0441\u0442\u0440\u043E\u043A\u0438-\u044F\u043A\u043E\u0440\u044F \u0434\u043E \u043F\u043E\u0441\u043B\u0435\u0434\u043D\u0435\u0439 \u043D\u0435\u043F\u0443\u0441\u0442\u043E\u0439 \u0441\u0442\u0440\u043E\u043A\u0438 \u043F\u0440\u043E\u0437\u044B (\u043F\u0435\u0440\u0435\u0434 \u043F\u0443\u0441\u0442\u043E\u0439 \u0441\u0442\u0440\u043E\u043A\u043E\u0439)",
-            scope: "envelope",
-            basis: "artifact 10-19 msg 2/4/7/8/10/12/14 lines 1-9"
-          },
-          {
-            id: "tc-original-task",
-            rule: "pair",
-            open: TC_TASK_OPEN,
-            close: TC_TASK_CLOSE,
-            boundary: "\u043E\u0442 <original_task> \u0434\u043E </original_task>; \u043F\u0443\u0441\u0442\u0430\u044F \u043F\u0430\u0440\u0430 11-12 \u2014 \u0442\u0430 \u0436\u0435 \u0433\u0440\u0430\u043D\u0438\u0446\u0430",
-            scope: "envelope",
-            basis: "artifact 10-19 msg 2/4 lines 11-12 (empty), msg 7/8/10/12/14 lines 11-17"
-          },
-          {
-            id: "tc-tool-results",
-            rule: "pair",
-            open: TC_RESULTS_OPEN,
-            close: TC_RESULTS_CLOSE,
-            boundary: "\u043E\u0442 <tool_results> \u0434\u043E </tool_results>; \u0432 \u0430\u0440\u0442\u0435\u0444\u0430\u043A\u0442\u0435 \u0437\u0430\u043A\u0440\u044B\u0432\u0430\u044E\u0449\u0438\u0439 \u0442\u0435\u0433 \u2014 \u043F\u043E\u0441\u043B\u0435\u0434\u043D\u044F\u044F \u0441\u0442\u0440\u043E\u043A\u0430 \u0441\u043E\u043E\u0431\u0449\u0435\u043D\u0438\u044F (7/7)",
-            scope: "envelope",
-            basis: "artifact 10-19 msg 2/4 lines 14-26 / 14-35, msg 7/8/10/12/14 lines 19-66"
-          }
-        ];
-        function tcPairAfter(lines, from, open, close) {
-          for (var i = Math.max(0, from); i < lines.length; i++) {
-            if (lines[i] !== open) continue;
-            for (var j = i + 1; j < lines.length; j++) {
-              if (lines[j] === close) return { open: i, close: j };
-            }
-            return null;
-          }
-          return null;
-        }
-        function tcIsWholeMessagePair(lines, pair) {
-          var i;
-          for (i = 0; i < pair.open; i++) {
-            if (String(lines[i]).trim() !== "") return false;
-          }
-          for (i = pair.close + 1; i < lines.length; i++) {
-            if (String(lines[i]).trim() !== "") return false;
-          }
-          return true;
-        }
-        function tcProseAnchorLine(lines) {
-          for (var i = 0; i < lines.length; i++) {
-            if (String(lines[i]).slice(0, TC_PROSE_ANCHOR.length) === TC_PROSE_ANCHOR) return i;
-          }
-          return -1;
-        }
-        function sanitizeToolContinuationText(text) {
-          var s = typeof text === "string" ? text : String(text == null ? "" : text);
-          if (s.indexOf(TC_LFR_OPEN) === -1 && s.indexOf(TC_TASK_OPEN) === -1 && s.indexOf(TC_RESULTS_OPEN) === -1 && s.indexOf(TC_PROSE_ANCHOR) === -1) {
-            return { text: s, removed: 0, forms: [] };
-          }
-          var lines = s.split("\n");
-          var drop = {};
-          var forms = [];
-          var anchor = tcProseAnchorLine(lines);
-          if (anchor !== -1) {
-            var runEnd = anchor;
-            for (var p = anchor + 1; p < lines.length; p++) {
-              if (String(lines[p]).trim() === "") break;
-              runEnd = p;
-            }
-            var spanEnd = runEnd;
-            var afterRun = runEnd + 1;
-            var task = tcPairAfter(lines, afterRun, TC_TASK_OPEN, TC_TASK_CLOSE);
-            if (task) {
-              spanEnd = task.close;
-              afterRun = task.close + 1;
-            }
-            var results = tcPairAfter(lines, afterRun, TC_RESULTS_OPEN, TC_RESULTS_CLOSE);
-            if (results) {
-              spanEnd = results.close;
-            }
-            for (var d = anchor; d <= spanEnd; d++) drop[d] = true;
-            forms.push("tc-prose-continuation");
-            if (task) forms.push("tc-original-task");
-            if (results) forms.push("tc-tool-results");
-          }
-          for (var k = 0; k < lines.length; k++) {
-            if (drop[k] || lines[k] !== TC_LFR_OPEN) continue;
-            var lfr = tcPairAfter(lines, k, TC_LFR_OPEN, TC_LFR_CLOSE);
-            if (!lfr) continue;
-            if (!tcIsWholeMessagePair(lines, lfr)) {
-              k = lfr.close;
-              continue;
-            }
-            for (var d2 = lfr.open; d2 <= lfr.close; d2++) drop[d2] = true;
-            forms.push("tc-local-file-read");
-            k = lfr.close;
-          }
-          if (!forms.length) return { text: s, removed: 0, forms: [] };
-          var kept = [];
-          for (var m = 0; m < lines.length; m++) {
-            if (!drop[m]) kept.push(lines[m]);
-          }
-          return { text: kept.join("\n"), removed: forms.length, forms };
-        }
-        var SECTION_REASONING_TAG = "[REASONING]";
-        var SECTION_ANSWER_TAG = "[ANSWER]";
-        function stripReasoningSections(text) {
-          var s = typeof text === "string" ? text : String(text == null ? "" : text);
-          if (s.indexOf(SECTION_REASONING_TAG) === -1 || s.indexOf(SECTION_ANSWER_TAG) === -1) return s;
-          var out = "";
-          var i = 0;
-          var changed = false;
-          while (i < s.length) {
-            var a = s.indexOf(SECTION_ANSWER_TAG, i);
-            if (a === -1) {
-              out += s.slice(i);
-              break;
-            }
-            var r = a > 0 ? s.lastIndexOf(SECTION_REASONING_TAG, a - 1) : -1;
-            if (r === -1 || r < i) {
-              out += s.slice(i, a + SECTION_ANSWER_TAG.length);
-              i = a + SECTION_ANSWER_TAG.length;
-              continue;
-            }
-            out += s.slice(i, r);
-            i = a + SECTION_ANSWER_TAG.length;
-            if (s.charAt(i) === "\r" && s.charAt(i + 1) === "\n") i += 2;
-            else if (s.charAt(i) === "\n") i += 1;
-            changed = true;
-          }
-          return changed ? out : s;
-        }
-        var REASONING_SECTION_PAIR_RE = /^\s*\[REASONING\]\r?\n([\s\S]*?)\r?\n\r?\n\[ANSWER\]\r?\n([\s\S]*)$/;
-        function diagTag(tag, fields) {
-          try {
-            if (typeof aiCmDiagLine2 !== "function") return false;
-            return aiCmDiagLine2(tag, fields) !== false;
-          } catch (eDiag) {
-            return false;
-          }
-        }
-        function splitReasoningSections(text) {
-          var s = typeof text === "string" ? text : String(text == null ? "" : text);
-          var m = REASONING_SECTION_PAIR_RE.exec(s);
-          if (m) return { reasoning: m[1].replace(/\s+$/, ""), answer: m[2] };
-          var r = s.indexOf(SECTION_REASONING_TAG);
-          var a = s.indexOf(SECTION_ANSWER_TAG);
-          if (r !== -1 && a !== -1) {
-            diagTag("reasoning-marker-in-prose", { len: s.length, r, a });
-          }
-          return { reasoning: "", answer: s };
-        }
-        function applyReasoningExportFields(messages, enabled) {
-          var changed = 0;
-          try {
-            if (enabled !== true || !Array.isArray(messages)) return { changed: 0 };
-            for (var i = 0; i < messages.length; i++) {
-              var m = messages[i];
-              if (!m || typeof m !== "object") continue;
-              var text = typeof m.text === "string" ? m.text : "";
-              var reasoning = typeof m.reasoning === "string" ? m.reasoning : "";
-              var captured = typeof m.hiddenReasoning === "string" ? m.hiddenReasoning : "";
-              if (!reasoning) reasoning = captured;
-              if (!reasoning && text && m.role !== "user") {
-                var pair = splitReasoningSections(text);
-                if (pair && pair.reasoning) {
-                  reasoning = pair.reasoning;
-                  text = pair.answer;
-                }
-              }
-              if (!reasoning) continue;
-              if (!captured && text === m.text) continue;
-              var next = {};
-              for (var k in m) {
-                if (Object.prototype.hasOwnProperty.call(m, k)) next[k] = m[k];
-              }
-              next.text = text;
-              next.reasoning = reasoning;
-              if (next.hiddenReasoning) delete next.hiddenReasoning;
-              messages[i] = next;
-              changed++;
-            }
-          } catch (eApply) {
-            return { changed };
-          }
-          return { changed };
-        }
-        var TOOL_RESULTS_OPEN = "[TOOL_RESULTS]";
-        var TOOL_RESULTS_CLOSE = "[/TOOL_RESULTS]";
-        var TOOL_RESULTS_TAIL = "Continue answering based on the tool results above.";
-        function isToolResultsOnlyText(text) {
-          try {
-            var s = typeof text === "string" ? text : String(text == null ? "" : text);
-            var t = s.trim();
-            if (t.indexOf(TOOL_RESULTS_OPEN) !== 0) return false;
-            var close = t.indexOf(TOOL_RESULTS_CLOSE);
-            if (close === -1) return false;
-            var rest = t.slice(close + TOOL_RESULTS_CLOSE.length).trim();
-            if (rest === TOOL_RESULTS_TAIL) rest = "";
-            return rest === "";
-          } catch (e) {
-            return false;
-          }
-        }
-        var TOOL_CALL_TAG_NAMES = [
-          "browser_navigate",
-          "browser_go_back",
-          "browser_go_forward",
-          "browser_refresh",
-          "browser_list_tabs",
-          "browser_select_tab",
-          "browser_close_tab",
-          "browser_snapshot",
-          "browser_click",
-          "browser_hover",
-          "browser_fill",
-          "browser_fill_form",
-          "browser_key",
-          "browser_type",
-          "browser_attach_file",
-          "browser_wait_for",
-          "browser_handle_dialog",
-          "browser_evaluate_script",
-          "memory_save",
-          "memory_update",
-          "memory_delete",
-          "web_search",
-          "web_fetch"
-        ];
-        var TOOL_CALL_TAG_ALT = "(?:" + TOOL_CALL_TAG_NAMES.join("|") + "|shell_\\w+|python_\\w+|skill_\\w+)";
-        var RE_TOOL_CALL_BLOCK = new RegExp(
-          "<(" + TOOL_CALL_TAG_ALT + ")(?:\\s[^>]*)?>[\\s\\S]*?<\\/\\1\\s*>\\s*",
-          "g"
-        );
-        function stripToolCallBlocks(text) {
-          var s = typeof text === "string" ? text : String(text == null ? "" : text);
-          if (s.indexOf("<") === -1) return s;
-          RE_TOOL_CALL_BLOCK.lastIndex = 0;
-          var out = s.replace(RE_TOOL_CALL_BLOCK, "");
-          if (out === s) return s;
-          return out.replace(/\s+$/, "");
-        }
-        function isEmptyExportText(text) {
-          try {
-            return String(text == null ? "" : text).trim() === "";
-          } catch (e) {
-            return false;
-          }
-        }
-        function copyMessageWithText(message, text) {
-          var keep = {};
-          for (var k in message) {
-            if (Object.prototype.hasOwnProperty.call(message, k)) keep[k] = message[k];
-          }
-          keep.text = text;
-          return keep;
-        }
-        function sanitizeEmitMessages(messages) {
-          var out = [];
-          var sanitized = 0;
-          var skipped = [];
-          var dropped = 0;
-          var bdsRemoved = 0;
-          var bdsForms = [];
-          var tcRemoved = 0;
-          var tcForms = [];
-          try {
-            var src = Array.isArray(messages) ? messages : [];
-            for (var i = 0; i < src.length; i++) {
-              var m = stripHiddenFields(src[i]);
-              if (!m || typeof m !== "object") {
-                bdsDiagLine("o40-emit-msg", { i, len: 0, head: bdsDiagSlice("", 0, 40), tail: bdsDiagSlice("", 1, 40), called: 0, removed: 0 });
-                out.push(m);
-                continue;
-              }
-              var raw = typeof m.text === "string" ? m.text : "";
-              if (typeof aiCmDiagOn === "function" && aiCmDiagOn() && m.role === "user" && isToolResultsOnlyText(raw)) {
-                bdsDiagLine("o40-emit-msg", { i, len: raw.length, head: bdsDiagSlice(raw, 0, 40), tail: bdsDiagSlice(raw, 1, 40), called: 0, removed: 0 });
-              }
-              if (m.role === "user" && isToolResultsOnlyText(raw)) {
-                dropped++;
-                continue;
-              }
-              var bare = stripReasoningSections(raw);
-              if (bare !== raw) m = copyMessageWithText(m, bare);
-              var bdsIn = typeof m.text === "string" ? m.text : "";
-              var bds = sanitizeBetterDeepSeekText(bdsIn);
-              bdsDiagLine("o40-emit-msg", { i, len: bdsIn.length, head: bdsDiagSlice(bdsIn, 0, 40), tail: bdsDiagSlice(bdsIn, 1, 40), called: 1, removed: bds.removed });
-              if (bds.removed > 0) {
-                m = copyMessageWithText(m, bds.text);
-                bdsRemoved += bds.removed;
-                for (var bf = 0; bf < bds.forms.length; bf++) bdsForms.push(bds.forms[bf]);
-              }
-              var tc = sanitizeToolContinuationText(typeof m.text === "string" ? m.text : "");
-              if (tc.removed > 0) {
-                m = copyMessageWithText(m, tc.text);
-                tcRemoved += tc.removed;
-                for (var tf = 0; tf < tc.forms.length; tf++) tcForms.push(tc.forms[tf]);
-              }
-              if (m.role !== "user") {
-                var cut = stripToolCallBlocks(typeof m.text === "string" ? m.text : "");
-                if (cut !== m.text) m = copyMessageWithText(m, cut);
-              } else {
-                var text = typeof m.text === "string" ? m.text : "";
-                var reason = injectedUserTextSkipReason(text);
-                if (reason !== null) {
-                  skipped.push(reason);
-                } else {
-                  m = copyMessageWithText(m, sanitizeInjectedUserText(text));
-                  sanitized++;
-                }
-              }
-              if (isEmptyExportText(typeof m.text === "string" ? m.text : "")) {
-                dropped++;
-                continue;
-              }
-              out.push(m);
-            }
-          } catch (e) {
-            return {
-              messages: Array.isArray(messages) ? messages : [],
-              sanitized: 0,
-              skipped: [],
-              dropped: 0,
-              bdsRemoved: 0,
-              bdsForms: [],
-              tcRemoved: 0,
-              tcForms: []
-            };
-          }
-          return {
-            messages: out,
-            sanitized,
-            skipped,
-            dropped,
-            bdsRemoved,
-            bdsForms,
-            tcRemoved,
-            tcForms
-          };
-        }
-        var HIDDEN_REASONING_TAG = SECTION_REASONING_TAG;
-        var HIDDEN_ANSWER_TAG = SECTION_ANSWER_TAG;
-        function hasHiddenFields(message) {
-          try {
-            if (!message || typeof message !== "object") return false;
-            return Object.prototype.hasOwnProperty.call(message, "hiddenReasoning") || Object.prototype.hasOwnProperty.call(message, "hiddenInjection");
-          } catch (e) {
-            return false;
-          }
-        }
-        function hiddenReasoningOf(message) {
-          try {
-            var r = message && typeof message.hiddenReasoning === "string" ? message.hiddenReasoning : "";
-            return r.trim();
-          } catch (e) {
-            return "";
-          }
-        }
-        function withoutHiddenFields(message) {
-          var keep = {};
-          for (var k in message) {
-            if (!Object.prototype.hasOwnProperty.call(message, k)) continue;
-            if (k === "hiddenReasoning" || k === "hiddenInjection") continue;
-            keep[k] = message[k];
-          }
-          return keep;
-        }
-        function stripHiddenFields(message) {
-          if (!message || typeof message !== "object") return message;
-          return hasHiddenFields(message) ? withoutHiddenFields(message) : message;
-        }
-        function hasReasoningInSource(messages) {
-          var src = Array.isArray(messages) ? messages : [];
-          for (var i = 0; i < src.length; i++) {
-            var m = src[i];
-            if (!m || typeof m !== "object") continue;
-            var reasoning = typeof m.reasoning === "string" ? m.reasoning : "";
-            if (reasoning.trim() !== "") return true;
-            var text = typeof m.text === "string" ? m.text : "";
-            if (text.indexOf(SECTION_REASONING_TAG) !== -1) return true;
-          }
-          return false;
-        }
-        function effectiveReasoningToggle(userToggle, sourceHasReasoning, site) {
-          if (userToggle === true) return true;
-          if (site === "qwen" || site === "deepseek") return false;
-          return sourceHasReasoning === true;
-        }
-        function includeHiddenExportBlocks(messages) {
-          var src = Array.isArray(messages) ? messages : [];
-          var out = [];
-          for (var i = 0; i < src.length; i++) {
-            var m = src[i];
-            if (!m || typeof m !== "object" || !hasHiddenFields(m)) {
-              out.push(m);
-              continue;
-            }
-            var keep = withoutHiddenFields(m);
-            var reasoning = hiddenReasoningOf(m);
-            var text = typeof keep.text === "string" ? keep.text : "";
-            if (reasoning && text.indexOf(reasoning) === -1) {
-              keep.text = HIDDEN_REASONING_TAG + "\n" + reasoning + "\n\n" + HIDDEN_ANSWER_TAG + "\n" + text;
-            }
-            out.push(keep);
-          }
-          return out;
-        }
-        function unionTurnsById(existing, incoming) {
-          var seen = {};
-          var out = [];
-          var i, t;
-          for (i = 0; existing && i < existing.length; i++) {
-            t = existing[i];
-            if (!t || t.id == null || seen[t.id]) continue;
-            seen[t.id] = true;
-            out.push(t);
-          }
-          for (i = 0; incoming && i < incoming.length; i++) {
-            t = incoming[i];
-            if (!t || t.id == null || seen[t.id]) continue;
-            seen[t.id] = true;
-            out.push(t);
-          }
-          return out;
-        }
-        var Api = {
-          buildAutoExportFileName,
-          disambiguateFileName,
-          isFileNameTaken,
-          buildExportFileName,
-          buildGsaExportFileName,
-          resolveAutoExportConvId,
-          notCompleteReason,
-          shouldSkipGsaPageGuard,
-          shouldSkipAutoExport,
-          shouldSkipBaseCompleteTrigger,
-          effectiveAutoExportThreshold,
-          pickExportSource,
-          resolveExportSource,
-          // Two-Tier (v89): метка достоверности источника файла — чистая функция наружу
-          // (её зовёт core/export-manager.js:aiCmGetSourceTier).
-          sourceTierOf,
-          markAutoExportFired,
-          getAutoExportFired,
-          resetAutoExportFired,
-          firedSessionKey,
-          isFiredInSession,
-          sessionFiredPatch,
-          extractConvIdFromUrl,
-          normalizeExportMessages,
-          coreText,
-          stripMarkerResidue,
-          dedupeMessages,
-          dedupeIntraMessage,
-          dedupeCrossRawCopies,
-          separateRawBlocks,
-          prepareExportMessages,
-          sanitizeInjectedUserText,
-          injectedUserTextSkipReason,
-          sanitizeEmitMessages,
-          // O-40: инъекции соседнего расширения Better DeepSeek — чистые функции и таблица
-          // измеренных форм наружу (пины D/R нового тест-файла читают формы из таблицы).
-          sanitizeBetterDeepSeekText,
-          betterDeepSeekForms: BDS_INJECTION_FORMS,
-          bdsWrapperFormId: BDS_WRAPPER_ID,
-          // O-42: агентный конверт Better DeepSeek (tool-continuation) — чистая функция и таблица
-          // измеренных дескрипторов конверта наружу (пины D/R нового тест-файла читают таблицу).
-          sanitizeToolContinuationText,
-          toolContinuationForms: TC_ENVELOPE_FORMS,
-          // O-7 (OFF): урезание секций reasoning на выходе экспорта — чистая функция наружу.
-          stripReasoningSections,
-          // O-37 (C): обратное преобразование пары [REASONING]/[ANSWER] в отдельные поля
-          // (reasoning/answer) — чистая функция наружу (переиспользуется точкой сбора экспорта).
-          splitReasoningSections,
-          // O-37 (C): нормализация размышления на выходе точки сбора экспорта (по месту, по флагу
-          // сайта) — чистая функция наружу; на боевом пути её зовёт core/export-manager.js.
-          applyReasoningExportFields,
-          // O-7 (OFF, S3/S4): служебный тул-мусор DeepSeek++ — чистые функции наружу.
-          isToolResultsOnlyText,
-          stripToolCallBlocks,
-          // O-7: hidden-блоки DeepSeek (сырой режим экспорта) — чистые функции наружу.
-          includeHiddenExportBlocks,
-          stripHiddenFields,
-          hiddenReasoningOf,
-          // D-O41: авто-ON тумблера при наличии reasoning в источнике — чистые функции наружу
-          // (пины S/D нового тест-файла; на боевом пути их зовёт core/export-manager.js).
-          hasReasoningInSource,
-          effectiveReasoningToggle,
-          unionTurnsById,
-          latchKey
-        };
-        if (typeof module !== "undefined" && module.exports) module.exports = Api;
-        if (typeof window !== "undefined") window.AiCmExportEmitPipeline = Api;
-      })();
       var currentAdapter = null;
       var observer = null;
       var isInitialized = false;
@@ -14591,8 +13282,8 @@ if (typeof module !== 'undefined' && module.exports) {
         });
       }
       (function() {
-        var Api = {};
-        Object.defineProperty(Api, "currentAdapter", {
+        const Api3 = {};
+        Object.defineProperty(Api3, "currentAdapter", {
           enumerable: true,
           get: function() {
             return currentAdapter;
@@ -14601,7 +13292,7 @@ if (typeof module !== 'undefined' && module.exports) {
             currentAdapter = value;
           }
         });
-        Object.defineProperty(Api, "observer", {
+        Object.defineProperty(Api3, "observer", {
           enumerable: true,
           get: function() {
             return observer;
@@ -14610,7 +13301,7 @@ if (typeof module !== 'undefined' && module.exports) {
             observer = value;
           }
         });
-        Object.defineProperty(Api, "isInitialized", {
+        Object.defineProperty(Api3, "isInitialized", {
           enumerable: true,
           get: function() {
             return isInitialized;
@@ -14619,7 +13310,7 @@ if (typeof module !== 'undefined' && module.exports) {
             isInitialized = value;
           }
         });
-        Object.defineProperty(Api, "lastPercentage", {
+        Object.defineProperty(Api3, "lastPercentage", {
           enumerable: true,
           get: function() {
             return lastPercentage;
@@ -14628,7 +13319,7 @@ if (typeof module !== 'undefined' && module.exports) {
             lastPercentage = value;
           }
         });
-        Object.defineProperty(Api, "updateTimer", {
+        Object.defineProperty(Api3, "updateTimer", {
           enumerable: true,
           get: function() {
             return updateTimer;
@@ -14637,7 +13328,7 @@ if (typeof module !== 'undefined' && module.exports) {
             updateTimer = value;
           }
         });
-        Object.defineProperty(Api, "widgetElement", {
+        Object.defineProperty(Api3, "widgetElement", {
           enumerable: true,
           get: function() {
             return widgetElement;
@@ -14646,7 +13337,7 @@ if (typeof module !== 'undefined' && module.exports) {
             widgetElement = value;
           }
         });
-        Object.defineProperty(Api, "lastWidgetData", {
+        Object.defineProperty(Api3, "lastWidgetData", {
           enumerable: true,
           get: function() {
             return lastWidgetData;
@@ -14655,7 +13346,7 @@ if (typeof module !== 'undefined' && module.exports) {
             lastWidgetData = value;
           }
         });
-        Object.defineProperty(Api, "badgeSuppressed", {
+        Object.defineProperty(Api3, "badgeSuppressed", {
           enumerable: true,
           get: function() {
             return badgeSuppressed;
@@ -14664,7 +13355,7 @@ if (typeof module !== 'undefined' && module.exports) {
             badgeSuppressed = value;
           }
         });
-        Object.defineProperty(Api, "maxTokenCount", {
+        Object.defineProperty(Api3, "maxTokenCount", {
           enumerable: true,
           get: function() {
             return maxTokenCount;
@@ -14673,7 +13364,7 @@ if (typeof module !== 'undefined' && module.exports) {
             maxTokenCount = value;
           }
         });
-        Object.defineProperty(Api, "restoredTapeLoaded", {
+        Object.defineProperty(Api3, "restoredTapeLoaded", {
           enumerable: true,
           get: function() {
             return restoredTapeLoaded;
@@ -14682,7 +13373,7 @@ if (typeof module !== 'undefined' && module.exports) {
             restoredTapeLoaded = value;
           }
         });
-        Object.defineProperty(Api, "restoreDone", {
+        Object.defineProperty(Api3, "restoreDone", {
           enumerable: true,
           get: function() {
             return restoreDone;
@@ -14691,7 +13382,7 @@ if (typeof module !== 'undefined' && module.exports) {
             restoreDone = value;
           }
         });
-        Object.defineProperty(Api, "cacheRefreshPlanned", {
+        Object.defineProperty(Api3, "cacheRefreshPlanned", {
           enumerable: true,
           get: function() {
             return cacheRefreshPlanned;
@@ -14700,7 +13391,7 @@ if (typeof module !== 'undefined' && module.exports) {
             cacheRefreshPlanned = value;
           }
         });
-        Object.defineProperty(Api, "tapeRestoreSeen", {
+        Object.defineProperty(Api3, "tapeRestoreSeen", {
           enumerable: true,
           get: function() {
             return tapeRestoreSeen;
@@ -14709,7 +13400,7 @@ if (typeof module !== 'undefined' && module.exports) {
             tapeRestoreSeen = value;
           }
         });
-        Object.defineProperty(Api, "aiCmTapeAccountIdx", {
+        Object.defineProperty(Api3, "aiCmTapeAccountIdx", {
           enumerable: true,
           get: function() {
             return aiCmTapeAccountIdx;
@@ -14718,7 +13409,7 @@ if (typeof module !== 'undefined' && module.exports) {
             aiCmTapeAccountIdx = value;
           }
         });
-        Object.defineProperty(Api, "aiCmRestoredDispatched", {
+        Object.defineProperty(Api3, "aiCmRestoredDispatched", {
           enumerable: true,
           get: function() {
             return aiCmRestoredDispatched;
@@ -14727,7 +13418,7 @@ if (typeof module !== 'undefined' && module.exports) {
             aiCmRestoredDispatched = value;
           }
         });
-        Object.defineProperty(Api, "baseText", {
+        Object.defineProperty(Api3, "baseText", {
           enumerable: true,
           get: function() {
             return baseText;
@@ -14736,7 +13427,7 @@ if (typeof module !== 'undefined' && module.exports) {
             baseText = value;
           }
         });
-        Object.defineProperty(Api, "baseCount", {
+        Object.defineProperty(Api3, "baseCount", {
           enumerable: true,
           get: function() {
             return baseCount;
@@ -14745,7 +13436,7 @@ if (typeof module !== 'undefined' && module.exports) {
             baseCount = value;
           }
         });
-        Object.defineProperty(Api, "baseSeen", {
+        Object.defineProperty(Api3, "baseSeen", {
           enumerable: true,
           get: function() {
             return baseSeen;
@@ -14754,7 +13445,7 @@ if (typeof module !== 'undefined' && module.exports) {
             baseSeen = value;
           }
         });
-        Object.defineProperty(Api, "baseComplete", {
+        Object.defineProperty(Api3, "baseComplete", {
           enumerable: true,
           get: function() {
             return baseComplete;
@@ -14763,7 +13454,7 @@ if (typeof module !== 'undefined' && module.exports) {
             baseComplete = value;
           }
         });
-        Object.defineProperty(Api, "lastBounded", {
+        Object.defineProperty(Api3, "lastBounded", {
           enumerable: true,
           get: function() {
             return lastBounded;
@@ -14772,7 +13463,7 @@ if (typeof module !== 'undefined' && module.exports) {
             lastBounded = value;
           }
         });
-        Object.defineProperty(Api, "lastTailSig", {
+        Object.defineProperty(Api3, "lastTailSig", {
           enumerable: true,
           get: function() {
             return lastTailSig;
@@ -14781,7 +13472,7 @@ if (typeof module !== 'undefined' && module.exports) {
             lastTailSig = value;
           }
         });
-        Object.defineProperty(Api, "lastBaseSig", {
+        Object.defineProperty(Api3, "lastBaseSig", {
           enumerable: true,
           get: function() {
             return lastBaseSig;
@@ -14790,7 +13481,7 @@ if (typeof module !== 'undefined' && module.exports) {
             lastBaseSig = value;
           }
         });
-        Object.defineProperty(Api, "lastEmitSig", {
+        Object.defineProperty(Api3, "lastEmitSig", {
           enumerable: true,
           get: function() {
             return lastEmitSig;
@@ -14799,7 +13490,7 @@ if (typeof module !== 'undefined' && module.exports) {
             lastEmitSig = value;
           }
         });
-        Object.defineProperty(Api, "lastDrawSig", {
+        Object.defineProperty(Api3, "lastDrawSig", {
           enumerable: true,
           get: function() {
             return lastDrawSig;
@@ -14808,7 +13499,7 @@ if (typeof module !== 'undefined' && module.exports) {
             lastDrawSig = value;
           }
         });
-        Object.defineProperty(Api, "lastHybridTailSig", {
+        Object.defineProperty(Api3, "lastHybridTailSig", {
           enumerable: true,
           get: function() {
             return lastHybridTailSig;
@@ -14817,7 +13508,7 @@ if (typeof module !== 'undefined' && module.exports) {
             lastHybridTailSig = value;
           }
         });
-        Object.defineProperty(Api, "lastMetricSig", {
+        Object.defineProperty(Api3, "lastMetricSig", {
           enumerable: true,
           get: function() {
             return lastMetricSig;
@@ -14826,7 +13517,7 @@ if (typeof module !== 'undefined' && module.exports) {
             lastMetricSig = value;
           }
         });
-        Object.defineProperty(Api, "notCompleteLogged", {
+        Object.defineProperty(Api3, "notCompleteLogged", {
           enumerable: true,
           get: function() {
             return notCompleteLogged;
@@ -14835,7 +13526,7 @@ if (typeof module !== 'undefined' && module.exports) {
             notCompleteLogged = value;
           }
         });
-        Object.defineProperty(Api, "aiCmLoaderFreeze", {
+        Object.defineProperty(Api3, "aiCmLoaderFreeze", {
           enumerable: true,
           get: function() {
             return aiCmLoaderFreeze;
@@ -14844,7 +13535,7 @@ if (typeof module !== 'undefined' && module.exports) {
             aiCmLoaderFreeze = value;
           }
         });
-        Object.defineProperty(Api, "baseIdSet", {
+        Object.defineProperty(Api3, "baseIdSet", {
           enumerable: true,
           get: function() {
             return baseIdSet;
@@ -14853,7 +13544,7 @@ if (typeof module !== 'undefined' && module.exports) {
             baseIdSet = value;
           }
         });
-        Object.defineProperty(Api, "lastBaseIds", {
+        Object.defineProperty(Api3, "lastBaseIds", {
           enumerable: true,
           get: function() {
             return lastBaseIds;
@@ -14862,7 +13553,7 @@ if (typeof module !== 'undefined' && module.exports) {
             lastBaseIds = value;
           }
         });
-        Object.defineProperty(Api, "lastBaseTexts", {
+        Object.defineProperty(Api3, "lastBaseTexts", {
           enumerable: true,
           get: function() {
             return lastBaseTexts;
@@ -14871,7 +13562,7 @@ if (typeof module !== 'undefined' && module.exports) {
             lastBaseTexts = value;
           }
         });
-        Object.defineProperty(Api, "baseSkelSet", {
+        Object.defineProperty(Api3, "baseSkelSet", {
           enumerable: true,
           get: function() {
             return baseSkelSet;
@@ -14880,7 +13571,7 @@ if (typeof module !== 'undefined' && module.exports) {
             baseSkelSet = value;
           }
         });
-        Object.defineProperty(Api, "baseAnchors", {
+        Object.defineProperty(Api3, "baseAnchors", {
           enumerable: true,
           get: function() {
             return baseAnchors;
@@ -14889,7 +13580,7 @@ if (typeof module !== 'undefined' && module.exports) {
             baseAnchors = value;
           }
         });
-        Object.defineProperty(Api, "ANCHOR_MIN", {
+        Object.defineProperty(Api3, "ANCHOR_MIN", {
           enumerable: true,
           get: function() {
             return ANCHOR_MIN;
@@ -14898,7 +13589,7 @@ if (typeof module !== 'undefined' && module.exports) {
             ANCHOR_MIN = value;
           }
         });
-        Object.defineProperty(Api, "stale", {
+        Object.defineProperty(Api3, "stale", {
           enumerable: true,
           get: function() {
             return stale;
@@ -14907,7 +13598,7 @@ if (typeof module !== 'undefined' && module.exports) {
             stale = value;
           }
         });
-        Object.defineProperty(Api, "staleTimer", {
+        Object.defineProperty(Api3, "staleTimer", {
           enumerable: true,
           get: function() {
             return staleTimer;
@@ -14916,7 +13607,7 @@ if (typeof module !== 'undefined' && module.exports) {
             staleTimer = value;
           }
         });
-        Object.defineProperty(Api, "lastDetailMessages", {
+        Object.defineProperty(Api3, "lastDetailMessages", {
           enumerable: true,
           get: function() {
             return lastDetailMessages;
@@ -14925,7 +13616,7 @@ if (typeof module !== 'undefined' && module.exports) {
             lastDetailMessages = value;
           }
         });
-        Object.defineProperty(Api, "lastHistoryWroteKey", {
+        Object.defineProperty(Api3, "lastHistoryWroteKey", {
           enumerable: true,
           get: function() {
             return lastHistoryWroteKey;
@@ -14934,7 +13625,7 @@ if (typeof module !== 'undefined' && module.exports) {
             lastHistoryWroteKey = value;
           }
         });
-        Object.defineProperty(Api, "lastThreadId", {
+        Object.defineProperty(Api3, "lastThreadId", {
           enumerable: true,
           get: function() {
             return lastThreadId;
@@ -14943,7 +13634,7 @@ if (typeof module !== 'undefined' && module.exports) {
             lastThreadId = value;
           }
         });
-        Object.defineProperty(Api, "detectedModelSlug", {
+        Object.defineProperty(Api3, "detectedModelSlug", {
           enumerable: true,
           get: function() {
             return detectedModelSlug;
@@ -14952,7 +13643,7 @@ if (typeof module !== 'undefined' && module.exports) {
             detectedModelSlug = value;
           }
         });
-        Object.defineProperty(Api, "lastResolvedModelId", {
+        Object.defineProperty(Api3, "lastResolvedModelId", {
           enumerable: true,
           get: function() {
             return lastResolvedModelId;
@@ -14961,7 +13652,7 @@ if (typeof module !== 'undefined' && module.exports) {
             lastResolvedModelId = value;
           }
         });
-        Object.defineProperty(Api, "lastSnapshotModelName", {
+        Object.defineProperty(Api3, "lastSnapshotModelName", {
           enumerable: true,
           get: function() {
             return lastSnapshotModelName;
@@ -14970,7 +13661,7 @@ if (typeof module !== 'undefined' && module.exports) {
             lastSnapshotModelName = value;
           }
         });
-        Object.defineProperty(Api, "netAttachTokens", {
+        Object.defineProperty(Api3, "netAttachTokens", {
           enumerable: true,
           get: function() {
             return netAttachTokens;
@@ -14979,7 +13670,7 @@ if (typeof module !== 'undefined' && module.exports) {
             netAttachTokens = value;
           }
         });
-        Object.defineProperty(Api, "netAttachBreak", {
+        Object.defineProperty(Api3, "netAttachBreak", {
           enumerable: true,
           get: function() {
             return netAttachBreak;
@@ -14988,7 +13679,7 @@ if (typeof module !== 'undefined' && module.exports) {
             netAttachBreak = value;
           }
         });
-        Object.defineProperty(Api, "netServerTokens", {
+        Object.defineProperty(Api3, "netServerTokens", {
           enumerable: true,
           get: function() {
             return netServerTokens;
@@ -14997,7 +13688,7 @@ if (typeof module !== 'undefined' && module.exports) {
             netServerTokens = value;
           }
         });
-        Object.defineProperty(Api, "netEffectiveLen", {
+        Object.defineProperty(Api3, "netEffectiveLen", {
           enumerable: true,
           get: function() {
             return netEffectiveLen;
@@ -15006,7 +13697,7 @@ if (typeof module !== 'undefined' && module.exports) {
             netEffectiveLen = value;
           }
         });
-        Object.defineProperty(Api, "exactCountEnabled", {
+        Object.defineProperty(Api3, "exactCountEnabled", {
           enumerable: true,
           get: function() {
             return exactCountEnabled;
@@ -15015,7 +13706,7 @@ if (typeof module !== 'undefined' && module.exports) {
             exactCountEnabled = value;
           }
         });
-        Object.defineProperty(Api, "geminiApiKey", {
+        Object.defineProperty(Api3, "geminiApiKey", {
           enumerable: true,
           get: function() {
             return geminiApiKey;
@@ -15024,7 +13715,7 @@ if (typeof module !== 'undefined' && module.exports) {
             geminiApiKey = value;
           }
         });
-        Object.defineProperty(Api, "lastCountTokensText", {
+        Object.defineProperty(Api3, "lastCountTokensText", {
           enumerable: true,
           get: function() {
             return lastCountTokensText;
@@ -15033,7 +13724,7 @@ if (typeof module !== 'undefined' && module.exports) {
             lastCountTokensText = value;
           }
         });
-        Object.defineProperty(Api, "lastCountTokensCache", {
+        Object.defineProperty(Api3, "lastCountTokensCache", {
           enumerable: true,
           get: function() {
             return lastCountTokensCache;
@@ -15042,7 +13733,7 @@ if (typeof module !== 'undefined' && module.exports) {
             lastCountTokensCache = value;
           }
         });
-        Object.defineProperty(Api, "lastCountTokensConvId", {
+        Object.defineProperty(Api3, "lastCountTokensConvId", {
           enumerable: true,
           get: function() {
             return lastCountTokensConvId;
@@ -15051,7 +13742,7 @@ if (typeof module !== 'undefined' && module.exports) {
             lastCountTokensConvId = value;
           }
         });
-        Object.defineProperty(Api, "lastCountTokensErrorText", {
+        Object.defineProperty(Api3, "lastCountTokensErrorText", {
           enumerable: true,
           get: function() {
             return lastCountTokensErrorText;
@@ -15060,7 +13751,7 @@ if (typeof module !== 'undefined' && module.exports) {
             lastCountTokensErrorText = value;
           }
         });
-        Object.defineProperty(Api, "countTokensTimer", {
+        Object.defineProperty(Api3, "countTokensTimer", {
           enumerable: true,
           get: function() {
             return countTokensTimer;
@@ -15069,7 +13760,7 @@ if (typeof module !== 'undefined' && module.exports) {
             countTokensTimer = value;
           }
         });
-        Object.defineProperty(Api, "countTokensPending", {
+        Object.defineProperty(Api3, "countTokensPending", {
           enumerable: true,
           get: function() {
             return countTokensPending;
@@ -15078,7 +13769,7 @@ if (typeof module !== 'undefined' && module.exports) {
             countTokensPending = value;
           }
         });
-        Object.defineProperty(Api, "safePct", {
+        Object.defineProperty(Api3, "safePct", {
           enumerable: true,
           get: function() {
             return safePct;
@@ -15087,7 +13778,7 @@ if (typeof module !== 'undefined' && module.exports) {
             safePct = value;
           }
         });
-        Object.defineProperty(Api, "popupRawModel", {
+        Object.defineProperty(Api3, "popupRawModel", {
           enumerable: true,
           get: function() {
             return popupRawModel;
@@ -15096,7 +13787,7 @@ if (typeof module !== 'undefined' && module.exports) {
             popupRawModel = value;
           }
         });
-        Object.defineProperty(Api, "popupRawPct", {
+        Object.defineProperty(Api3, "popupRawPct", {
           enumerable: true,
           get: function() {
             return popupRawPct;
@@ -15105,7 +13796,7 @@ if (typeof module !== 'undefined' && module.exports) {
             popupRawPct = value;
           }
         });
-        Object.defineProperty(Api, "popupModelId", {
+        Object.defineProperty(Api3, "popupModelId", {
           enumerable: true,
           get: function() {
             return popupModelId;
@@ -15114,7 +13805,7 @@ if (typeof module !== 'undefined' && module.exports) {
             popupModelId = value;
           }
         });
-        Object.defineProperty(Api, "popupLimitPct", {
+        Object.defineProperty(Api3, "popupLimitPct", {
           enumerable: true,
           get: function() {
             return popupLimitPct;
@@ -15123,7 +13814,7 @@ if (typeof module !== 'undefined' && module.exports) {
             popupLimitPct = value;
           }
         });
-        Object.defineProperty(Api, "aiCmLastDomEmitSig", {
+        Object.defineProperty(Api3, "aiCmLastDomEmitSig", {
           enumerable: true,
           get: function() {
             return aiCmLastDomEmitSig;
@@ -15132,7 +13823,7 @@ if (typeof module !== 'undefined' && module.exports) {
             aiCmLastDomEmitSig = value;
           }
         });
-        Object.defineProperty(Api, "aiCmLastDomEmitConvId", {
+        Object.defineProperty(Api3, "aiCmLastDomEmitConvId", {
           enumerable: true,
           get: function() {
             return aiCmLastDomEmitConvId;
@@ -15141,7 +13832,7 @@ if (typeof module !== 'undefined' && module.exports) {
             aiCmLastDomEmitConvId = value;
           }
         });
-        Object.defineProperty(Api, "lastEmitConvId", {
+        Object.defineProperty(Api3, "lastEmitConvId", {
           enumerable: true,
           get: function() {
             return lastEmitConvId;
@@ -15150,7 +13841,7 @@ if (typeof module !== 'undefined' && module.exports) {
             lastEmitConvId = value;
           }
         });
-        Object.defineProperty(Api, "lastSnapConvId", {
+        Object.defineProperty(Api3, "lastSnapConvId", {
           enumerable: true,
           get: function() {
             return lastSnapConvId;
@@ -15159,7 +13850,7 @@ if (typeof module !== 'undefined' && module.exports) {
             lastSnapConvId = value;
           }
         });
-        Object.defineProperty(Api, "aiCmConvSourceByConv", {
+        Object.defineProperty(Api3, "aiCmConvSourceByConv", {
           enumerable: true,
           get: function() {
             return aiCmConvSourceByConv;
@@ -15168,7 +13859,7 @@ if (typeof module !== 'undefined' && module.exports) {
             aiCmConvSourceByConv = value;
           }
         });
-        Object.defineProperty(Api, "aiCmArchiveLoadStarted", {
+        Object.defineProperty(Api3, "aiCmArchiveLoadStarted", {
           enumerable: true,
           get: function() {
             return aiCmArchiveLoadStarted;
@@ -15177,7 +13868,7 @@ if (typeof module !== 'undefined' && module.exports) {
             aiCmArchiveLoadStarted = value;
           }
         });
-        Object.defineProperty(Api, "aiCmArchiveRestoredDispatched", {
+        Object.defineProperty(Api3, "aiCmArchiveRestoredDispatched", {
           enumerable: true,
           get: function() {
             return aiCmArchiveRestoredDispatched;
@@ -15186,7 +13877,7 @@ if (typeof module !== 'undefined' && module.exports) {
             aiCmArchiveRestoredDispatched = value;
           }
         });
-        Object.defineProperty(Api, "aiCmArchiveCountByConv", {
+        Object.defineProperty(Api3, "aiCmArchiveCountByConv", {
           enumerable: true,
           get: function() {
             return aiCmArchiveCountByConv;
@@ -15195,7 +13886,7 @@ if (typeof module !== 'undefined' && module.exports) {
             aiCmArchiveCountByConv = value;
           }
         });
-        Object.defineProperty(Api, "aiCmSourceLabelNow", {
+        Object.defineProperty(Api3, "aiCmSourceLabelNow", {
           enumerable: true,
           get: function() {
             return aiCmSourceLabelNow;
@@ -15204,7 +13895,7 @@ if (typeof module !== 'undefined' && module.exports) {
             aiCmSourceLabelNow = value;
           }
         });
-        Object.defineProperty(Api, "autoExportSettings", {
+        Object.defineProperty(Api3, "autoExportSettings", {
           enumerable: true,
           get: function() {
             return autoExportSettings;
@@ -15213,7 +13904,7 @@ if (typeof module !== 'undefined' && module.exports) {
             autoExportSettings = value;
           }
         });
-        Object.defineProperty(Api, "aiCmAutoExportFlagMissingLogged", {
+        Object.defineProperty(Api3, "aiCmAutoExportFlagMissingLogged", {
           enumerable: true,
           get: function() {
             return aiCmAutoExportFlagMissingLogged;
@@ -15222,7 +13913,7 @@ if (typeof module !== 'undefined' && module.exports) {
             aiCmAutoExportFlagMissingLogged = value;
           }
         });
-        Object.defineProperty(Api, "autoExportFired", {
+        Object.defineProperty(Api3, "autoExportFired", {
           enumerable: true,
           get: function() {
             return autoExportFired;
@@ -15231,7 +13922,7 @@ if (typeof module !== 'undefined' && module.exports) {
             autoExportFired = value;
           }
         });
-        Object.defineProperty(Api, "aiCmAutoExportFiredOnce", {
+        Object.defineProperty(Api3, "aiCmAutoExportFiredOnce", {
           enumerable: true,
           get: function() {
             return aiCmAutoExportFiredOnce;
@@ -15240,7 +13931,7 @@ if (typeof module !== 'undefined' && module.exports) {
             aiCmAutoExportFiredOnce = value;
           }
         });
-        Object.defineProperty(Api, "aiCmAutoExportLastLogState", {
+        Object.defineProperty(Api3, "aiCmAutoExportLastLogState", {
           enumerable: true,
           get: function() {
             return aiCmAutoExportLastLogState;
@@ -15249,7 +13940,7 @@ if (typeof module !== 'undefined' && module.exports) {
             aiCmAutoExportLastLogState = value;
           }
         });
-        Object.defineProperty(Api, "autoExportPctBySite", {
+        Object.defineProperty(Api3, "autoExportPctBySite", {
           enumerable: true,
           get: function() {
             return autoExportPctBySite;
@@ -15258,7 +13949,7 @@ if (typeof module !== 'undefined' && module.exports) {
             autoExportPctBySite = value;
           }
         });
-        Object.defineProperty(Api, "aiCmGsaNetworkCompleteLatch", {
+        Object.defineProperty(Api3, "aiCmGsaNetworkCompleteLatch", {
           enumerable: true,
           get: function() {
             return aiCmGsaNetworkCompleteLatch;
@@ -15267,7 +13958,7 @@ if (typeof module !== 'undefined' && module.exports) {
             aiCmGsaNetworkCompleteLatch = value;
           }
         });
-        Object.defineProperty(Api, "aiCmGsaNetworkCompleteThreadId", {
+        Object.defineProperty(Api3, "aiCmGsaNetworkCompleteThreadId", {
           enumerable: true,
           get: function() {
             return aiCmGsaNetworkCompleteThreadId;
@@ -15276,7 +13967,7 @@ if (typeof module !== 'undefined' && module.exports) {
             aiCmGsaNetworkCompleteThreadId = value;
           }
         });
-        Object.defineProperty(Api, "autoExportLastConvId", {
+        Object.defineProperty(Api3, "autoExportLastConvId", {
           enumerable: true,
           get: function() {
             return autoExportLastConvId;
@@ -15285,7 +13976,7 @@ if (typeof module !== 'undefined' && module.exports) {
             autoExportLastConvId = value;
           }
         });
-        Object.defineProperty(Api, "aiCmLoaderRunningByConv", {
+        Object.defineProperty(Api3, "aiCmLoaderRunningByConv", {
           enumerable: true,
           get: function() {
             return aiCmLoaderRunningByConv;
@@ -15294,7 +13985,7 @@ if (typeof module !== 'undefined' && module.exports) {
             aiCmLoaderRunningByConv = value;
           }
         });
-        Object.defineProperty(Api, "autoExportLastPct", {
+        Object.defineProperty(Api3, "autoExportLastPct", {
           enumerable: true,
           get: function() {
             return autoExportLastPct;
@@ -15303,7 +13994,7 @@ if (typeof module !== 'undefined' && module.exports) {
             autoExportLastPct = value;
           }
         });
-        Object.defineProperty(Api, "aiCmPendingHistWrite", {
+        Object.defineProperty(Api3, "aiCmPendingHistWrite", {
           enumerable: true,
           get: function() {
             return aiCmPendingHistWrite;
@@ -15312,7 +14003,7 @@ if (typeof module !== 'undefined' && module.exports) {
             aiCmPendingHistWrite = value;
           }
         });
-        Object.defineProperty(Api, "aiCmCursorLiveByConv", {
+        Object.defineProperty(Api3, "aiCmCursorLiveByConv", {
           enumerable: true,
           get: function() {
             return aiCmCursorLiveByConv;
@@ -15321,7 +14012,7 @@ if (typeof module !== 'undefined' && module.exports) {
             aiCmCursorLiveByConv = value;
           }
         });
-        Object.defineProperty(Api, "aiCmBaseConfirmedByConv", {
+        Object.defineProperty(Api3, "aiCmBaseConfirmedByConv", {
           enumerable: true,
           get: function() {
             return aiCmBaseConfirmedByConv;
@@ -15330,7 +14021,7 @@ if (typeof module !== 'undefined' && module.exports) {
             aiCmBaseConfirmedByConv = value;
           }
         });
-        Object.defineProperty(Api, "aiCmLowConfidenceByConv", {
+        Object.defineProperty(Api3, "aiCmLowConfidenceByConv", {
           enumerable: true,
           get: function() {
             return aiCmLowConfidenceByConv;
@@ -15339,7 +14030,7 @@ if (typeof module !== 'undefined' && module.exports) {
             aiCmLowConfidenceByConv = value;
           }
         });
-        Object.defineProperty(Api, "aiCmPartialSoftByConv", {
+        Object.defineProperty(Api3, "aiCmPartialSoftByConv", {
           enumerable: true,
           get: function() {
             return aiCmPartialSoftByConv;
@@ -15348,7 +14039,7 @@ if (typeof module !== 'undefined' && module.exports) {
             aiCmPartialSoftByConv = value;
           }
         });
-        Object.defineProperty(Api, "aiCmLateCheckByConv", {
+        Object.defineProperty(Api3, "aiCmLateCheckByConv", {
           enumerable: true,
           get: function() {
             return aiCmLateCheckByConv;
@@ -15357,7 +14048,7 @@ if (typeof module !== 'undefined' && module.exports) {
             aiCmLateCheckByConv = value;
           }
         });
-        Object.defineProperty(Api, "trimProbe", {
+        Object.defineProperty(Api3, "trimProbe", {
           enumerable: true,
           get: function() {
             return trimProbe;
@@ -15366,7 +14057,7 @@ if (typeof module !== 'undefined' && module.exports) {
             trimProbe = value;
           }
         });
-        Object.defineProperty(Api, "preTrimExportFired", {
+        Object.defineProperty(Api3, "preTrimExportFired", {
           enumerable: true,
           get: function() {
             return preTrimExportFired;
@@ -15375,7 +14066,7 @@ if (typeof module !== 'undefined' && module.exports) {
             preTrimExportFired = value;
           }
         });
-        Object.defineProperty(Api, "trimRetryByConv", {
+        Object.defineProperty(Api3, "trimRetryByConv", {
           enumerable: true,
           get: function() {
             return trimRetryByConv;
@@ -15384,7 +14075,7 @@ if (typeof module !== 'undefined' && module.exports) {
             trimRetryByConv = value;
           }
         });
-        Object.defineProperty(Api, "TRIM_HEAD_IDS_N", {
+        Object.defineProperty(Api3, "TRIM_HEAD_IDS_N", {
           enumerable: true,
           get: function() {
             return TRIM_HEAD_IDS_N;
@@ -15393,31 +14084,31 @@ if (typeof module !== 'undefined' && module.exports) {
             TRIM_HEAD_IDS_N = value;
           }
         });
-        Object.defineProperty(Api, "aiCmSwAsk", {
+        Object.defineProperty(Api3, "aiCmSwAsk", {
           enumerable: true,
           get: function() {
             return aiCmSwAsk;
           }
         });
-        Object.defineProperty(Api, "aiCmLatchGetAll", {
+        Object.defineProperty(Api3, "aiCmLatchGetAll", {
           enumerable: true,
           get: function() {
             return aiCmLatchGetAll;
           }
         });
-        Object.defineProperty(Api, "aiCmLatchSet", {
+        Object.defineProperty(Api3, "aiCmLatchSet", {
           enumerable: true,
           get: function() {
             return aiCmLatchSet;
           }
         });
-        Object.defineProperty(Api, "aiCmLatchRemove", {
+        Object.defineProperty(Api3, "aiCmLatchRemove", {
           enumerable: true,
           get: function() {
             return aiCmLatchRemove;
           }
         });
-        Object.defineProperty(Api, "aiCmNetRawCount", {
+        Object.defineProperty(Api3, "aiCmNetRawCount", {
           enumerable: true,
           get: function() {
             return aiCmNetRawCount;
@@ -15426,7 +14117,7 @@ if (typeof module !== 'undefined' && module.exports) {
             aiCmNetRawCount = value;
           }
         });
-        Object.defineProperty(Api, "aiCmNetRawCountUsed", {
+        Object.defineProperty(Api3, "aiCmNetRawCountUsed", {
           enumerable: true,
           get: function() {
             return aiCmNetRawCountUsed;
@@ -15435,8 +14126,8 @@ if (typeof module !== 'undefined' && module.exports) {
             aiCmNetRawCountUsed = value;
           }
         });
-        if (typeof module !== "undefined" && module.exports) module.exports = Api;
-        if (typeof window !== "undefined") window.AiCmState = Api;
+        if (typeof module !== "undefined" && module.exports) module.exports = Api3;
+        if (typeof window !== "undefined") window.AiCmState = Api3;
       })();
       function safePctKey() {
         return "ai_cm_safe_pct_" + getServiceKey();
@@ -15496,7 +14187,7 @@ if (typeof module !== 'undefined' && module.exports) {
       }
       function updatePanel() {
         if (!widgetElement) return;
-        const i18n = typeof aiCmI18nMessage === "function" ? aiCmI18nMessage : function(key, fallback) {
+        const i18n = typeof aiCmI18nMessage2 === "function" ? aiCmI18nMessage2 : function(key, fallback) {
           return fallback;
         };
         const status = widgetElement.querySelector(".ai-cm-limit-text");
@@ -15702,7 +14393,7 @@ if (typeof module !== 'undefined' && module.exports) {
         autoExportLastPct = -1;
         try {
           var cidD14 = getCurrentConvId() || "";
-          var P14 = typeof window !== "undefined" && window.AiCmExportEmitPipeline ? window.AiCmExportEmitPipeline : null;
+          var P14 = typeof export_emit_pipeline_exports !== "undefined" && export_emit_pipeline_exports ? export_emit_pipeline_exports : typeof window !== "undefined" && window.AiCmExportEmitPipeline ? window.AiCmExportEmitPipeline : null;
           var siteD14 = currentAdapter && currentAdapter.siteName || "";
           if (siteD14 === "google_search") {
             var logCidD14 = cidD14 || (typeof aiCmDomThreadId === "function" ? aiCmDomThreadId() || "" : "");
@@ -15712,14 +14403,19 @@ if (typeof module !== 'undefined' && module.exports) {
               debugLog("log", "[AI CM][auto-export] site=google_search latch kept reason=spa-entry convId=" + (cidD14 || "(threadId)"));
             }
           } else if (P14 && typeof P14.resetAutoExportFired === "function") {
-            P14.resetAutoExportFired(autoExportFired, siteD14, cidD14);
-            try {
-              if (P14.firedSessionKey) {
-                aiCmLatchRemove(siteD14, cidD14);
-                var pkD14 = P14.firedSessionKey(siteD14, cidD14);
-                if (pkD14 && typeof sessionFiredCache === "object" && sessionFiredCache) delete sessionFiredCache[pkD14];
+            var alreadyExportedD14 = typeof aiCmSiteConvFired === "function" ? aiCmSiteConvFired() : 0;
+            if (alreadyExportedD14) {
+              debugLog("log", "[AI CM][auto-export] latch kept reason=already-exported convId=" + (cidD14 || "(threadId)"));
+            } else {
+              P14.resetAutoExportFired(autoExportFired, siteD14, cidD14);
+              try {
+                if (P14.firedSessionKey) {
+                  aiCmLatchRemove(siteD14, cidD14);
+                  var pkD14 = P14.firedSessionKey(siteD14, cidD14);
+                  if (pkD14 && typeof sessionFiredCache === "object" && sessionFiredCache) delete sessionFiredCache[pkD14];
+                }
+              } catch (eO3D14) {
               }
-            } catch (eO3D14) {
             }
           } else if (cidD14) {
             delete autoExportFired[cidD14];
@@ -15752,7 +14448,7 @@ if (typeof module !== 'undefined' && module.exports) {
           } catch (eQbReset) {
           }
           if (tt) {
-            const i18n = typeof aiCmI18nMessage === "function" ? aiCmI18nMessage : function(key, fallback) {
+            const i18n = typeof aiCmI18nMessage2 === "function" ? aiCmI18nMessage2 : function(key, fallback) {
               return fallback;
             };
             tt.textContent = i18n("content_widget_loading", "\u0417\u0430\u0433\u0440\u0443\u0437\u043A\u0430 \u043A\u043E\u043D\u0442\u0435\u043A\u0441\u0442\u0430...");
@@ -15939,10 +14635,7 @@ if (typeof module !== 'undefined' && module.exports) {
         if (typeof document !== "undefined" && document && typeof document.querySelectorAll === "function") {
           const controls = document.querySelectorAll(AI_CM_BOTTOM_CONTROL_SELECTOR);
           for (let i = 0; i < controls.length; i++) {
-            const el = (
-              /** @type {HTMLElement} */
-              controls[i]
-            );
+            const el = controls[i];
             if (host && el !== host && host.contains && host.contains(el)) continue;
             if (!el.offsetParent) continue;
             const rect = typeof el.getBoundingClientRect === "function" ? el.getBoundingClientRect() : null;
@@ -16060,18 +14753,14 @@ if (typeof module !== 'undefined' && module.exports) {
         circle.setAttribute("aria-expanded", isOpen ? "true" : "false");
         if (isOpen) {
           updatePanel();
-          const input = typeof widgetElement.querySelector === "function" ? (
-            /** @type {HTMLInputElement} */
-            widgetElement.querySelector(".ai-cm-input")
-          ) : null;
+          const input = typeof widgetElement.querySelector === "function" ? widgetElement.querySelector(".ai-cm-input") : null;
           if (input && typeof input.focus === "function") {
             try {
               input.focus();
             } catch (eA11yFocusIn) {
             }
           }
-        } else if (restoreFocus === true && typeof /** @type {HTMLElement} */
-        circle.focus === "function") {
+        } else if (restoreFocus === true && typeof circle.focus === "function") {
           try {
             circle.focus();
           } catch (eA11yFocusOut) {
@@ -16109,7 +14798,7 @@ if (typeof module !== 'undefined' && module.exports) {
       }
       function aiCmSetWidgetA11yLabel(circleEl, percentage) {
         if (!circleEl || typeof circleEl.setAttribute !== "function") return;
-        const i18n = typeof aiCmI18nMessage === "function" ? aiCmI18nMessage : function(key, fallback) {
+        const i18n = typeof aiCmI18nMessage2 === "function" ? aiCmI18nMessage2 : function(key, fallback) {
           return fallback;
         };
         const pct = typeof percentage === "number" && isFinite(percentage) ? percentage : 0;
@@ -16156,7 +14845,7 @@ if (typeof module !== 'undefined' && module.exports) {
       }
       function createWidget() {
         if (document.getElementById("ai-context-widget")) return;
-        const t = typeof aiCmI18nMessage === "function" ? aiCmI18nMessage : function(key, fallback) {
+        const t = typeof aiCmI18nMessage2 === "function" ? aiCmI18nMessage2 : function(key, fallback) {
           return fallback;
         };
         const container = document.createElement("div");
@@ -16199,10 +14888,7 @@ if (typeof module !== 'undefined' && module.exports) {
         }
         if (snapBtn) snapBtn.addEventListener("click", snapCurrentPct);
         if (autoBtn) autoBtn.addEventListener("click", resetSafePct);
-        if (inputEl) inputEl.addEventListener("change", (e) => setSafePctFromInput(
-          /** @type {HTMLInputElement} */
-          e.target.value
-        ));
+        if (inputEl) inputEl.addEventListener("change", (e) => setSafePctFromInput(e.target.value));
         if (upBtn) upBtn.addEventListener("click", () => stepSafePct(1));
         if (dnBtn) dnBtn.addEventListener("click", () => stepSafePct(-1));
         updatePanel();
@@ -16229,10 +14915,7 @@ if (typeof module !== 'undefined' && module.exports) {
         }
         aiCmRefreshThemeIfNeeded();
         debugLog("log", "[AI CM][trace] badge-update pct=" + percentage + "% tokens=" + tokens + " model=" + modelName);
-        const circle = (
-          /** @type {SVGElement} */
-          widgetElement.querySelector(".ai-widget-fill")
-        );
+        const circle = widgetElement.querySelector(".ai-widget-fill");
         const percentText = widgetElement.querySelector(".ai-widget-text");
         const tooltip = widgetElement.querySelector(".ai-widget-tooltip");
         if (!circle || !percentText) return;
@@ -16266,7 +14949,7 @@ if (typeof module !== 'undefined' && module.exports) {
         } catch (eQbStale) {
         }
         if (tooltip) {
-          const i18n = typeof aiCmI18nMessage === "function" ? aiCmI18nMessage : function(key, fallback) {
+          const i18n = typeof aiCmI18nMessage2 === "function" ? aiCmI18nMessage2 : function(key, fallback) {
             return fallback;
           };
           const limPct = aiCmActivePct();
@@ -16320,54 +15003,54 @@ if (typeof module !== 'undefined' && module.exports) {
         }
       }
       (function() {
-        var Api = {};
-        Api.safePctKey = safePctKey;
-        Api.zoneColor = zoneColor;
-        Api.aiCmRingBounds = aiCmRingBounds;
-        Api.aiCmSetRingThresholds = function(raw) {
+        const Api3 = {};
+        Api3.safePctKey = safePctKey;
+        Api3.zoneColor = zoneColor;
+        Api3.aiCmRingBounds = aiCmRingBounds;
+        Api3.aiCmSetRingThresholds = function(raw) {
           aiCmRingThresholds = raw === void 0 ? null : raw;
         };
-        Api.aiCmRepaintRing = aiCmRepaintRing;
-        Api.aiCmLoadRingThresholds = aiCmLoadRingThresholds;
-        Api.aiCmActivePct = aiCmActivePct;
-        Api.computeEffectiveLimit = computeEffectiveLimit;
-        Api.aiCmSetPopupOverrides = aiCmSetPopupOverrides;
-        Api.aiCmRefreshPopupOverrides = aiCmRefreshPopupOverrides;
-        Api.aiCmLoadPopupOverrides = aiCmLoadPopupOverrides;
-        Api.updatePanel = updatePanel;
-        Api.snapCurrentPct = snapCurrentPct;
-        Api.setSafePctFromInput = setSafePctFromInput;
-        Api.resetSafePct = resetSafePct;
-        Api.stepSafePct = stepSafePct;
-        Api.AI_CM_SAFE_PCT_MIGRATIONS = AI_CM_SAFE_PCT_MIGRATIONS;
-        Api.aiCmSafePctMigrationSource = aiCmSafePctMigrationSource;
-        Api.aiCmSafePctMigrationValue = aiCmSafePctMigrationValue;
-        Api.aiCmMigrateSafePct = aiCmMigrateSafePct;
-        Api.resetConversationState = resetConversationState;
-        Api.THEME_CONFIGS = THEME_CONFIGS;
-        Api.getServiceKey = getServiceKey;
-        Api.aiCmInAppTheme = aiCmInAppTheme;
-        Api.isDarkMode = isDarkMode;
-        Api.aiCmWidgetAppliedTheme = aiCmWidgetAppliedTheme;
-        Api.aiCmThemePollTimer = aiCmThemePollTimer;
-        Api.AI_CM_THEME_POLL_MS = AI_CM_THEME_POLL_MS;
-        Api.applyNativeStyles = applyNativeStyles;
-        Api.aiCmRefreshThemeIfNeeded = aiCmRefreshThemeIfNeeded;
-        Api.aiCmStartThemePoll = aiCmStartThemePoll;
-        Api.aiCmStopThemePoll = aiCmStopThemePoll;
-        Api.aiCmComputeWidgetSafeBottom = aiCmComputeWidgetSafeBottom;
-        Api.aiCmUpdateWidgetSafeBottom = aiCmUpdateWidgetSafeBottom;
-        Api.aiCmStartWidgetSafeBottomWatch = aiCmStartWidgetSafeBottomWatch;
-        Api.aiCmStopWidgetSafeBottomWatch = aiCmStopWidgetSafeBottomWatch;
-        Api.aiCmRestartWidgetSafeBottomWatch = aiCmRestartWidgetSafeBottomWatch;
-        Api.aiCmSetWidgetA11yLabel = aiCmSetWidgetA11yLabel;
-        Api.aiCmSetWidgetPanelOpen = aiCmSetWidgetPanelOpen;
-        Api.aiCmToggleWidgetPanel = aiCmToggleWidgetPanel;
-        Api.createWidget = createWidget;
-        Api.aiCmRevealWidget = aiCmRevealWidget;
-        Api.updateWidget = updateWidget;
-        if (typeof module !== "undefined" && module.exports) module.exports = Api;
-        if (typeof window !== "undefined") window.AiCmWidget = Api;
+        Api3.aiCmRepaintRing = aiCmRepaintRing;
+        Api3.aiCmLoadRingThresholds = aiCmLoadRingThresholds;
+        Api3.aiCmActivePct = aiCmActivePct;
+        Api3.computeEffectiveLimit = computeEffectiveLimit;
+        Api3.aiCmSetPopupOverrides = aiCmSetPopupOverrides;
+        Api3.aiCmRefreshPopupOverrides = aiCmRefreshPopupOverrides;
+        Api3.aiCmLoadPopupOverrides = aiCmLoadPopupOverrides;
+        Api3.updatePanel = updatePanel;
+        Api3.snapCurrentPct = snapCurrentPct;
+        Api3.setSafePctFromInput = setSafePctFromInput;
+        Api3.resetSafePct = resetSafePct;
+        Api3.stepSafePct = stepSafePct;
+        Api3.AI_CM_SAFE_PCT_MIGRATIONS = AI_CM_SAFE_PCT_MIGRATIONS;
+        Api3.aiCmSafePctMigrationSource = aiCmSafePctMigrationSource;
+        Api3.aiCmSafePctMigrationValue = aiCmSafePctMigrationValue;
+        Api3.aiCmMigrateSafePct = aiCmMigrateSafePct;
+        Api3.resetConversationState = resetConversationState;
+        Api3.THEME_CONFIGS = THEME_CONFIGS;
+        Api3.getServiceKey = getServiceKey;
+        Api3.aiCmInAppTheme = aiCmInAppTheme;
+        Api3.isDarkMode = isDarkMode;
+        Api3.aiCmWidgetAppliedTheme = aiCmWidgetAppliedTheme;
+        Api3.aiCmThemePollTimer = aiCmThemePollTimer;
+        Api3.AI_CM_THEME_POLL_MS = AI_CM_THEME_POLL_MS;
+        Api3.applyNativeStyles = applyNativeStyles;
+        Api3.aiCmRefreshThemeIfNeeded = aiCmRefreshThemeIfNeeded;
+        Api3.aiCmStartThemePoll = aiCmStartThemePoll;
+        Api3.aiCmStopThemePoll = aiCmStopThemePoll;
+        Api3.aiCmComputeWidgetSafeBottom = aiCmComputeWidgetSafeBottom;
+        Api3.aiCmUpdateWidgetSafeBottom = aiCmUpdateWidgetSafeBottom;
+        Api3.aiCmStartWidgetSafeBottomWatch = aiCmStartWidgetSafeBottomWatch;
+        Api3.aiCmStopWidgetSafeBottomWatch = aiCmStopWidgetSafeBottomWatch;
+        Api3.aiCmRestartWidgetSafeBottomWatch = aiCmRestartWidgetSafeBottomWatch;
+        Api3.aiCmSetWidgetA11yLabel = aiCmSetWidgetA11yLabel;
+        Api3.aiCmSetWidgetPanelOpen = aiCmSetWidgetPanelOpen;
+        Api3.aiCmToggleWidgetPanel = aiCmToggleWidgetPanel;
+        Api3.createWidget = createWidget;
+        Api3.aiCmRevealWidget = aiCmRevealWidget;
+        Api3.updateWidget = updateWidget;
+        if (typeof module !== "undefined" && module.exports) module.exports = Api3;
+        if (typeof window !== "undefined") window.AiCmWidget = Api3;
       })();
       function aiCmHostHistoryRecord(snapshot) {
         var rec = Object.assign({}, snapshot);
@@ -16385,7 +15068,7 @@ if (typeof module !== 'undefined' && module.exports) {
         try {
           var site = currentAdapter && currentAdapter.siteName || "";
           if (site === "google_search") {
-            var Pgsa = typeof window !== "undefined" && window.AiCmExportEmitPipeline ? window.AiCmExportEmitPipeline : null;
+            var Pgsa = typeof export_emit_pipeline_exports !== "undefined" && export_emit_pipeline_exports ? export_emit_pipeline_exports : typeof window !== "undefined" && window.AiCmExportEmitPipeline ? window.AiCmExportEmitPipeline : null;
             if (Pgsa && typeof Pgsa.prepareExportMessages === "function") {
               var resGsa = Pgsa.prepareExportMessages(messages, aiCmLogIntraDedupe);
               var outGsa = Array.isArray(resGsa.messages) ? resGsa.messages : messages;
@@ -16409,7 +15092,7 @@ if (typeof module !== 'undefined' && module.exports) {
             }
             return { messages: keep, removed: 0 };
           }
-          var P = typeof window !== "undefined" && window.AiCmExportEmitPipeline ? window.AiCmExportEmitPipeline : null;
+          var P = typeof export_emit_pipeline_exports !== "undefined" && export_emit_pipeline_exports ? export_emit_pipeline_exports : typeof window !== "undefined" && window.AiCmExportEmitPipeline ? window.AiCmExportEmitPipeline : null;
           if (!P) return { messages, removed: 0 };
           if (typeof P.prepareExportMessages === "function") {
             var res18 = P.prepareExportMessages(messages, aiCmLogIntraDedupe);
@@ -16417,7 +15100,7 @@ if (typeof module !== 'undefined' && module.exports) {
           }
           if (typeof P.dedupeMessages === "function") return P.dedupeMessages(messages);
         } catch (eDed) {
-          swallow(eDed, "base-handler:dedupeExportSource");
+          swallow2(eDed, "base-handler:dedupeExportSource");
         }
         return { messages, removed: 0 };
       }
@@ -16713,31 +15396,93 @@ if (typeof module !== 'undefined' && module.exports) {
           next();
         }, 2e3);
       }
+      var AI_CM_AISTUDIO_DRAIN_STEP_MS = 500;
+      var AI_CM_AISTUDIO_DRAIN_CAP_MS = 5e3;
+      var aiCmAistudioDrainTimers = /* @__PURE__ */ Object.create(null);
+      var aiCmAistudioDrainDeadlines = /* @__PURE__ */ Object.create(null);
+      function aiCmAistudioFilesApi() {
+        try {
+          if (typeof window === "undefined") return null;
+          var w = window;
+          return w.AiCmAiStudioFiles || w.AiCmAistudioFiles || null;
+        } catch (e) {
+          return null;
+        }
+      }
+      function aiCmAistudioFilesPending() {
+        var api2 = aiCmAistudioFilesApi();
+        if (!api2 || typeof api2.pending !== "function") return 0;
+        try {
+          var n = api2.pending();
+          return typeof n === "number" && n > 0 ? n : 0;
+        } catch (e) {
+          return 0;
+        }
+      }
+      function aiCmFilesDrainDefer(cid, percentage, reason, netSynced) {
+        try {
+          if (typeof currentAdapter === "undefined" || !currentAdapter || currentAdapter.siteName !== "aistudio") return false;
+          var pending = aiCmAistudioFilesPending();
+          var key = String(cid || "");
+          if (pending <= 0) {
+            delete aiCmAistudioDrainDeadlines[key];
+            return false;
+          }
+          var now = Date.now();
+          if (!aiCmAistudioDrainDeadlines[key]) aiCmAistudioDrainDeadlines[key] = now + AI_CM_AISTUDIO_DRAIN_CAP_MS;
+          if (aiCmAistudioDrainTimers[key]) {
+            debugLog("log", "[AI CM][auto-export] files-drain: \u0444\u0430\u0439\u0440 \u0443\u0436\u0435 \u0436\u0434\u0451\u0442 \u043E\u0447\u0435\u0440\u0435\u0434\u044C \u0444\u0430\u0439\u043B\u043E\u0432 convId=" + key + " pending=" + pending);
+            return true;
+          }
+          if (now >= aiCmAistudioDrainDeadlines[key]) {
+            delete aiCmAistudioDrainDeadlines[key];
+            debugLog("log", "[AI CM][auto-export] files-drain: \u043F\u043E\u0442\u043E\u043B\u043E\u043A \u043E\u0436\u0438\u0434\u0430\u043D\u0438\u044F \u2014 \u043F\u0438\u0448\u0435\u043C \u0444\u0430\u0439\u043B convId=" + key + " pending=" + pending);
+            return false;
+          }
+          debugLog("log", "[AI CM][auto-export] files-drain: \u0436\u0434\u0451\u043C \u043E\u0447\u0435\u0440\u0435\u0434\u044C \u0444\u0430\u0439\u043B\u043E\u0432 convId=" + key + " pending=" + pending + " step=" + AI_CM_AISTUDIO_DRAIN_STEP_MS + "ms");
+          aiCmAistudioDrainTimers[key] = setTimeout(function() {
+            delete aiCmAistudioDrainTimers[key];
+            try {
+              var redo = typeof doAutoExportDownload === "function" ? (
+                /** @type {any} */
+                doAutoExportDownload
+              ) : null;
+              if (redo) redo(cid, percentage, reason, netSynced);
+            } catch (eRe) {
+              debugLog("log", "[AI CM][auto-export] files-drain: \u043F\u043E\u0432\u0442\u043E\u0440\u043D\u044B\u0439 \u0432\u0445\u043E\u0434 \u0443\u043F\u0430\u043B: " + (eRe && eRe.message || eRe));
+            }
+          }, AI_CM_AISTUDIO_DRAIN_STEP_MS);
+          return true;
+        } catch (e) {
+          return false;
+        }
+      }
       (function() {
-        var Api = {};
-        Api.aiCmHostHistoryRecord = aiCmHostHistoryRecord;
-        Api.aiCmLogIntraDedupe = aiCmLogIntraDedupe;
-        Api.aiCmDedupeExportSource = aiCmDedupeExportSource;
-        Api.lastDedupeLogSig = lastDedupeLogSig;
-        Api.aiCmLogDedupeRemoved = aiCmLogDedupeRemoved;
-        Api.buildHistoryMessages = buildHistoryMessages;
-        Api.aiCmBasePrepared = aiCmBasePrepared;
-        Api.aiCmPreparedText = aiCmPreparedText;
-        Api.aiCmMetricBaseText = aiCmMetricBaseText;
-        Api.aiCmDiagHash6 = aiCmDiagHash6;
-        Api.aiCmGeminiTurnsSnapshotSync = aiCmGeminiTurnsSnapshotSync;
-        Api.aiCmExportNetSyncSite = aiCmExportNetSyncSite;
-        Api.aiCmFilesDrainSite = aiCmFilesDrainSite;
-        Api.aiCmExportNetSyncThen = aiCmExportNetSyncThen;
-        Api.aiCmLogNetSyncResult = aiCmLogNetSyncResult;
-        Api.aiCmFilesQueuePending = aiCmFilesQueuePending;
-        Api.aiCmLogFilesDrain = aiCmLogFilesDrain;
-        Api.aiCmExportFilesDrainThen = aiCmExportFilesDrainThen;
-        Api.aiCmExportFilesThenNetSync = aiCmExportFilesThenNetSync;
-        Api.aiCmDumpTurnsSnapshot = aiCmDumpTurnsSnapshot;
-        Api.scheduleStaleCheck = scheduleStaleCheck;
-        if (typeof module !== "undefined" && module.exports) module.exports = Api;
-        if (typeof window !== "undefined") window.AiCmBaseHandler = Api;
+        var Api3 = {};
+        Api3.aiCmHostHistoryRecord = aiCmHostHistoryRecord;
+        Api3.aiCmLogIntraDedupe = aiCmLogIntraDedupe;
+        Api3.aiCmDedupeExportSource = aiCmDedupeExportSource;
+        Api3.lastDedupeLogSig = lastDedupeLogSig;
+        Api3.aiCmLogDedupeRemoved = aiCmLogDedupeRemoved;
+        Api3.buildHistoryMessages = buildHistoryMessages;
+        Api3.aiCmBasePrepared = aiCmBasePrepared;
+        Api3.aiCmPreparedText = aiCmPreparedText;
+        Api3.aiCmMetricBaseText = aiCmMetricBaseText;
+        Api3.aiCmDiagHash6 = aiCmDiagHash6;
+        Api3.aiCmGeminiTurnsSnapshotSync = aiCmGeminiTurnsSnapshotSync;
+        Api3.aiCmExportNetSyncSite = aiCmExportNetSyncSite;
+        Api3.aiCmFilesDrainSite = aiCmFilesDrainSite;
+        Api3.aiCmExportNetSyncThen = aiCmExportNetSyncThen;
+        Api3.aiCmLogNetSyncResult = aiCmLogNetSyncResult;
+        Api3.aiCmFilesQueuePending = aiCmFilesQueuePending;
+        Api3.aiCmLogFilesDrain = aiCmLogFilesDrain;
+        Api3.aiCmExportFilesDrainThen = aiCmExportFilesDrainThen;
+        Api3.aiCmExportFilesThenNetSync = aiCmExportFilesThenNetSync;
+        Api3.aiCmFilesDrainDefer = aiCmFilesDrainDefer;
+        Api3.aiCmDumpTurnsSnapshot = aiCmDumpTurnsSnapshot;
+        Api3.scheduleStaleCheck = scheduleStaleCheck;
+        if (typeof module !== "undefined" && module.exports) module.exports = Api3;
+        if (typeof window !== "undefined") window.AiCmBaseHandler = Api3;
       })();
       function normalize(s) {
         return (s || "").toLowerCase().replace(/[^a-zа-яё0-9]+/g, "");
@@ -16809,7 +15554,7 @@ if (typeof module !== 'undefined' && module.exports) {
           var txt = "";
           if (shouldUseGeminiDomParser()) {
             try {
-              txt = typeof GeminiDomParser !== "undefined" && GeminiDomParser ? GeminiDomParser.extractGeminiResponse(tailNodes[j]).text : "";
+              txt = typeof extractGeminiResponse !== "undefined" && extractGeminiResponse ? extractGeminiResponse(tailNodes[j]).text : "";
             } catch (e) {
               txt = (tailNodes[j].innerText || tailNodes[j].textContent || "").trim();
             }
@@ -16831,10 +15576,6 @@ if (typeof module !== 'undefined' && module.exports) {
       }
       function getEffectiveText() {
         if (baseSeen && baseText) {
-          if (baseComplete) {
-            lastBounded = true;
-            return aiCmTailMetricBase(baseText);
-          }
           var tail = computeTailFromDom();
           var sig = (tail.sel || "") + "|" + (tail.bounded ? "1" : "0");
           if (sig !== lastTailSig) {
@@ -16844,7 +15585,7 @@ if (typeof module !== 'undefined' && module.exports) {
               debugLog("log", "[hybrid-tail] " + tail.diag);
             }
           }
-          lastBounded = tail.bounded;
+          lastBounded = baseComplete ? true : tail.bounded;
           if (!tail.text) return aiCmTailMetricBase(baseText);
           if (tail.bounded) return aiCmTailMetricBase(baseText) + "\n" + tail.text;
           return aiCmTailMetricBase(baseText);
@@ -16853,7 +15594,6 @@ if (typeof module !== 'undefined' && module.exports) {
       }
       function getEffectiveCount(fallbackCount) {
         if (baseSeen && baseText) {
-          if (baseComplete) return baseCount;
           var tail = computeTailFromDom();
           if (!tail.count) return baseCount;
           if (tail.bounded) return baseCount + tail.count;
@@ -16862,21 +15602,21 @@ if (typeof module !== 'undefined' && module.exports) {
         return fallbackCount;
       }
       (function() {
-        var Api = {};
-        Api.normalize = normalize;
-        Api.stripMd = stripMd;
-        Api.MSG_SELECTORS = MSG_SELECTORS;
-        Api.findMessageNodes = findMessageNodes;
-        Api.nodeIsBase = nodeIsBase;
-        Api.shouldUseGeminiDomParser = shouldUseGeminiDomParser;
-        Api.computeTailFromDom = computeTailFromDom;
-        Api.aiCmTailMetricBase = aiCmTailMetricBase;
-        Api.getEffectiveText = getEffectiveText;
-        Api.getEffectiveCount = getEffectiveCount;
-        if (typeof module !== "undefined" && module.exports) module.exports = Api;
-        if (typeof window !== "undefined") window.AiCmHybridTail = Api;
+        var Api3 = {};
+        Api3.normalize = normalize;
+        Api3.stripMd = stripMd;
+        Api3.MSG_SELECTORS = MSG_SELECTORS;
+        Api3.findMessageNodes = findMessageNodes;
+        Api3.nodeIsBase = nodeIsBase;
+        Api3.shouldUseGeminiDomParser = shouldUseGeminiDomParser;
+        Api3.computeTailFromDom = computeTailFromDom;
+        Api3.aiCmTailMetricBase = aiCmTailMetricBase;
+        Api3.getEffectiveText = getEffectiveText;
+        Api3.getEffectiveCount = getEffectiveCount;
+        if (typeof module !== "undefined" && module.exports) module.exports = Api3;
+        if (typeof window !== "undefined") window.AiCmHybridTail = Api3;
       })();
-      function sanitizeGeminiText(s) {
+      function sanitizeGeminiText2(s) {
         if (typeof window !== "undefined" && window.GeminiBatchexecuteParser && window.GeminiBatchexecuteParser.sanitizeGeminiText) {
           return window.GeminiBatchexecuteParser.sanitizeGeminiText(s);
         }
@@ -16922,7 +15662,7 @@ if (typeof module !== 'undefined' && module.exports) {
       function aiCmHiddenExportEffectiveOn(messages) {
         var userOn = typeof aiCmIncludeHiddenInExport !== "undefined" && aiCmIncludeHiddenInExport === true;
         try {
-          var P = typeof window !== "undefined" && window.AiCmExportEmitPipeline ? window.AiCmExportEmitPipeline : null;
+          var P = typeof export_emit_pipeline_exports !== "undefined" && export_emit_pipeline_exports ? export_emit_pipeline_exports : typeof window !== "undefined" && window.AiCmExportEmitPipeline ? window.AiCmExportEmitPipeline : null;
           if (!P || typeof P.hasReasoningInSource !== "function" || typeof P.effectiveReasoningToggle !== "function") return userOn;
           var site = typeof currentAdapter !== "undefined" && currentAdapter && currentAdapter.siteName ? currentAdapter.siteName : "";
           return P.effectiveReasoningToggle(userOn, P.hasReasoningInSource(messages) === true, site) === true;
@@ -16932,7 +15672,7 @@ if (typeof module !== 'undefined' && module.exports) {
       }
       function aiCmSanitizeEmitUserTexts(messages) {
         try {
-          var P = typeof window !== "undefined" && window.AiCmExportEmitPipeline ? window.AiCmExportEmitPipeline : null;
+          var P = typeof export_emit_pipeline_exports !== "undefined" && export_emit_pipeline_exports ? export_emit_pipeline_exports : typeof window !== "undefined" && window.AiCmExportEmitPipeline ? window.AiCmExportEmitPipeline : null;
           if (!P || typeof P.sanitizeEmitMessages !== "function") {
             if (typeof aiCmEmitEntryDiag === "function") aiCmEmitEntryDiag("no-pipeline", messages, messages);
             return messages;
@@ -16967,7 +15707,7 @@ if (typeof module !== 'undefined' && module.exports) {
       }
       function aiCmPrepareReasoningForExport(messages) {
         try {
-          var P = typeof window !== "undefined" && window.AiCmExportEmitPipeline ? window.AiCmExportEmitPipeline : null;
+          var P = typeof export_emit_pipeline_exports !== "undefined" && export_emit_pipeline_exports ? export_emit_pipeline_exports : typeof window !== "undefined" && window.AiCmExportEmitPipeline ? window.AiCmExportEmitPipeline : null;
           if (!P || typeof P.applyReasoningExportFields !== "function") return messages;
           P.applyReasoningExportFields(messages, aiCmReasoningExportSite());
         } catch (ePrep) {
@@ -16976,12 +15716,12 @@ if (typeof module !== 'undefined' && module.exports) {
         return messages;
       }
       function aiCmCollectExportSource() {
-        var P = typeof window !== "undefined" && window.AiCmExportEmitPipeline ? window.AiCmExportEmitPipeline : null;
+        var P = typeof export_emit_pipeline_exports !== "undefined" && export_emit_pipeline_exports ? export_emit_pipeline_exports : typeof window !== "undefined" && window.AiCmExportEmitPipeline ? window.AiCmExportEmitPipeline : null;
         var texts = lastBaseTexts || [];
         var prepareReasoning = typeof aiCmPrepareReasoningForExport === "function" ? aiCmPrepareReasoningForExport : null;
         var source = P && typeof P.pickExportSource === "function" ? P.pickExportSource(baseSeen === true, texts.length > 0) : baseSeen && texts.length > 0 ? "network" : "adapter";
         try {
-          if (typeof aiCmDiagLine2 === "function" && typeof aiCmDiagOn === "function" && aiCmDiagOn() && typeof currentAdapter !== "undefined" && currentAdapter && currentAdapter.siteName === "deepseek") {
+          if (typeof aiCmDiagLine2 === "function" && typeof aiCmDiagOn2 === "function" && aiCmDiagOn2() && typeof currentAdapter !== "undefined" && currentAdapter && currentAdapter.siteName === "deepseek") {
             var o21DomMsgs = typeof currentAdapter.extractMessages === "function" ? currentAdapter.extractMessages().length : 0;
             var o21Reason = baseSeen === true ? texts.length > 0 ? "baseSeen+networkTexts" : "baseSeen-no-networkTexts" : "no-baseSeen";
             aiCmDiagLine2("o21-source-select", {
@@ -17000,7 +15740,7 @@ if (typeof module !== 'undefined' && module.exports) {
             for (var i = 0; i < texts.length; i++) {
               var dm = lastDetailMessages[i] || {};
               var r = dm.role || "";
-              var msg = { role: r === "user" || r === "human" ? "user" : "assistant", text: sanitizeGeminiText(texts[i]) };
+              var msg = { role: r === "user" || r === "human" ? "user" : "assistant", text: sanitizeGeminiText2(texts[i]) };
               if (typeof aiCmDiagLine2 === "function" && typeof currentAdapter !== "undefined" && currentAdapter && currentAdapter.siteName === "claude") {
                 aiCmDiagLine2("claude-role-network", { r, normalizedRole: msg.role });
               }
@@ -17009,7 +15749,7 @@ if (typeof module !== 'undefined' && module.exports) {
             }
           } else {
             for (var j = 0; j < texts.length; j++) {
-              out.push({ role: j % 2 === 0 ? "user" : "assistant", text: sanitizeGeminiText(texts[j]) });
+              out.push({ role: j % 2 === 0 ? "user" : "assistant", text: sanitizeGeminiText2(texts[j]) });
             }
           }
           if (prepareReasoning) prepareReasoning(out);
@@ -17056,7 +15796,7 @@ if (typeof module !== 'undefined' && module.exports) {
             }
           }
         } catch (eA) {
-          swallow(eA, "export:aiCmCollectExportSource-dom-adapter");
+          swallow2(eA, "export:aiCmCollectExportSource-dom-adapter");
         }
         if (prepareReasoning) prepareReasoning(out);
         return aiCmSanitizeEmitUserTexts(out);
@@ -17064,7 +15804,7 @@ if (typeof module !== 'undefined' && module.exports) {
       function aiCmExportBaseSource(convId, localMsgs) {
         try {
           var site = currentAdapter && currentAdapter.siteName || "";
-          var P = typeof window !== "undefined" && window.AiCmExportEmitPipeline ? window.AiCmExportEmitPipeline : null;
+          var P = typeof export_emit_pipeline_exports !== "undefined" && export_emit_pipeline_exports ? export_emit_pipeline_exports : typeof window !== "undefined" && window.AiCmExportEmitPipeline ? window.AiCmExportEmitPipeline : null;
           if (!P || typeof P.resolveExportSource !== "function") return null;
           if (site !== "gemini") return null;
           var snap = (
@@ -17115,7 +15855,7 @@ if (typeof module !== 'undefined' && module.exports) {
         try {
           if (!(currentAdapter && currentAdapter.siteName === "gemini")) return void 0;
           if (typeof aiCmGeminiTurnsSnapshotSync !== "function") return void 0;
-          var P = typeof window !== "undefined" && window.AiCmExportEmitPipeline ? window.AiCmExportEmitPipeline : null;
+          var P = typeof export_emit_pipeline_exports !== "undefined" && export_emit_pipeline_exports ? export_emit_pipeline_exports : typeof window !== "undefined" && window.AiCmExportEmitPipeline ? window.AiCmExportEmitPipeline : null;
           if (!P || typeof P.sourceTierOf !== "function") return void 0;
           var snap = (
             /** @type {{archiveCount?: number, liveCount?: number}|null} */
@@ -17127,7 +15867,7 @@ if (typeof module !== 'undefined' && module.exports) {
             liveCount: typeof snap.liveCount === "number" ? snap.liveCount : 0
           });
         } catch (eTier) {
-          swallow(eTier, "export:aiCmGetSourceTier");
+          swallow2(eTier, "export:aiCmGetSourceTier");
         }
       }
       function autoExportPerSiteKey(siteName) {
@@ -17242,7 +15982,7 @@ if (typeof module !== 'undefined' && module.exports) {
           res.suspect = true;
           res.confirmed = !!prevProbe.suspectPending;
         } catch (e) {
-          swallow(e, "export:detectTrimStateFallback");
+          swallow2(e, "export:detectTrimStateFallback");
         }
         return res;
       }
@@ -17276,7 +16016,7 @@ if (typeof module !== 'undefined' && module.exports) {
             maybeTrimExport(cid);
           }
         } catch (e) {
-          swallow(e, "export:geminiDetectTrim");
+          swallow2(e, "export:geminiDetectTrim");
         }
       }
       function maybeTrimExport(cid) {
@@ -17297,7 +16037,7 @@ if (typeof module !== 'undefined' && module.exports) {
                 preTrimExportFired[cid] = 0;
                 maybeTrimExport(cid);
               } catch (eRetry) {
-                swallow(eRetry, "export:maybeTrimExport-retry");
+                swallow2(eRetry, "export:maybeTrimExport-retry");
               }
             }, 2e3);
             return;
@@ -17542,7 +16282,7 @@ if (typeof module !== 'undefined' && module.exports) {
         try {
           var urlCid = getCurrentConvId() || "";
           var site = currentAdapter && currentAdapter.siteName || "";
-          var P = typeof window !== "undefined" && window.AiCmExportEmitPipeline ? window.AiCmExportEmitPipeline : null;
+          var P = typeof export_emit_pipeline_exports !== "undefined" && export_emit_pipeline_exports ? export_emit_pipeline_exports : typeof window !== "undefined" && window.AiCmExportEmitPipeline ? window.AiCmExportEmitPipeline : null;
           if (P && typeof P.resolveAutoExportConvId === "function") {
             return P.resolveAutoExportConvId(site, urlCid, lastThreadId || "") || "";
           }
@@ -17611,10 +16351,7 @@ if (typeof module !== 'undefined' && module.exports) {
         }
       }
       function aiCmAutoExportLogOnChange(family, key) {
-        var self = (
-          /** @type {any} */
-          aiCmAutoExportLogOnChange
-        );
+        var self = aiCmAutoExportLogOnChange;
         try {
           var f = String(family || "");
           var k = key === void 0 || key === null ? "" : String(key);
@@ -17768,7 +16505,7 @@ if (typeof module !== 'undefined' && module.exports) {
           var netLatchNow = typeof aiCmGsaNetworkCompleteIs === "function" ? aiCmGsaNetworkCompleteIs(site, aiCmAutoExportConvId() || "") === true : false;
           var fileSource;
           try {
-            var P = typeof window !== "undefined" && window.AiCmExportEmitPipeline ? window.AiCmExportEmitPipeline : null;
+            var P = typeof export_emit_pipeline_exports !== "undefined" && export_emit_pipeline_exports ? export_emit_pipeline_exports : typeof window !== "undefined" && window.AiCmExportEmitPipeline ? window.AiCmExportEmitPipeline : null;
             if (P && typeof P.pickExportSource === "function") {
               fileSource = P.pickExportSource(baseSeen === true, memMsgs > 0);
             }
@@ -17811,7 +16548,7 @@ if (typeof module !== 'undefined' && module.exports) {
             notCompleteLogged = {};
             autoExportLastConvId = cid;
           }
-          var P = typeof window !== "undefined" && window.AiCmExportEmitPipeline ? window.AiCmExportEmitPipeline : null;
+          var P = typeof export_emit_pipeline_exports !== "undefined" && export_emit_pipeline_exports ? export_emit_pipeline_exports : typeof window !== "undefined" && window.AiCmExportEmitPipeline ? window.AiCmExportEmitPipeline : null;
           var siteName = currentAdapter && currentAdapter.siteName || "";
           var perSiteThr = typeof autoExportPctBySite === "object" && autoExportPctBySite ? autoExportPctBySite[siteName] : void 0;
           var threshold = P && typeof P.effectiveAutoExportThreshold === "function" ? P.effectiveAutoExportThreshold(s.pct, perSiteThr) : typeof s.pct === "number" && s.pct >= 1 && s.pct <= 100 ? s.pct : 90;
@@ -18000,7 +16737,7 @@ if (typeof module !== 'undefined' && module.exports) {
       }
       function aiCmEffectiveAutoExportThreshold(siteName) {
         try {
-          var P = typeof window !== "undefined" && window.AiCmExportEmitPipeline ? window.AiCmExportEmitPipeline : null;
+          var P = typeof export_emit_pipeline_exports !== "undefined" && export_emit_pipeline_exports ? export_emit_pipeline_exports : typeof window !== "undefined" && window.AiCmExportEmitPipeline ? window.AiCmExportEmitPipeline : null;
           var s = typeof autoExportSettings === "object" && autoExportSettings ? autoExportSettings : null;
           var globalPct = s && typeof s.pct === "number" ? s.pct : void 0;
           var perSitePct = typeof autoExportPctBySite === "object" && autoExportPctBySite ? autoExportPctBySite[siteName || ""] : void 0;
@@ -18014,7 +16751,7 @@ if (typeof module !== 'undefined' && module.exports) {
       }
       var aiCmAutoExportNamesUsed = /* @__PURE__ */ Object.create(null);
       function aiCmAutoExportStartDownload(content, file, fmt) {
-        var Pdl = typeof window !== "undefined" && window.AiCmExportEmitPipeline ? window.AiCmExportEmitPipeline : null;
+        var Pdl = typeof export_emit_pipeline_exports !== "undefined" && export_emit_pipeline_exports ? export_emit_pipeline_exports : typeof window !== "undefined" && window.AiCmExportEmitPipeline ? window.AiCmExportEmitPipeline : null;
         var used = typeof aiCmAutoExportNamesUsed === "object" && aiCmAutoExportNamesUsed ? aiCmAutoExportNamesUsed : null;
         if (used && file && Pdl && typeof Pdl.isFileNameTaken === "function" && Pdl.isFileNameTaken(used, file) && typeof Pdl.disambiguateFileName === "function") {
           file = Pdl.disambiguateFileName(file, used);
@@ -18023,7 +16760,7 @@ if (typeof module !== 'undefined' && module.exports) {
           if (used && file) used[file] = 1;
         } catch (eNameReserve) {
         }
-        var Bdl = typeof window !== "undefined" && window.AiCmExportBuilders ? window.AiCmExportBuilders : null;
+        var Bdl = typeof export_text_builders_default !== "undefined" ? export_text_builders_default : null;
         if (!Bdl || typeof Bdl.downloadBlob !== "function") throw new Error("utils/export-text-builders.js \u043D\u0435 \u0437\u0430\u0433\u0440\u0443\u0436\u0435\u043D");
         Bdl.downloadBlob(content, file, fmt === "md" ? "text/markdown" : fmt === "json" ? "application/json" : "text/plain;charset=utf-8", "autoexport");
         return file;
@@ -18069,7 +16806,7 @@ if (typeof module !== 'undefined' && module.exports) {
               }
               if (fmt === "txt" && content.charAt(0) !== "\uFEFF") content = "\uFEFF" + content;
               if (reason !== "pre-trim") {
-                var PDl = typeof window !== "undefined" && window.AiCmExportEmitPipeline ? window.AiCmExportEmitPipeline : null;
+                var PDl = typeof export_emit_pipeline_exports !== "undefined" && export_emit_pipeline_exports ? export_emit_pipeline_exports : typeof window !== "undefined" && window.AiCmExportEmitPipeline ? window.AiCmExportEmitPipeline : null;
                 if (PDl && typeof PDl.markAutoExportFired === "function") {
                   PDl.markAutoExportFired(autoExportFired, currentAdapter && currentAdapter.siteName || "", cid);
                   try {
@@ -18104,7 +16841,7 @@ if (typeof module !== 'undefined' && module.exports) {
               }
               aiCmCancelDeferredHistWrite(cid);
               try {
-                var BdiagDl = typeof window !== "undefined" && window && window.AiCmExportBuilders ? window.AiCmExportBuilders : null;
+                var BdiagDl = typeof export_text_builders_default !== "undefined" ? export_text_builders_default : null;
                 if (BdiagDl && typeof BdiagDl.aiCmDiagDownload === "function") {
                   BdiagDl.aiCmDiagDownload("autoexport", content, file, {
                     reason,
@@ -18140,6 +16877,8 @@ if (typeof module !== 'undefined' && module.exports) {
               debugLog("error", "[AI CM][auto-export] error:", eInner);
             }
           };
+          var filesApiD = typeof window !== "undefined" && window.AiCmBaseHandler ? window.AiCmBaseHandler : null;
+          if (filesApiD && typeof filesApiD.aiCmFilesDrainDefer === "function" && filesApiD.aiCmFilesDrainDefer(cid, percentage, reason, netSynced)) return;
           if (typeof aiCmDeferAutoExportOnLiveStream === "function" && aiCmDeferAutoExportOnLiveStream(cid, percentage)) return;
           var filesApiD = typeof window !== "undefined" && window.AiCmBaseHandler ? window.AiCmBaseHandler : null;
           var filesDrainSiteD = filesApiD && typeof filesApiD.aiCmFilesDrainSite === "function" ? filesApiD.aiCmFilesDrainSite() === true : false;
@@ -18170,10 +16909,10 @@ if (typeof module !== 'undefined' && module.exports) {
             debugLog("log", "[AI CM][auto-export] net-sync \u0443\u0436\u0435 \u0432\u044B\u043F\u043E\u043B\u043D\u044F\u0435\u0442\u0441\u044F convId=" + cid);
             return;
           }
-          var B = typeof window !== "undefined" && window.AiCmExportBuilders ? window.AiCmExportBuilders : null;
+          var B = typeof export_text_builders_default !== "undefined" ? export_text_builders_default : null;
           if (!B) throw new Error("utils/export-text-builders.js \u043D\u0435 \u0437\u0430\u0433\u0440\u0443\u0436\u0435\u043D");
           var fmt = autoExportSettings.fmt === "md" ? "md" : autoExportSettings.fmt === "json" ? "json" : "txt";
-          var P = typeof window !== "undefined" && window.AiCmExportEmitPipeline ? window.AiCmExportEmitPipeline : null;
+          var P = typeof export_emit_pipeline_exports !== "undefined" && export_emit_pipeline_exports ? export_emit_pipeline_exports : typeof window !== "undefined" && window.AiCmExportEmitPipeline ? window.AiCmExportEmitPipeline : null;
           var siteNameD = currentAdapter && currentAdapter.siteName || "";
           var lowConfD = siteNameD === "gemini" ? aiCmLowConfidenceByConv[cid] === true : siteNameD === "google_search" ? baseComplete !== true : siteNameD === "qwen" ? baseComplete !== true && typeof aiCmPartialSoftByConv === "object" && aiCmPartialSoftByConv && aiCmPartialSoftByConv[cid] === true : false;
           var gsaModelD = siteNameD === "google_search" && typeof lastSnapshotModelName === "string" ? lastSnapshotModelName : "";
@@ -18293,12 +17032,12 @@ if (typeof module !== 'undefined' && module.exports) {
           try {
             if (cid && cid === d.convId && autoExportSettings.enabled === true && baseComplete === true && !aiCmCursorLiveByConv[cid] && !(function() {
               var siteBc = currentAdapter && currentAdapter.siteName || "";
-              var Pbc = typeof window !== "undefined" && window.AiCmExportEmitPipeline ? window.AiCmExportEmitPipeline : null;
+              var Pbc = typeof export_emit_pipeline_exports !== "undefined" && export_emit_pipeline_exports ? export_emit_pipeline_exports : typeof window !== "undefined" && window.AiCmExportEmitPipeline ? window.AiCmExportEmitPipeline : null;
               return Pbc.getAutoExportFired(autoExportFired, siteBc, cid) || (typeof Pbc.isFiredInSession === "function" ? Pbc.isFiredInSession(sessionFiredCache, siteBc, cid) : false) || typeof aiCmAutoExportFiredOnce === "object" && aiCmAutoExportFiredOnce && aiCmAutoExportFiredOnce[siteBc + "|" + cid] === 1 || typeof aiCmAutoExportFiredInStorage === "function" && aiCmAutoExportFiredInStorage(cid);
             })() && (baseCount || 0) > 0) {
               var pctBc64 = typeof autoExportLastPct === "number" && autoExportLastPct >= 0 ? autoExportLastPct : 0;
               var thrBc64 = aiCmEffectiveAutoExportThreshold(typeof currentAdapter !== "undefined" && currentAdapter && currentAdapter.siteName || "");
-              var Pbc64 = typeof window !== "undefined" && window.AiCmExportEmitPipeline ? window.AiCmExportEmitPipeline : null;
+              var Pbc64 = typeof export_emit_pipeline_exports !== "undefined" && export_emit_pipeline_exports ? export_emit_pipeline_exports : typeof window !== "undefined" && window.AiCmExportEmitPipeline ? window.AiCmExportEmitPipeline : null;
               var gateBc64 = Pbc64 && typeof Pbc64.shouldSkipBaseCompleteTrigger === "function" ? Pbc64.shouldSkipBaseCompleteTrigger({ percentage: pctBc64, threshold: thrBc64 }) : { skip: pctBc64 < thrBc64, reason: "below-threshold-base-complete", threshold: thrBc64 };
               if (gateBc64.skip) {
                 debugLog("log", "[AI CM][auto-export] skip reason=" + gateBc64.reason + " convId=" + cid + " pct=" + pctBc64 + " threshold=" + gateBc64.threshold + " trigger=base-complete");
@@ -18339,42 +17078,42 @@ if (typeof module !== 'undefined' && module.exports) {
         }
       }
       (function() {
-        var Api = {};
-        Api.sanitizeGeminiText = sanitizeGeminiText;
-        Api.aiCmCollectExportSource = aiCmCollectExportSource;
-        Api.aiCmExportBaseSource = aiCmExportBaseSource;
-        Api.aiCmGetSourceTier = aiCmGetSourceTier;
-        Api.aiCmUnionFileMessages = aiCmUnionFileMessages;
-        Api.autoExportPerSiteKey = autoExportPerSiteKey;
-        Api.loadAutoExportPerSitePct = loadAutoExportPerSitePct;
-        Api.sessionFiredCache = sessionFiredCache;
-        Api.aiCmTryLateAutoExport = aiCmTryLateAutoExport;
-        Api.aiCmScheduleLateAutoExportRetry = aiCmScheduleLateAutoExportRetry;
-        Api.aiCmLateRetryByConv = aiCmLateRetryByConv;
-        Api.aiCmCurrentBaseSnapshot = aiCmCurrentBaseSnapshot;
-        Api.detectTrimStateFallback = detectTrimStateFallback;
-        Api.geminiDetectTrim = geminiDetectTrim;
-        Api.maybeTrimExport = maybeTrimExport;
-        Api.aiCmCancelDeferredHistWrite = aiCmCancelDeferredHistWrite;
-        Api.aiCmWriteCurrentHistory = aiCmWriteCurrentHistory;
-        Api.aiCmFlushDeferredHistWrite = aiCmFlushDeferredHistWrite;
-        Api.aiCmScheduleDeferredHistWrite = aiCmScheduleDeferredHistWrite;
-        Api.loadAutoExportSettings = loadAutoExportSettings;
-        Api.aiCmAutoExportConvId = aiCmAutoExportConvId;
-        Api.aiCmGsaProbeByThread = aiCmGsaProbeByThread;
-        Api.aiCmGsaProbeRunning = aiCmGsaProbeRunning;
-        Api.aiCmGsaProbeRunningFor = aiCmGsaProbeRunningFor;
-        Api.aiCmGsaAutoExportSkipLog = aiCmGsaAutoExportSkipLog;
-        Api.maybeAutoExport = maybeAutoExport;
-        Api.aiCmEffectiveAutoExportThreshold = aiCmEffectiveAutoExportThreshold;
-        Api.doAutoExportDownload = doAutoExportDownload;
-        Api.aiCmDeepseekStreamProbe = aiCmDeepseekStreamProbe;
-        Api.aiCmDeepseekStreamActiveFor = aiCmDeepseekStreamActiveFor;
-        Api.aiCmFlushLiveStreamForExport = aiCmFlushLiveStreamForExport;
-        Api.aiCmDeferAutoExportOnLiveStream = aiCmDeferAutoExportOnLiveStream;
-        Api.AI_CM_DS_STREAM_DEFER_MS = AI_CM_DS_STREAM_DEFER_MS;
-        if (typeof module !== "undefined" && module.exports) module.exports = Api;
-        if (typeof window !== "undefined") window.AiCmExportManager = Api;
+        var Api3 = {};
+        Api3.sanitizeGeminiText = sanitizeGeminiText2;
+        Api3.aiCmCollectExportSource = aiCmCollectExportSource;
+        Api3.aiCmExportBaseSource = aiCmExportBaseSource;
+        Api3.aiCmGetSourceTier = aiCmGetSourceTier;
+        Api3.aiCmUnionFileMessages = aiCmUnionFileMessages;
+        Api3.autoExportPerSiteKey = autoExportPerSiteKey;
+        Api3.loadAutoExportPerSitePct = loadAutoExportPerSitePct;
+        Api3.sessionFiredCache = sessionFiredCache;
+        Api3.aiCmTryLateAutoExport = aiCmTryLateAutoExport;
+        Api3.aiCmScheduleLateAutoExportRetry = aiCmScheduleLateAutoExportRetry;
+        Api3.aiCmLateRetryByConv = aiCmLateRetryByConv;
+        Api3.aiCmCurrentBaseSnapshot = aiCmCurrentBaseSnapshot;
+        Api3.detectTrimStateFallback = detectTrimStateFallback;
+        Api3.geminiDetectTrim = geminiDetectTrim;
+        Api3.maybeTrimExport = maybeTrimExport;
+        Api3.aiCmCancelDeferredHistWrite = aiCmCancelDeferredHistWrite;
+        Api3.aiCmWriteCurrentHistory = aiCmWriteCurrentHistory;
+        Api3.aiCmFlushDeferredHistWrite = aiCmFlushDeferredHistWrite;
+        Api3.aiCmScheduleDeferredHistWrite = aiCmScheduleDeferredHistWrite;
+        Api3.loadAutoExportSettings = loadAutoExportSettings;
+        Api3.aiCmAutoExportConvId = aiCmAutoExportConvId;
+        Api3.aiCmGsaProbeByThread = aiCmGsaProbeByThread;
+        Api3.aiCmGsaProbeRunning = aiCmGsaProbeRunning;
+        Api3.aiCmGsaProbeRunningFor = aiCmGsaProbeRunningFor;
+        Api3.aiCmGsaAutoExportSkipLog = aiCmGsaAutoExportSkipLog;
+        Api3.maybeAutoExport = maybeAutoExport;
+        Api3.aiCmEffectiveAutoExportThreshold = aiCmEffectiveAutoExportThreshold;
+        Api3.doAutoExportDownload = doAutoExportDownload;
+        Api3.aiCmDeepseekStreamProbe = aiCmDeepseekStreamProbe;
+        Api3.aiCmDeepseekStreamActiveFor = aiCmDeepseekStreamActiveFor;
+        Api3.aiCmFlushLiveStreamForExport = aiCmFlushLiveStreamForExport;
+        Api3.aiCmDeferAutoExportOnLiveStream = aiCmDeferAutoExportOnLiveStream;
+        Api3.AI_CM_DS_STREAM_DEFER_MS = AI_CM_DS_STREAM_DEFER_MS;
+        if (typeof module !== "undefined" && module.exports) module.exports = Api3;
+        if (typeof window !== "undefined") window.AiCmExportManager = Api3;
       })();
       (function() {
         let v = "unknown";
@@ -18392,7 +17131,7 @@ if (typeof module !== 'undefined' && module.exports) {
           return false;
         }
       }
-      function aiCmI18nMessage(key, fallback, substitutions) {
+      function aiCmI18nMessage2(key, fallback, substitutions) {
         try {
           if (typeof chrome !== "undefined" && chrome.i18n && typeof chrome.i18n.getMessage === "function") {
             var message = substitutions ? chrome.i18n.getMessage(key, substitutions) : chrome.i18n.getMessage(key);
@@ -18457,7 +17196,7 @@ if (typeof module !== 'undefined' && module.exports) {
             self.load(convId).then(function(entry) {
               var existing = entry && entry.turns || [];
               var unionTurns = turns;
-              var P = typeof window !== "undefined" && window.AiCmExportEmitPipeline ? window.AiCmExportEmitPipeline : null;
+              var P = typeof export_emit_pipeline_exports !== "undefined" && export_emit_pipeline_exports ? export_emit_pipeline_exports : typeof window !== "undefined" && window.AiCmExportEmitPipeline ? window.AiCmExportEmitPipeline : null;
               if (P && typeof P.unionTurnsById === "function") {
                 var u = P.unionTurnsById(existing, turns);
                 if (u.length > turns.length) unionTurns = u;
@@ -18766,7 +17505,7 @@ if (typeof module !== 'undefined' && module.exports) {
           var cyr = (t.match(/[а-яёА-ЯЁ]/g) || []).length;
           result = Math.ceil(cyr / 3.3) + Math.round((t.length - cyr) / 4) + attach;
         }
-        if (typeof aiCmDiagOn === "function" && aiCmDiagOn()) {
+        if (typeof aiCmDiagOn2 === "function" && aiCmDiagOn2()) {
           try {
             var cyrDiag = (t.match(/[а-яёА-ЯЁ]/g) || []).length;
             var cyrillicPct = t.length ? (cyrDiag / t.length * 100).toFixed(1) : "0.0";
@@ -18797,15 +17536,15 @@ if (typeof module !== 'undefined' && module.exports) {
         var pool = typeof attachTokens === "number" && attachTokens > 0 ? attachTokens : 0;
         if (pool <= 0) return 0;
         var text = typeof fullText === "string" ? fullText : "";
-        var imgRendered = (text.match(/\[IMAGE: /g) || []).length;
-        var docRendered = (text.match(/\[FILE: /g) || []).length;
-        if (imgRendered === 0 && docRendered === 0) return pool;
+        var hasSections = text.indexOf("[FILE: ") !== -1 || text.indexOf("[IMAGE: ") !== -1;
+        if (!hasSections) return pool;
         var br = attachBreak && typeof attachBreak === "object" ? attachBreak : {};
         var imgTotal = typeof br.imgCount === "number" && br.imgCount > 0 ? br.imgCount : 0;
         var docTotal = typeof br.docCount === "number" && br.docCount > 0 ? br.docCount : 0;
         var total = imgTotal + docTotal;
         if (total <= 0) return 0;
-        var done = Math.min(imgRendered, imgTotal) + Math.min(docRendered, docTotal);
+        var docRendered = (text.match(/(?:^|\n\n)\[FILE: (?!.* — )(?!.* \([\d.,]+ ?(?:B|KB|MB|GB|Б)\)\])[^\]\n]*\]/g) || []).length;
+        var done = Math.min(docRendered, docTotal);
         if (done >= total) return 0;
         return Math.round(pool * (total - done) / total);
       }
@@ -18862,7 +17601,7 @@ if (typeof module !== 'undefined' && module.exports) {
         try {
           if (!window.__aiCmEmitChannelSeen) {
             window.__aiCmEmitChannelSeen = true;
-            var P1 = typeof window !== "undefined" && window.AiCmExportEmitPipeline ? window.AiCmExportEmitPipeline : null;
+            var P1 = typeof export_emit_pipeline_exports !== "undefined" && export_emit_pipeline_exports ? export_emit_pipeline_exports : typeof window !== "undefined" && window.AiCmExportEmitPipeline ? window.AiCmExportEmitPipeline : null;
             debugLog("log", "[AI CM][svc-emit-trace] site=" + (currentAdapter && currentAdapter.siteName || "?") + " emit-channel=received convId=" + (P1 && P1.extractConvIdFromUrl(location.pathname) || ""));
           }
         } catch (eEmit1) {
@@ -18912,6 +17651,7 @@ if (typeof module !== 'undefined' && module.exports) {
         badgeSuppressed = false;
         if (emitConvId && emitConvId !== lastSnapConvId) {
           maxTokenCount = 0;
+          lastPercentage = -1;
           lastSnapConvId = emitConvId;
           debugLog("log", "[content-trace] v37: \u043D\u043E\u0432\u044B\u0439 convId \u0441\u043D\u0438\u043C\u043A\u0430 \u2192 maxTokenCount=0 (" + emitConvId.slice(0, 8) + ")");
         }
@@ -18987,7 +17727,7 @@ if (typeof module !== 'undefined' && module.exports) {
               // (core/base-handler.js:54, core/export-manager.js:178 — те уже знают 'human', но
               // получали готовый 'assistant') и все ходы Claude шли под '## Ассистент'.
               role: r18 === "user" || r18 === "human" ? "user" : "assistant",
-              text: sanitizeGeminiText(texts[d18]),
+              text: sanitizeGeminiText2(texts[d18]),
               id: rawMsgs18 && rawMsgs18[d18] && rawMsgs18[d18].id != null ? String(rawMsgs18[d18].id) : String(ids[d18])
             });
           }
@@ -19157,7 +17897,7 @@ if (typeof module !== 'undefined' && module.exports) {
       }
       function getCurrentConvId() {
         try {
-          var P = typeof window !== "undefined" && window.AiCmExportEmitPipeline ? window.AiCmExportEmitPipeline : null;
+          var P = typeof export_emit_pipeline_exports !== "undefined" && export_emit_pipeline_exports ? export_emit_pipeline_exports : typeof window !== "undefined" && window.AiCmExportEmitPipeline ? window.AiCmExportEmitPipeline : null;
           if (P && typeof P.extractConvIdFromUrl === "function") return P.extractConvIdFromUrl(location.pathname) || "";
           var m = location.pathname.match(/\/app\/(?!prompts(?:\/|$)|new(?:\/|$)|apikey(?:\/|$))([A-Za-z0-9_-]+)/);
           if (m) return m[1];
@@ -19836,10 +18576,10 @@ if (typeof module !== 'undefined' && module.exports) {
         if (rec && rec.kind === "archive") {
           var fmt = rec.format || "?";
           var cnt = String(rec.count || 0);
-          return { kind: "archive", label: rec.label || aiCmI18nMessage("content_source_archive", "\u0430\u0440\u0445\u0438\u0432: " + fmt + " \xB7 " + cnt + " \u0441\u043E\u043E\u0431\u0449.", [fmt, cnt]) };
+          return { kind: "archive", label: rec.label || aiCmI18nMessage2("content_source_archive", "\u0430\u0440\u0445\u0438\u0432: " + fmt + " \xB7 " + cnt + " \u0441\u043E\u043E\u0431\u0449.", [fmt, cnt]) };
         }
-        if (baseSeen) return { kind: "live", label: aiCmI18nMessage("content_source_live", "live (\u0441\u0435\u0442\u044C/DOM)") };
-        if (aiCmAdapterBaseSeen()) return { kind: "live", label: aiCmI18nMessage("content_source_live", "live (\u0441\u0435\u0442\u044C/DOM)") };
+        if (baseSeen) return { kind: "live", label: aiCmI18nMessage2("content_source_live", "live (\u0441\u0435\u0442\u044C/DOM)") };
+        if (aiCmAdapterBaseSeen()) return { kind: "live", label: aiCmI18nMessage2("content_source_live", "live (\u0441\u0435\u0442\u044C/DOM)") };
         return null;
       }
       function aiCmLoadArchiveTier(convId, reason) {
@@ -19901,7 +18641,7 @@ if (typeof module !== 'undefined' && module.exports) {
             /** @type {HTMLElement|null} */
             panel.querySelector(".ai-cm-source")
           );
-          var want = aiCmSourceLabelNow ? aiCmI18nMessage("content_source_label", "\u0418\u0441\u0442\u043E\u0447\u043D\u0438\u043A: " + aiCmSourceLabelNow, [aiCmSourceLabelNow]) : "";
+          var want = aiCmSourceLabelNow ? aiCmI18nMessage2("content_source_label", "\u0418\u0441\u0442\u043E\u0447\u043D\u0438\u043A: " + aiCmSourceLabelNow, [aiCmSourceLabelNow]) : "";
           if (el && el.textContent === want && el.style.display === (want ? "block" : "none")) return;
           if (!want) {
             if (el) {
@@ -20332,6 +19072,7 @@ if (typeof module !== 'undefined' && module.exports) {
             }
           } catch (eMetricSrc) {
           }
+          var aiCmRatchetResetByDom = false;
           if (metricServerTokens > 0) {
             maxTokenCount = tokenEstimate;
           } else if (byokHeuristicHold) {
@@ -20340,10 +19081,19 @@ if (typeof module !== 'undefined' && module.exports) {
           } else if (typeof baseSeen !== "undefined" && baseSeen === true && typeof baseCount === "number" && baseCount > 0 && typeof aiCmDomListS1 !== "undefined" && aiCmDomListS1 && aiCmDomListS1.length > 0 && baseCount > aiCmDomListS1.length && tokenEstimate < maxTokenCount) {
             maxTokenCount = tokenEstimate;
             lastBounded = false;
+            aiCmRatchetResetByDom = true;
           } else if (useMonotonic) {
             if (tokenEstimate > maxTokenCount) maxTokenCount = tokenEstimate;
           } else {
             maxTokenCount = tokenEstimate;
+          }
+          if (typeof aiCmRatchetResetByDom === "boolean" && aiCmRatchetResetByDom === false && baseComplete !== true && metricServerTokens === 0 && typeof lastPercentage === "number" && lastPercentage > 0 && displayLimit > 0) {
+            var strictHoldTokens = Math.ceil(lastPercentage * displayLimit / 100);
+            if (maxTokenCount < strictHoldTokens) {
+              var strictNewPct = Math.round(maxTokenCount / displayLimit * 1e3) / 10;
+              debugLog("log", "[content-trace] badge-strict-hold: baseComplete=0, \u043F\u0440\u043E\u0448\u043B\u044B\u0439 pct=" + lastPercentage + " > \u043D\u043E\u0432\u044B\u0439 " + strictNewPct + " \u2014 \u0431\u0435\u0439\u0434\u0436 \u0434\u0435\u0440\u0436\u0438\u0442 " + lastPercentage + "% (\u0431\u0430\u0437\u0430 \u043D\u0435 \u0434\u043E\u0441\u043E\u0431\u0440\u0430\u043D\u0430)");
+              maxTokenCount = strictHoldTokens;
+            }
           }
           const percentage = displayLimit > 0 ? Math.round(maxTokenCount / displayLimit * 1e3) / 10 : 0;
           const hasChanged = percentage !== lastPercentage;
@@ -20948,7 +19698,7 @@ if (typeof module !== 'undefined' && module.exports) {
           };
           var dumpFile = "ai-cm-history-" + Date.now() + ".json";
           try {
-            var BdiagHot = typeof window !== "undefined" && window && window.AiCmExportBuilders ? window.AiCmExportBuilders : null;
+            var BdiagHot = typeof export_text_builders_default !== "undefined" ? export_text_builders_default : null;
             if (BdiagHot && typeof BdiagHot.aiCmDiagDownload === "function") {
               BdiagHot.aiCmDiagDownload("hotkey-json-dump", JSON.stringify(payload, null, 2), dumpFile, {
                 site: typeof currentAdapter !== "undefined" && currentAdapter && currentAdapter.siteName || "",
@@ -21902,7 +20652,7 @@ if (typeof module !== 'undefined' && module.exports) {
 
 
 (function () {
-  var OPTIONS_HTML = "<!DOCTYPE html>\n<html lang=\"ru\">\n\n<head>\n<script>window.__AI_CM_OPTIONS_FRAME__=true;</script>\n  <meta charset=\"UTF-8\">\n  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n  <title data-i18n=\"options_page_title\">AI Context Monitor</title>\n  <style>\n* {\n  margin: 0;\n  padding: 0;\n  box-sizing: border-box;\n}\n\nbody {\n  /* Minor-B (#19, WCAG 1.4.10): фиксированные 300px убраны — раскладка тянется по окну.\n     Потокобезопасность на 320px: `overflow-wrap: anywhere` обнуляет min-content текста,\n     поэтому длинные RU/EN-подписи переносятся, а не выпирают за вьюпорт. */\n  min-width: 0;\n  max-width: 100%;\n  overflow-wrap: anywhere;\n  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;\n  background: #1a1a2e;\n  color: #e0e0e0;\n}\n\n.popup {\n  /* Minor-B (#19): колонка контента без фиксированной ширины (max-width — не фикс). */\n  padding: 16px;\n  max-width: 720px;\n}\n\n.header {\n  display: flex;\n  align-items: center;\n  gap: 8px;\n  margin-bottom: 16px;\n  padding-bottom: 12px;\n  border-bottom: 1px solid #2a2a4a;\n}\n\n.logo {\n  font-size: 24px;\n}\n\nh1 {\n  font-size: 16px;\n  font-weight: 600;\n  color: #ffffff;\n}\n\n.stats {\n  background: #16213e;\n  border-radius: 10px;\n  padding: 12px;\n  margin-bottom: 16px;\n}\n\n.stat-row {\n  display: flex;\n  justify-content: space-between;\n  padding: 4px 0;\n  font-size: 13px;\n}\n\n.stat-row.highlight {\n  margin-top: 4px;\n  padding-top: 8px;\n  border-top: 1px solid #2a2a4a;\n  font-weight: 600;\n}\n\n.stat-label {\n  color: #8b8bad;\n}\n\n.stat-value {\n  color: #ffffff;\n  font-variant-numeric: tabular-nums;\n}\n\n.section {\n  margin-bottom: 12px;\n}\n\n.label {\n  display: block;\n  font-size: 12px;\n  color: #8b8bad;\n  margin-bottom: 4px;\n}\n\nselect, input {\n  width: 100%;\n  padding: 8px 10px;\n  border-radius: 8px;\n  border: 1px solid #2a2a4a;\n  background: #16213e;\n  color: #ffffff;\n  font-size: 13px;\n}\n\nselect:focus, input:focus {\n  border-color: #7c3aed;\n}\n\n/* v1.20 (M-3): видимый фокус для клавиатуры. Прежняя смена border-color на :focus\n   сохранена выше как дополнение; outline больше не подавляется.\n   Кнопки/ссылки получили обводку впервые — раньше у них не было :focus-стилей вовсе. */\nbutton:focus-visible,\nselect:focus-visible,\ninput:focus-visible,\na:focus-visible,\n[tabindex]:focus-visible {\n  outline: 2px solid #a78bfa;\n  outline-offset: 2px;\n}\n\n/* v1.20 (M-1): смысловые группы (role=\"group\") — обычные .section-контейнеры:\n   ни рамки, ни собственных отступов, поэтому раскладка остаётся прежней. */\n[role=\"group\"].section {\n  border: none;\n  margin: 0 0 12px 0;\n  padding: 0;\n  min-width: 0;\n}\n\n.hint {\n  display: block;\n  font-size: 10px;\n  color: #8b8bad;\n  margin-top: 4px;\n}\n\n.checkbox-row {\n  display: flex;\n  align-items: center;\n  gap: 8px;\n}\n\n/* O-7: тумблер сырого режима экспорта — внутри секции «Экспорт истории»,\n   после ряда кнопок; раскладку прочих секций не трогает. */\n.export-hidden-row {\n  margin-top: 8px;\n}\n\n\n.checkbox-row input[type=\"checkbox\"] {\n  width: auto;\n  accent-color: #7c3aed;\n}\n\n.checkbox-row label {\n  font-size: 13px;\n  cursor: pointer;\n}\n\n.footer {\n  text-align: center;\n  margin-top: 12px;\n  padding-top: 12px;\n  border-top: 1px solid #2a2a4a;\n}\n\n.version {\n  font-size: 11px;\n  color: #8b8bad;\n}\n\n/* v1.18 (P1): ссылка на политику конфиденциальности в футере */\n#privacy-link {\n  display: inline-block;\n  margin-left: 8px;\n  font-size: 11px;\n  color: #a78bfa;\n  text-decoration: none;\n  cursor: pointer;\n}\n\n#privacy-link:hover {\n  color: #c4b5fd;\n  text-decoration: underline;\n}\n\n/* v1.19 (M-6): ссылка на руководство в футере — стиль как у #privacy-link */\n#help-link {\n  display: inline-block;\n  margin-left: 8px;\n  font-size: 11px;\n  color: #a78bfa;\n  text-decoration: none;\n  cursor: pointer;\n}\n\n#help-link:hover {\n  color: #c4b5fd;\n  text-decoration: underline;\n}\n\n.input-row {\n  display: flex;\n  gap: 6px;\n}\n\n/* v1.8: ряд «Порог, %» — фикс ширины поля, чтобы цифра не заходила под стрелки спиннера */\n#auto-export-section .input-row {\n  gap: 8px;\n  align-items: center;\n}\n#aiCmAutoExportPct {\n  /* Minor-B (#19/#21): размер в ch вместо жёстких 64px; гарантия v1.8 («цифра не заходит\n     под стрелки спиннера») сохранена через min-width: 64px + padding-right: 20px. */\n  inline-size: 6ch !important;\n  min-width: 64px;\n  flex: 0 0 auto;\n  box-sizing: border-box;\n  padding-right: 20px;\n  height: 32px;\n}\n#aiCmAutoExportFmt {\n  flex: 1 1 auto;\n  min-width: 0;\n  height: 32px;\n}\n\n.input-row input {\n  flex: 1;\n  /* Minor-B (#19): flex-ребёнок без min-width: 0 не сжимается ниже min-content инпута. */\n  min-width: 0;\n}\n\n.btn-reset {\n  padding: 8px 12px;\n  border-radius: 8px;\n  border: 1px solid #2a2a4a;\n  background: #16213e;\n  color: #8b8bad;\n  font-size: 12px;\n  cursor: pointer;\n  white-space: nowrap;\n}\n\n.btn-reset:hover {\n  background: #2a2a4a;\n  color: #ffffff;\n}\n\n.api-key-row {\n  display: flex;\n  gap: 4px;\n}\n\n.api-key-row input {\n  flex: 1;\n  /* Minor-B (#19): без min-width: 0 поле ключа не сжимается на 320px. */\n  min-width: 0;\n}\n\n.btn-toggle {\n  padding: 8px 10px;\n  border-radius: 8px;\n  border: 1px solid #2a2a4a;\n  background: #16213e;\n  color: #e0e0e0;\n  font-size: 14px;\n  cursor: pointer;\n  white-space: nowrap;\n}\n\n.btn-toggle:hover {\n  background: #2a2a4a;\n}\n\n.export-row {\n  display: flex;\n  gap: 6px;\n}\n\n.btn-export {\n  flex: 1;\n  padding: 8px 10px;\n  border-radius: 8px;\n  border: 1px solid #2a2a4a;\n  background: #16213e;\n  color: #ffffff;\n  font-size: 12px;\n  cursor: pointer;\n  white-space: nowrap;\n}\n\n.btn-export:hover:not(:disabled) {\n  background: #2a2a4a;\n}\n\n.btn-export:disabled {\n  color: #9a9ab0;\n  cursor: not-allowed;\n}\n\n.stale-warning {\n  background: #3a1f2b;\n  border: 1px solid #7c3aed;\n  border-radius: 10px;\n  padding: 10px 12px;\n  margin-bottom: 12px;\n  font-size: 12px;\n  line-height: 1.45;\n  color: #f0b0c0;\n}\n\n/* T1 (v1.16): секция «Архивы» — первый ярус истории */\n.archive-list {\n  margin-top: 8px;\n  display: flex;\n  flex-direction: column;\n  gap: 4px;\n  font-size: 11px;\n  line-height: 1.4;\n  color: #c8c8e0;\n}\n\n.archive-item {\n  display: flex;\n  align-items: center;\n  justify-content: space-between;\n  gap: 6px;\n  padding: 4px 6px;\n  border: 1px solid #2a2a4a;\n  border-radius: 6px;\n}\n\n.archive-info {\n  overflow: hidden;\n  text-overflow: ellipsis;\n  white-space: nowrap;\n}\n\n.archive-del {\n  flex: 0 0 auto;\n  font-size: 11px;\n  padding: 2px 6px;\n}\n\n.archive-status {\n  display: block;\n  margin-top: 6px;\n}\n\n/* Аудит 1.6 (a11y, WCAG 2.2 target-size): минимальная область нажатия 24×24 px.\n   Блок только добавляющий: прежние объявления и цвета не изменены, раскладка\n   300-пиксельного попапа не затронута (габариты растут только до минимума). */\n.checkbox-row input[type=\"checkbox\"] {\n  min-width: 24px;\n  min-height: 24px;\n}\n\n.archive-del {\n  min-width: 24px;\n  min-height: 24px;\n}\n\n.btn-reset,\n.btn-toggle,\n.btn-export {\n  min-height: 24px;\n}\n\n#privacy-link,\n#help-link {\n  min-height: 24px;\n  line-height: 24px;\n}\n\n/* Major-подбатч 1 (аудит #10): свёрнутая секция «Дополнительно» (<details>/<summary>).\n   Блок только добавляющий: ни одно прежнее правило и ни один цвет не изменены. */\ndetails.section > summary {\n  cursor: pointer;\n  font-size: 12px;\n  color: #8b8bad;\n  padding: 4px 0;\n  margin-bottom: 4px;\n  list-style-position: inside;\n}\n\ndetails.section > summary::marker {\n  color: #a78bfa;\n}\n\ndetails.section > summary:hover {\n  color: #ffffff;\n}\n\n/* Аудит #10: :focus-visible для summary обязателен — подавлять обводку здесь нельзя\n   (это пинится в tests/a11y-options.test.js). Правило намеренно стоит ПОСЛЕ combined-правила\n   выше: a11y-пин берёт первое :focus-visible-правило файла и проверяет по нему\n   селекторы button/select/input/a/[tabindex]. */\nsummary:focus-visible {\n  outline: 2px solid #a78bfa;\n  outline-offset: 2px;\n}\n\n/* =====================================================================================\n * Minor-подбатч B (UI-аудит 2026-09-28, options: находки #19/#20/#21)\n * Блок только добавляющий. Изменены две прежние вещи (обе перечислены в отчёте):\n *   body — снята фикс-ширина 300px (#19);  #aiCmAutoExportPct — width → inline-size (#19).\n * ===================================================================================== */\n\n/* #20: сетка 2×2 для четырёх кнопок экспорта истории (MD / JSON / PDF / TXT).\n   minmax(72px, 1fr) не даёт кнопкам схлопнуться и не переполняет строку даже на 320px. */\n.export-grid {\n  display: grid;\n  grid-template-columns: repeat(2, minmax(72px, 1fr));\n  gap: 6px;\n  min-width: 0;\n}\n\n.export-grid .btn-export {\n  min-width: 0;\n}\n\n/* #20: MD — основной формат (primary); остальные кнопки остаются tonal (.btn-export).\n   Контраст: #ffffff на #7c3aed = 5.70:1; hover #ffffff на #6d28d9 = 7.10:1 (AA ≥ 4.5:1). */\n.export-grid .btn-export--primary {\n  background: #7c3aed;\n  border-color: #7c3aed;\n  color: #ffffff;\n  font-weight: 600;\n}\n\n.export-grid .btn-export--primary:hover:not(:disabled) {\n  background: #6d28d9;\n  border-color: #6d28d9;\n}\n\n/* #20: пока история недоступна, primary-вид не перебивает .btn-export:disabled. */\n.export-grid .btn-export--primary:disabled {\n  background: #16213e;\n  border-color: #2a2a4a;\n  color: #9a9ab0;\n}\n\n/* #21: ряд порогов — суффикс «%» внутри обёртки поля, размер в ch.\n   Число не уходит под стрелки спиннера: спиннер внутри инпута, «%» — снаружи него.\n   #21-polish: поля больше не растягиваются на всю ширину ряда — инпут компактный\n   (~8ch ≈ 55px, хватает под «100»), цифры по центру, «%» сразу за числом. */\n.thresholds-row {\n  gap: 8px;\n  align-items: center;\n}\n\n.threshold-field {\n  display: flex;\n  align-items: center;\n  gap: 2px;\n  flex: 0 0 auto;\n  min-width: 0;\n}\n\n.threshold-field input {\n  flex: 0 0 8ch;\n  min-width: 0;\n  inline-size: 8ch;\n  padding: 4px 2px;\n  font-size: 13px;\n  text-align: center;\n}\n\n.threshold-unit {\n  flex: 0 0 auto;\n  font-size: 11px;\n  color: #8b8bad;\n}\n\n/* #21: визуальная валидация диапазона 1–100 — чистый CSS, без aria-правок в options.js\n   (пин tests/a11y-options.test.js:340-342 допускает в options.js ровно одно aria-).\n   Контраст рамки: #ef4444 на фоне поля #16213e = 4.22:1 (≥ 3:1, WCAG 1.4.11). */\n#aiCmProactiveLow:invalid,\n#aiCmProactiveMedium:invalid,\n#aiCmProactiveHigh:invalid {\n  border-color: #ef4444;\n  outline: 1px solid #ef4444;\n}\n\n</style>\n</head>\n\n<body>\n  <div class=\"popup\">\n    <!-- Аудит 1.6 (a11y): весь контент попапа — ровно один main landmark -->\n    <main>\n    <div class=\"header\">\n      <span class=\"logo\">📊</span>\n      <h1 data-i18n=\"options_header_title\">AI Context Monitor</h1>\n    </div>\n\n    <!-- v1.20 (M-2): регион статистики объявляет изменения вежливо -->\n    <div class=\"stats\" id=\"stats\" aria-live=\"polite\">\n      <div class=\"stat-row\">\n        <span class=\"stat-label\" data-i18n=\"options_stat_site\">Сайт:</span>\n        <span class=\"stat-value\" id=\"stat-site\">—</span>\n      </div>\n      <div class=\"stat-row\">\n        <span class=\"stat-label\" data-i18n=\"options_stat_model\">Модель:</span>\n        <span class=\"stat-value\" id=\"stat-model\">—</span>\n      </div>\n      <div class=\"stat-row\">\n        <span class=\"stat-label\" data-i18n=\"options_stat_tokens\">Токены:</span>\n        <span class=\"stat-value\" id=\"stat-tokens\">—</span>\n      </div>\n      <div class=\"stat-row\">\n        <span class=\"stat-label\" data-i18n=\"options_stat_limit\">Лимит:</span>\n        <span class=\"stat-value\" id=\"stat-limit\">—</span>\n      </div>\n      <div class=\"stat-row highlight\">\n        <span class=\"stat-label\" data-i18n=\"options_stat_fill\">Заполнение:</span>\n        <span class=\"stat-value\" id=\"stat-percent\">—</span>\n      </div>\n      <div class=\"stat-row\">\n        <span class=\"stat-label\" data-i18n=\"options_stat_source\">Источник:</span>\n        <span class=\"stat-value\" id=\"stat-source\">—</span>\n      </div>\n    </div>\n\n    <!-- v1.20 (M-2): предупреждение об устаревших данных — срочное объявление -->\n    <div class=\"stale-warning\" id=\"stale-warning\" role=\"alert\" style=\"display: none;\"></div>\n\n    <div class=\"section\">\n      <!-- v1.20 (M-1): подпись связана с select через for/id -->\n      <label class=\"label\" for=\"model-select\" data-i18n=\"options_model_label\">Модель:</label>\n      <select id=\"model-select\">\n        <option value=\"auto\" data-i18n=\"options_model_auto\">Автоопределение</option>\n        <optgroup label=\"OpenAI\">\n          <option value=\"gpt-4o\">GPT-4o (128K)</option>\n          <option value=\"gpt-4o-mini\">GPT-4o Mini (128K)</option>\n          <option value=\"gpt-4-turbo\">GPT-4 Turbo (128K)</option>\n          <option value=\"gpt-4\">GPT-4 (8K)</option>\n          <option value=\"gpt-3.5-turbo\">GPT-3.5 Turbo (16K)</option>\n        </optgroup>\n        <optgroup label=\"Google\">\n          <option value=\"gemini-2.5-pro\">Gemini 2.5 Pro (1M)</option>\n          <option value=\"gemini-2.5-flash\">Gemini 2.5 Flash (1M)</option>\n          <option value=\"gemini-1.5-pro\">Gemini 1.5 Pro (2M)</option>\n        </optgroup>\n        <optgroup label=\"DeepSeek\">\n          <option value=\"deepseek-v3\">DeepSeek V3 (128K)</option>\n          <option value=\"deepseek-r1\">DeepSeek R1 (128K)</option>\n        </optgroup>\n      </select>\n    </div>\n\n    <div class=\"section\">\n      <label class=\"label\" data-i18n=\"options_limit_label\">Лимит контекста:</label>\n      <div class=\"input-row\">\n        <!-- v1.20 (M-1): поле без видимой текстовой подписи получает имя доступности -->\n        <input type=\"number\" id=\"custom-limit\" aria-label=\"Пользовательский лимит токенов\" data-i18n-aria-label=\"options_limit_aria\" placeholder=\"Авто\" data-i18n-placeholder=\"options_limit_placeholder\" min=\"1\" max=\"100\" step=\"1\">\n        <button id=\"reset-limit\" class=\"btn-reset\" data-i18n=\"options_limit_auto_btn\">Авто</button>\n      </div>\n      <span class=\"hint\" data-i18n=\"options_limit_hint\">Порог в % от Авто-порога: цвета и % считаются от этого порога. 100% = как Авто. Пусто = Авто</span>\n    </div>\n\n    <div class=\"section checkbox-row\">\n      <input type=\"checkbox\" id=\"show-widget\" checked>\n      <label for=\"show-widget\" data-i18n=\"options_show_widget\">Показывать индикатор на странице</label>\n    </div>\n    <!-- Major-подбатч 1 (аудит #10): проактивные пороги остаются видимыми; редкие\n         настройки (логи, автоэкспорт, API-ключ, экспорт, архивы) свёрнуты в Advanced ниже. -->\n    <!-- v1.20 (M-1): смысловая группа «Проактивные пороги» -->\n    <div class=\"section\" id=\"proactive-section\" role=\"group\" aria-labelledby=\"proactive-legend\">\n      <label class=\"label\" id=\"proactive-legend\" data-i18n=\"options_proactive_legend\">Проактивные пороги</label>\n      <div class=\"checkbox-row\">\n        <input type=\"checkbox\" id=\"aiCmProactive\" checked>\n        <label for=\"aiCmProactive\" data-i18n=\"options_proactive_badge\">Бейдж и уведомления о порогах</label>\n      </div>\n      <div class=\"checkbox-row\">\n        <input type=\"checkbox\" id=\"aiCmProactiveNotify\">\n        <label for=\"aiCmProactiveNotify\" data-i18n=\"options_proactive_notify\">Chrome-уведомления</label>\n      </div>\n      <div class=\"input-row\">\n        <label class=\"label\" for=\"aiCmProactiveLow\" data-i18n=\"options_proactive_levels_label\">Пороги уведомлений и бейджа (1–100, возрастающий порядок):</label>\n      </div>\n      <div class=\"input-row thresholds-row\">\n        <!-- v1.20 (M-1): у трёх числовых полей порога — собственные имена доступности (title сохранён) -->\n        <!-- Minor-B (#21): суффикс единицы «%», inputmode=numeric и общая подсказка о диапазоне 1–100.\n             «%» — языконейтральный символ-токен (как MD/JSON/PDF/TXT): литерал без data-i18n,\n             т.к. пин tests/i18n-locales.test.js:187-204 требует, чтобы ЛЮБОЕ совпадение ru/en\n             (кроме брендовых строк и options_info_separator) было переведено. -->\n        <span class=\"threshold-field\">\n          <input type=\"number\" id=\"aiCmProactiveLow\" aria-label=\"Низкий порог процентов\" data-i18n-aria-label=\"options_proactive_low_aria\" inputmode=\"numeric\" min=\"1\" max=\"100\" step=\"1\" value=\"70\" title=\"Низкий порог — зелёный\" data-i18n-title=\"options_proactive_low_title\" aria-describedby=\"proactive-threshold-msg\">\n          <span class=\"threshold-unit\">%</span>\n        </span>\n        <span class=\"threshold-field\">\n          <input type=\"number\" id=\"aiCmProactiveMedium\" aria-label=\"Средний порог процентов\" data-i18n-aria-label=\"options_proactive_medium_aria\" inputmode=\"numeric\" min=\"1\" max=\"100\" step=\"1\" value=\"85\" title=\"Средний порог — жёлтый\" data-i18n-title=\"options_proactive_medium_title\" aria-describedby=\"proactive-threshold-msg\">\n          <span class=\"threshold-unit\">%</span>\n        </span>\n        <span class=\"threshold-field\">\n          <input type=\"number\" id=\"aiCmProactiveHigh\" aria-label=\"Высокий порог процентов\" data-i18n-aria-label=\"options_proactive_high_aria\" inputmode=\"numeric\" min=\"1\" max=\"100\" step=\"1\" value=\"95\" title=\"Высокий порог — красный\" data-i18n-title=\"options_proactive_high_title\" aria-describedby=\"proactive-threshold-msg\">\n          <span class=\"threshold-unit\">%</span>\n        </span>\n      </div>\n      <!-- v2.0.13: кольцо на странице красится ТЕМИ ЖЕ порогами — подсказка переписана -->\n      <span class=\"hint\" data-i18n=\"options_ring_zones_hint\">Цвет кольца на странице — по тем же порогам: зелёный ниже нижнего, жёлтый между нижним и верхним, красный от верхнего. Пороги также управляют уведомлениями и автоэкспортом.</span>\n      <!-- Minor-B (#21): статическое сообщение о диапазоне и фактическом поведении,\n           связано с тремя полями порогов через aria-describedby (инвалидация — CSS :invalid) -->\n      <span class=\"hint\" id=\"proactive-threshold-msg\" data-i18n=\"options_proactive_hint\">Допустимо 1–100. Каждый порог срабатывает один раз на разговор; при неверном значении берётся 70/85/95</span>\n    </div>\n\n    <!-- Major-подбатч 1 (аудит #10): один свёрнутый блок для редких настроек.\n         Без атрибута open — по умолчанию закрыт. -->\n    <details class=\"section\" id=\"advanced-section\">\n      <summary data-i18n=\"options_advanced_summary\">Дополнительно</summary>\n\n      <div class=\"section checkbox-row\">\n        <input type=\"checkbox\" id=\"debugLogs\">\n        <label for=\"debugLogs\" data-i18n=\"options_debug_logs\">Подробные логи</label>\n      </div>\n\n      <!-- v1.20 (M-1): смысловая группа «Автоэкспорт чатов».\n           Выбран role=\"group\" + aria-labelledby (вместо fieldset/legend): имя группы\n           даёт существующая видимая подпись .label, а раскладка .section не меняется. -->\n      <div class=\"section\" id=\"auto-export-section\" role=\"group\" aria-labelledby=\"auto-export-legend\">\n        <label class=\"label\" id=\"auto-export-legend\" data-i18n=\"options_autoexport_legend\">Автоэкспорт чатов (все поддерживаемые платформы)</label>\n        <div class=\"checkbox-row\">\n          <input type=\"checkbox\" id=\"aiCmAutoExport\">\n          <label for=\"aiCmAutoExport\" data-i18n=\"options_autoexport_enable\">Автоэкспорт при пороге</label>\n        </div>\n        <div class=\"input-row\">\n          <label class=\"label\" for=\"aiCmAutoExportPct\" data-i18n=\"options_autoexport_pct_label\">Порог, %:</label>\n          <input type=\"number\" id=\"aiCmAutoExportPct\" min=\"1\" max=\"100\" step=\"1\" value=\"90\">\n          <select id=\"aiCmAutoExportFmt\" aria-label=\"Формат файла автоэкспорта\" data-i18n-aria-label=\"options_autoexport_fmt_aria\">\n            <option value=\"txt\">txt</option>\n            <option value=\"md\">md</option>\n            <option value=\"json\">json</option>\n          </select>\n        </div>\n        <span class=\"hint\" data-i18n=\"options_autoexport_hint\">Один раз скачивает историю чата при достижении порога</span>\n      </div>\n\n      <div class=\"section\">\n        <label class=\"label\" data-i18n=\"options_byok_label\">Gemini API — точный подсчёт токенов</label>\n        <!-- Major-подбатч 1 (аудит #12): у поля ключа появилась видимая подпись label[for] -->\n        <label class=\"label\" for=\"api-key\" data-i18n=\"options_byok_key_label\">API-ключ Google AI Studio</label>\n        <div class=\"api-key-row\">\n          <input type=\"password\" id=\"api-key\" placeholder=\"Введите API-ключ Google AI Studio\" data-i18n-placeholder=\"options_byok_key_placeholder\" autocomplete=\"off\">\n          <button id=\"toggle-api-key\" class=\"btn-toggle\" type=\"button\" aria-pressed=\"false\" title=\"Показать/скрыть ключ\" data-i18n-title=\"options_byok_toggle_title\">👁</button>\n        </div>\n        <span class=\"hint\" data-i18n=\"options_byok_hint\">Ключ хранится только до перезапуска браузера (chrome.storage.session). После перезапуска введите заново.</span>\n        <div class=\"api-key-row\">\n          <span class=\"hint\" id=\"api-key-status\" role=\"status\" data-i18n=\"options_byok_status_unset\">Ключ: не задан</span>\n          <button id=\"api-key-remove\" class=\"btn-toggle\" type=\"button\" data-i18n=\"options_byok_remove\">Убрать ключ</button>\n        </div>\n      </div>\n\n      <div class=\"section\">\n        <div class=\"checkbox-row\">\n          <input type=\"checkbox\" id=\"exact-count\">\n          <label for=\"exact-count\" data-i18n=\"options_exact_count\">Точный подсчёт токенов через Gemini API</label>\n        </div>\n        <!-- BYOK-синхронизация: ключ живёт в session (стирается при перезапуске), флаг — в local.\n             Текст подставляется из локали в options.js; пустой span == предупреждения нет. -->\n        <span class=\"hint\" id=\"exact-count-warning\" role=\"status\"></span>\n      </div>\n\n      <div class=\"section\">\n        <label class=\"label\" data-i18n=\"options_export_legend\">Экспорт истории</label>\n        <!-- Minor-B (#20): сетка 2×2, короткие визуальные подписи MD/JSON/PDF/TXT, доступное имя у каждой кнопки.\n             Локализованные строки действий («Сохранить .md», «Сохранить .txt (эталон)») переехали в title\n             через data-i18n-title: они остаются переводимыми и не дублируют короткую подпись. -->\n        <div class=\"export-grid\" id=\"export-history-grid\">\n          <button id=\"export-md\" class=\"btn-export btn-export--primary\" disabled title=\"Сохранить .md\" data-i18n-title=\"options_export_md\" aria-label=\"MD — сохранить историю в формате Markdown\" data-i18n-aria-label=\"options_export_md_aria\">MD</button>\n          <button id=\"export-json\" class=\"btn-export\" disabled title=\"Сохранить .json\" data-i18n-title=\"options_export_json\" aria-label=\"JSON — сохранить историю в формате JSON\" data-i18n-aria-label=\"options_export_json_aria\">JSON</button>\n          <button id=\"export-pdf\" class=\"btn-export\" disabled title=\"Сохранить .pdf\" data-i18n-title=\"options_export_pdf\" aria-label=\"PDF — сохранить историю в формате PDF\" data-i18n-aria-label=\"options_export_pdf_aria\">PDF</button>\n          <button id=\"export-txt\" class=\"btn-export\" disabled title=\"Сохранить .txt (эталон)\" data-i18n-title=\"options_export_txt\" aria-label=\"TXT — сохранить историю в формате TXT (эталон)\" data-i18n-aria-label=\"options_export_txt_aria\">TXT</button>\n        </div>\n        <div class=\"export-row\">\n          <button id=\"export-diag\" class=\"btn-export\" data-i18n=\"options_export_diag\">Экспорт диагностики</button>\n        </div>\n        <!-- O-7: единственный тумблер сырого режима экспорта (default OFF = текущее поведение) -->\n        <!-- D-O41 (UX): подсказка тумблера — reasoning автоматически попадает в экспорт, если он\n             есть в источнике; принудительное исключение (OFF) действует, когда reasoning в\n             источнике нет (force-exclude). Строки — ключ options_export_hidden_title (ru/en). -->\n        <div class=\"checkbox-row export-hidden-row\">\n          <input type=\"checkbox\" id=\"aiCmIncludeHiddenInExport\" title=\"Reasoning автоматически включается при наличии в источнике; тумблер принудительно исключает\" data-i18n-title=\"options_export_hidden_title\">\n          <label for=\"aiCmIncludeHiddenInExport\" data-i18n=\"options_export_hidden_label\">Включать reasoning и инъекции соседних расширений (DeepSeek++, Better DeepSeek) в экспорт</label>\n        </div>\n        <span class=\"hint\" data-i18n=\"options_export_hidden_hint\">Выключено: в файл попадают только вопросы и ответы, без размышлений и инъекций соседних расширений (DeepSeek++, Better DeepSeek). Включено: размышления и инъекции попадают в экспорт.</span>\n        <span class=\"hint\" id=\"export-hint\" data-i18n=\"options_open_supported_site\">Откройте поддерживаемый сайт</span>\n      </div>\n\n      <div class=\"section\" id=\"archive-section\">\n        <label class=\"label\" data-i18n=\"options_archive_legend\">Архивы (первый ярус истории)</label>\n        <div class=\"input-row\">\n          <input type=\"file\" id=\"archive-file\" accept=\".json,application/json\" multiple aria-label=\"Выбрать файлы архивов\" data-i18n-aria-label=\"options_archive_file_aria\">\n        </div>\n        <div class=\"input-row\">\n          <button id=\"archive-import\" class=\"btn-export\" type=\"button\" data-i18n=\"options_archive_import\">Импортировать</button>\n          <button id=\"archive-refresh\" class=\"btn-reset\" type=\"button\" data-i18n=\"options_archive_refresh\">Обновить список</button>\n        </div>\n        <span class=\"hint\" data-i18n=\"options_archive_hint\">Локальные экспорты: Gemini Takeout (MyActivity.json), ChatGPT conversations.json,\n          Claude conversations.json, Perplexity threads. Файлы читаются в браузере (FileReader) и никуда не отправляются.\n          Архив — первый ярус: он задаёт авторитетный пол истории и даёт терминальную полноту archive-complete.</span>\n        <!-- v1.20 (M-2): статус архива — вежливый live-region -->\n        <div class=\"hint archive-status\" id=\"archive-status\" role=\"status\"></div>\n        <div class=\"archive-list\" id=\"archive-list\"></div>\n      </div>\n    </details>\n\n    <div class=\"footer\">\n      <span class=\"version\"></span>\n      <a href=\"privacy/privacy.html\" id=\"privacy-link\" target=\"_blank\" rel=\"noopener\"><span data-i18n=\"options_footer_privacy\">Политика конфиденциальности</span></a>\n      <!-- v1.19 (M-6): ссылка на руководство docs/index.html (входит в пакет расширения) -->\n      <a href=\"../docs/index.html\" id=\"help-link\" target=\"_blank\" rel=\"noopener\"><span data-i18n=\"options_footer_help\">Помощь</span></a>\n    </div>\n    </main>\n  </div>\n</body>\n<script>\n// Р—Р°РіР»СѓС€РєРё РґР»СЏ Р»РѕРіРіРµСЂР° Рё РѕС‚Р»Р°РґРѕС‡РЅС‹С… С„СѓРЅРєС†РёР№ СЂР°СЃС€РёСЂРµРЅРёСЏ\nif (typeof window.debugLog === 'undefined') {\n  window.debugLog = function(...args) {\n    console.log('[AI CM DEBUG]', ...args);\n  };\n}\nif (typeof window.__aiCmSetDebugLogs === 'undefined') {\n  window.__aiCmSetDebugLogs = function() {};\n}\n\n// Р­РјСѓР»СЏС‚РѕСЂ Chrome API РґР»СЏ Pake / Tauri\n(function() {\n  window.chrome = window.chrome || {};\n\n  var messageListeners = [];\n  var storageListeners = [];\n\n  var onMessageStub = {\n    addListener: function(fn) {\n      if (typeof fn === 'function' && !messageListeners.includes(fn)) {\n        messageListeners.push(fn);\n      }\n    },\n    removeListener: function(fn) {\n      messageListeners = messageListeners.filter(function(l) { return l !== fn; });\n    },\n    hasListener: function(fn) { return messageListeners.includes(fn); }\n  };\n\n  var onChangedStub = {\n    addListener: function(fn) {\n      if (typeof fn === 'function' && !storageListeners.includes(fn)) {\n        storageListeners.push(fn);\n      }\n    },\n    removeListener: function(fn) {\n      storageListeners = storageListeners.filter(function(l) { return l !== fn; });\n    }\n  };\n\n  function createEventStub() {\n    return {\n      addListener: function() {},\n      removeListener: function() {},\n      hasListener: function() { return false; },\n      dispatch: function() {}\n    };\n  }\n\n  // Runtime API\n  window.chrome.runtime = window.chrome.runtime || {};\n  window.chrome.runtime.id = 'pake-ai-context-monitor';\n  window.chrome.runtime.getURL = window.chrome.runtime.getURL || function(path) { return path; };\n  window.chrome.runtime.getManifest = window.chrome.runtime.getManifest || function() {\n    return { version: '2.0.41', manifest_version: 3, name: 'AI Context Monitor' };\n  };\n  window.chrome.runtime.onMessage = onMessageStub;\n  window.chrome.runtime.onInstalled = createEventStub();\n  window.chrome.runtime.onStartup = createEventStub();\n  window.chrome.runtime.lastError = null;\n\n  // РћС‚РїСЂР°РІРєР° СЃРѕРѕР±С‰РµРЅРёР№ РјРµР¶РґСѓ С„РѕРЅРѕРІС‹Рј СЃРµСЂРІРёСЃРѕРј Рё СЃС‚СЂР°РЅРёС†РµР№\n  window.chrome.runtime.sendMessage = function(message, callback) {\n    return new Promise(function(resolve) {\n      var responded = false;\n      var sender = { id: 'pake-ai-context-monitor', tab: { id: 1 } };\n\n      var sendResponse = function(response) {\n        if (!responded) {\n          responded = true;\n          if (callback) callback(response);\n          resolve(response);\n        }\n      };\n\n      var listeners = messageListeners.slice();\n      listeners.forEach(function(listener) {\n        try {\n          listener(message, sender, sendResponse);\n        } catch (e) {\n          console.error('[AI CM Polyfill] РћС€РёР±РєР° РѕР±СЂР°Р±РѕС‚С‡РёРєР°:', e);\n        }\n      });\n\n      if (!responded) {\n        setTimeout(function() {\n          if (!responded) {\n            responded = true;\n            if (callback) callback();\n            resolve();\n          }\n        }, 10);\n      }\n    });\n  };\n\n  // Storage API\n  window.chrome.storage = window.chrome.storage || {};\n  window.chrome.storage.onChanged = onChangedStub;\n\n  // РќР°СЃС‚СЂРѕР№РєРё РѕС‚РєСЂС‹РІР°СЋС‚СЃСЏ РІ iframe РїРѕРІРµСЂС… СЃС‚СЂР°РЅРёС†С‹ (Р°РЅР°Р»РѕРі РёРєРѕРЅРєРё СЂР°СЃС€РёСЂРµРЅРёСЏ).\n  // Р—Р°РїРёСЃСЊ РёР· iframe РґРѕР»Р¶РЅР° СЃСЂР°Р·Сѓ РґРѕС…РѕРґРёС‚СЊ РґРѕ content.js РІ СЂРѕРґРёС‚РµР»СЊСЃРєРѕРј РѕРєРЅРµ.\n  var IS_OPTIONS_FRAME = (typeof window !== 'undefined') && window.__AI_CM_OPTIONS_FRAME__ === true;\n\n  function notifyStorage(changes, area) {\n    storageListeners.forEach(function(listener) {\n      try { listener(changes, area); } catch (e) {}\n    });\n    if (IS_OPTIONS_FRAME) {\n      try { parent.postMessage({ __aiCmStorage: 1, changes: changes, area: area }, '*'); } catch (e) {}\n    }\n  }\n\n  function readStored(store, key) {\n    var raw = store.getItem('ai_cm_' + key);\n    if (raw === null) return undefined;\n    try { return JSON.parse(raw); } catch (e) { return raw; }\n  }\n\n  if (!window.chrome.storage.local) {\n    window.chrome.storage.local = {\n      get: function(keys, callback) {\n        var res = {};\n        var defaults = {\n          showWidget: true,\n          showBadge: true,\n          enabled: true\n          // ai_cm_safe_pct_<site> РќР• Р·Р°РґР°С‘Рј: РєР°Рє Рё РІ Chrome, РїРѕСЂРѕРі РїРѕ СѓРјРѕР»С‡Р°РЅРёСЋ\n          // РЅРµ Р·Р°РґР°РЅ (100% РѕРєРЅР°), РїРѕРєР° РїРѕР»СЊР·РѕРІР°С‚РµР»СЊ СЃР°Рј РЅРµ РІС‹СЃС‚Р°РІРёС‚ РµРіРѕ РІ РїР°РЅРµР»Рё.\n        };\n\n        var keysArr = Array.isArray(keys) ? keys : (typeof keys === 'object' && keys !== null ? Object.keys(keys) : [keys]);\n\n        keysArr.forEach(function(k) {\n          var val = readStored(localStorage, k);\n          if (val !== undefined) {\n            res[k] = val;\n          } else {\n            res[k] = defaults[k] !== undefined ? defaults[k] : true;\n          }\n        });\n\n        if (typeof keys === 'object' && !Array.isArray(keys) && keys !== null) {\n          Object.keys(keys).forEach(function(k) {\n            if (res[k] === undefined) res[k] = keys[k];\n          });\n        }\n\n        if (callback) callback(res);\n        return Promise.resolve(res);\n      },\n      set: function(obj, callback) {\n        var changes = {};\n        if (obj && typeof obj === 'object') {\n          Object.keys(obj).forEach(function(k) {\n            var oldVal = readStored(localStorage, k);\n            var newVal = obj[k];\n            localStorage.setItem('ai_cm_' + k, typeof newVal === 'object' ? JSON.stringify(newVal) : newVal);\n            changes[k] = { oldValue: oldVal, newValue: newVal };\n          });\n        }\n        notifyStorage(changes, 'local');\n        if (callback) callback();\n        return Promise.resolve();\n      },\n      remove: function(keys, callback) {\n        var arr = Array.isArray(keys) ? keys : [keys];\n        var changes = {};\n        arr.forEach(function(k) {\n          var oldVal = readStored(localStorage, k);\n          if (oldVal !== undefined) {\n            localStorage.removeItem('ai_cm_' + k);\n            changes[k] = { oldValue: oldVal, newValue: undefined };\n          }\n        });\n        if (Object.keys(changes).length) notifyStorage(changes, 'local');\n        if (callback) callback();\n        return Promise.resolve();\n      },\n      getKeys: function(callback) {\n        var keys = [];\n        try {\n          for (var i = 0; i < localStorage.length; i++) {\n            var k = localStorage.key(i);\n            if (k && k.indexOf('ai_cm_') === 0) keys.push(k.slice(6));\n          }\n        } catch (e) {}\n        if (callback) callback(keys);\n        return Promise.resolve(keys);\n      }\n    };\n  }\n\n  // session: РєР°Рє РІ Chrome вЂ” РѕС‚РґРµР»СЊРЅРѕРµ С…СЂР°РЅРёР»РёС‰Рµ (BYOK-РєР»СЋС‡Рё РЅРµ РґРѕР»Р¶РЅС‹ РїРѕРїР°РґР°С‚СЊ РІ local)\n  if (!window.chrome.storage.session) {\n    window.chrome.storage.session = {\n      get: function(keys, callback) {\n        var res = {};\n        var keysArr = Array.isArray(keys) ? keys : (typeof keys === 'object' && keys !== null ? Object.keys(keys) : [keys]);\n        keysArr.forEach(function(k) {\n          var val = readStored(sessionStorage, 'sess_' + k);\n          if (val !== undefined) res[k] = val;\n        });\n        if (callback) callback(res);\n        return Promise.resolve(res);\n      },\n      set: function(obj, callback) {\n        var changes = {};\n        if (obj && typeof obj === 'object') {\n          Object.keys(obj).forEach(function(k) {\n            var oldVal = readStored(sessionStorage, 'sess_' + k);\n            var newVal = obj[k];\n            sessionStorage.setItem('ai_cm_sess_' + k, typeof newVal === 'object' ? JSON.stringify(newVal) : newVal);\n            changes[k] = { oldValue: oldVal, newValue: newVal };\n          });\n        }\n        notifyStorage(changes, 'session');\n        if (callback) callback();\n        return Promise.resolve();\n      },\n      remove: function(keys, callback) {\n        var arr = Array.isArray(keys) ? keys : [keys];\n        var changes = {};\n        arr.forEach(function(k) {\n          var oldVal = readStored(sessionStorage, 'sess_' + k);\n          if (oldVal !== undefined) {\n            sessionStorage.removeItem('ai_cm_sess_' + k);\n            changes[k] = { oldValue: oldVal, newValue: undefined };\n          }\n        });\n        if (Object.keys(changes).length) notifyStorage(changes, 'session');\n        if (callback) callback();\n        return Promise.resolve();\n      }\n    };\n  }\n\n  window.chrome.storage.sync = window.chrome.storage.local;\n\n  if (!IS_OPTIONS_FRAME) {\n    try {\n      window.addEventListener('message', function(ev) {\n        var d = ev && ev.data;\n        if (!d || d.__aiCmStorage !== 1 || !d.changes) return;\n        storageListeners.forEach(function(listener) {\n          try { listener(d.changes, d.area || 'local'); } catch (e) {}\n        });\n      });\n    } catch (e) {}\n  }\n\n  // Tabs API\n  window.chrome.tabs = window.chrome.tabs || {};\n  window.chrome.tabs.query = function(q, cb) {\n    var href = (typeof location !== 'undefined' ? location.href : '');\n    var title = (typeof document !== 'undefined' ? document.title : '');\n    // РќР°СЃС‚СЂРѕР№РєРё Р¶РёРІСѓС‚ РІ srcdoc-iframe: Р°РєС‚РёРІРЅР°СЏ \"РІРєР»Р°РґРєР°\" вЂ” СЌС‚Рѕ СЂРѕРґРёС‚РµР»СЊСЃРєР°СЏ СЃС‚СЂР°РЅРёС†Р°.\n    if (IS_OPTIONS_FRAME) {\n      try { if (parent && parent.location) href = parent.location.href; } catch (e) {}\n      try { if (parent && parent.document) title = parent.document.title; } catch (e) {}\n    }\n    var tab = { id: 1, active: true, currentWindow: true, url: href, title: title };\n    if (cb) cb([tab]);\n    return Promise.resolve([tab]);\n  };\n  window.chrome.tabs.sendMessage = function(tabId, message, callback) {\n    return window.chrome.runtime.sendMessage(message, callback);\n  };\n  window.chrome.tabs.create = function(opts, cb) {\n    try { if (opts && opts.url) window.open(opts.url, '_blank'); } catch (e) {}\n    if (cb) cb();\n  };\n  window.chrome.tabs.onUpdated = createEventStub();\n  window.chrome.tabs.onActivated = createEventStub();\n\n  window.chrome.action = window.chrome.action || {\n    setIcon: function() {}, setBadgeText: function() {}, setBadgeBackgroundColor: function() {}\n  };\n})();\n\n\n</script>\n<script>\n(() => {\n  var __getOwnPropNames = Object.getOwnPropertyNames;\n  var __require = /* @__PURE__ */ ((x) => typeof require !== \"undefined\" ? require : typeof Proxy !== \"undefined\" ? new Proxy(x, {\n    get: (a, b) => (typeof require !== \"undefined\" ? require : a)[b]\n  }) : x)(function(x) {\n    if (typeof require !== \"undefined\") return require.apply(this, arguments);\n    throw Error('Dynamic require of \"' + x + '\" is not supported');\n  });\n  var __esm = (fn, res, err) => function __init() {\n    if (err) throw err[0];\n    try {\n      return fn && (res = (0, fn[__getOwnPropNames(fn)[0]])(fn = 0)), res;\n    } catch (e) {\n      throw err = [e], e;\n    }\n  };\n  var __commonJS = (cb, mod) => function __require2() {\n    try {\n      return mod || (0, cb[__getOwnPropNames(cb)[0]])((mod = { exports: {} }).exports, mod), mod.exports;\n    } catch (e) {\n      throw mod = 0, e;\n    }\n  };\n\n  // ../utils/buildReferenceText.js\n  function cleanInline(s) {\n    s = s.replace(/\\[([^\\]]+)\\]\\(([^)\\s]+)\\)/g, \"$1\");\n    s = s.replace(/(\\*\\*|__)/g, \"\");\n    s = s.replace(/(?<![*\\w])\\*([^*\\n]+)\\*(?![\\w*])/g, \"$1\");\n    s = s.replace(/(?<![\\w_])\\_([^_\\n]+)\\_(?![\\w_])/g, \"$1\");\n    s = s.replace(/`/g, \"\");\n    return s;\n  }\n  function cleanLine(line) {\n    var s = String(line == null ? \"\" : line);\n    s = s.replace(/^#{1,6}\\s+/, \"\");\n    s = s.replace(/^>\\s?/, \"\");\n    s = s.replace(/^[-*+]\\s+/, \"\");\n    return s;\n  }\n  function cleanText(text) {\n    var lines = String(text).split(\"\\n\");\n    var out = [];\n    for (var i = 0; i < lines.length; i++) {\n      var line = lines[i];\n      var trimmed = line.trim();\n      if (/^-{3,}$/.test(trimmed)) continue;\n      out.push(cleanInline(cleanLine(line)));\n    }\n    return out.join(\"\\n\");\n  }\n  function buildReferenceText(messages) {\n    var list = Array.isArray(messages) ? messages : [];\n    var parts = [];\n    for (var i = 0; i < list.length; i++) {\n      var msg = list[i] || {};\n      parts.push(cleanText(msg.text == null ? \"\" : msg.text));\n    }\n    return parts.join(\"\\n\\n\");\n  }\n  var init_buildReferenceText = __esm({\n    \"../utils/buildReferenceText.js\"() {\n    }\n  });\n\n  // ../utils/platform.js\n  function aiCmIsFirefox() {\n    try {\n      var api = typeof browser !== \"undefined\" && browser && browser.runtime ? browser : typeof chrome !== \"undefined\" && chrome && chrome.runtime ? chrome : null;\n      if (!api) return false;\n      if (api.runtime && typeof api.runtime.getURL === \"function\") {\n        return String(api.runtime.getURL(\"\")).indexOf(\"moz-extension://\") === 0;\n      }\n      if (typeof api.getURL === \"function\") {\n        return String(api.getURL(\"\")).indexOf(\"moz-extension://\") === 0;\n      }\n      return false;\n    } catch (e) {\n      return false;\n    }\n  }\n  var init_platform = __esm({\n    \"../utils/platform.js\"() {\n    }\n  });\n\n  // entry-options.js\n  var require_entry_options = __commonJS({\n    \"entry-options.js\"(exports, module) {\n      init_buildReferenceText();\n      init_platform();\n      (function() {\n        \"use strict\";\n        var BINDINGS = [\n          { key: \"data-i18n\", target: \"textContent\" },\n          { key: \"data-i18n-placeholder\", target: \"placeholder\" },\n          { key: \"data-i18n-title\", target: \"title\" },\n          { key: \"data-i18n-aria-label\", target: \"aria-label\" },\n          // M-4.4: alt скриншотов руководства и карточек документации.\n          { key: \"data-i18n-alt\", target: \"alt\" }\n        ];\n        function aiCmI18nAvailable() {\n          return typeof chrome !== \"undefined\" && !!chrome.i18n && typeof chrome.i18n.getMessage === \"function\";\n        }\n        function aiCmI18nMessage2(key) {\n          try {\n            if (aiCmI18nAvailable()) {\n              return chrome.i18n.getMessage(key) || \"\";\n            }\n          } catch (eMessage) {\n            return \"\";\n          }\n          return \"\";\n        }\n        function aiCmI18nApply(root) {\n          var scope = root || (typeof document !== \"undefined\" ? document : null);\n          if (!scope || typeof scope.querySelectorAll !== \"function\") return 0;\n          var applied = 0;\n          for (var i = 0; i < BINDINGS.length; i++) {\n            var binding = BINDINGS[i];\n            var nodes = scope.querySelectorAll(\"[\" + binding.key + \"]\");\n            for (var j = 0; j < nodes.length; j++) {\n              var message = aiCmI18nMessage2(nodes[j].getAttribute(binding.key));\n              if (!message) continue;\n              if (binding.target === \"textContent\") nodes[j].textContent = message;\n              else nodes[j].setAttribute(binding.target, message);\n              applied++;\n            }\n          }\n          return applied;\n        }\n        function aiCmI18nBoot() {\n          if (!aiCmI18nAvailable()) return;\n          aiCmI18nApply(document);\n        }\n        if (typeof document !== \"undefined\") {\n          if (document.readyState === \"loading\") {\n            document.addEventListener(\"DOMContentLoaded\", aiCmI18nBoot);\n          } else {\n            aiCmI18nBoot();\n          }\n        }\n        if (typeof module !== \"undefined\" && module.exports) {\n          module.exports = {\n            aiCmI18nApply,\n            aiCmI18nMessage: aiCmI18nMessage2,\n            aiCmI18nAvailable,\n            bindings: BINDINGS\n          };\n        }\n      })();\n      (function() {\n        var CHATGPT_DEFAULT_MODEL = \"gpt-4o\";\n        function getConvIdFromPath(pathname) {\n          try {\n            var m = String(pathname || \"\").match(/\\/c\\/([A-Za-z0-9_-]+)/);\n            return m ? m[1] : \"\";\n          } catch (e) {\n            return \"\";\n          }\n        }\n        function shouldResetChatConversation(prevId, newId) {\n          if (!newId) return false;\n          return prevId !== newId;\n        }\n        function shouldResetConversationOnNav(prevId, newId) {\n          var p = prevId == null ? \"\" : String(prevId);\n          var n = newId == null ? \"\" : String(newId);\n          return p !== n;\n        }\n        function sanitizeChatGPTText(s) {\n          if (typeof s !== \"string\") return s;\n          return String(s).replace(/\\uE200entity\\uE202([^\\uE200\\uE201]*?)\\uE201/g, function(m, payload) {\n            try {\n              var arr = JSON.parse(payload);\n              if (Array.isArray(arr) && arr.length > 1 && typeof arr[1] === \"string\" && arr[1]) return arr[1];\n            } catch (e) {\n              swallowSoft(e, \"chatgpt-utils:sanitizeChatGPTText-entity\");\n            }\n            try {\n              var mt = String(payload).match(/\"([^\"]+)\"/g);\n              if (mt && mt.length > 1) {\n                var v = mt[1].replace(/^\"|\"$/g, \"\");\n                if (v) return v;\n              }\n            } catch (e2) {\n            }\n            return \"\";\n          }).replace(/\\uE200(?:cite|image_group)\\uE202[^\\uE200\\uE201]*?\\uE201/g, \"\").replace(/[\\uE000-\\uF8FF]/g, \"\").replace(/\\[entity\\](?:\\[[^\\]]*\\])+/g, \"\").replace(/\\[entity\\]/g, \"\").replace(/\\[cite:[^\\]]*\\]/g, \"\").replace(/[ \\t]{2,}/g, \" \");\n        }\n        function orderChatGPTMapping(mapping) {\n          var keys = Object.keys(mapping || {});\n          if (!keys.length) return [];\n          var byId = {};\n          for (var i = 0; i < keys.length; i++) {\n            var k = keys[i];\n            var n = mapping[k];\n            var nid = n && n.id != null ? String(n.id) : k;\n            byId[nid] = k;\n          }\n          var hasParent = false;\n          var hasChildren = false;\n          for (var p = 0; p < keys.length; p++) {\n            var np = mapping[keys[p]];\n            if (np && np.parent !== void 0) hasParent = true;\n            if (np && Array.isArray(np.children) && np.children.length) hasChildren = true;\n          }\n          var childrenOf = {};\n          for (var c0 = 0; c0 < keys.length; c0++) childrenOf[keys[c0]] = [];\n          var roots = [];\n          for (var m = 0; m < keys.length; m++) {\n            var kk = keys[m];\n            var nn = mapping[kk];\n            var pid = nn && nn.parent != null ? String(nn.parent) : null;\n            var pk = pid ? byId[pid] || pid : null;\n            if (pk) {\n              if (childrenOf[pk]) childrenOf[pk].push(kk);\n            } else if (hasParent) {\n              roots.push(kk);\n            }\n          }\n          if (!hasParent) {\n            if (hasChildren) {\n              var isChild = {};\n              for (var c1 = 0; c1 < keys.length; c1++) {\n                var n1 = mapping[keys[c1]];\n                if (n1 && Array.isArray(n1.children)) {\n                  for (var c2 = 0; c2 < n1.children.length; c2++) {\n                    var cid = String(n1.children[c2]);\n                    isChild[byId[cid] || cid] = true;\n                  }\n                }\n              }\n              roots = keys.filter(function(k2) {\n                return !isChild[k2];\n              });\n              if (!roots.length) roots = [keys[0]];\n            } else {\n              return keys.slice().sort(function(a, b) {\n                var ca = mapping[a] && mapping[a].message && mapping[a].message.create_time || 0;\n                var cb = mapping[b] && mapping[b].message && mapping[b].message.create_time || 0;\n                return ca - cb;\n              });\n            }\n          }\n          roots.sort(function(a, b) {\n            var ca = mapping[a] && mapping[a].message && mapping[a].message.create_time || 0;\n            var cb = mapping[b] && mapping[b].message && mapping[b].message.create_time || 0;\n            return ca - cb;\n          });\n          var out = [];\n          var visited = {};\n          function walk(k2) {\n            if (!k2 || visited[k2] || mapping[k2] === void 0) return;\n            visited[k2] = true;\n            out.push(k2);\n            var ch = childrenOf[k2] || [];\n            if (mapping[k2] && Array.isArray(mapping[k2].children) && mapping[k2].children.length) {\n              ch = mapping[k2].children.map(function(cid2) {\n                return byId[String(cid2)] || String(cid2);\n              });\n            }\n            for (var w = 0; w < ch.length; w++) walk(ch[w]);\n          }\n          for (var r = 0; r < roots.length; r++) walk(roots[r]);\n          for (var u = 0; u < keys.length; u++) if (!visited[keys[u]]) out.push(keys[u]);\n          return out;\n        }\n        function parseChatGPTConversation(json) {\n          var messages = [];\n          var model = \"\";\n          var tokens = 0;\n          try {\n            if (!json || typeof json !== \"object\") {\n              return { messages: [], model: CHATGPT_DEFAULT_MODEL, tokens: 0 };\n            }\n            if (json.model_slug) model = json.model_slug;\n            if (typeof json.tokens === \"number\") tokens = json.tokens;\n            var mapping = json.mapping || {};\n            var keys = orderChatGPTMapping(mapping);\n            for (var i = 0; i < keys.length; i++) {\n              var node = mapping[keys[i]];\n              var msg = node && node.message;\n              if (!msg || !msg.content) continue;\n              var role = msg.author && msg.author.role;\n              if (role === \"system\" || role === \"tool\") continue;\n              var parts = msg.content.parts || [];\n              var contentPieces = [];\n              for (var j = 0; j < parts.length; j++) {\n                if (typeof parts[j] === \"string\") {\n                  contentPieces.push(sanitizeChatGPTText(parts[j]));\n                } else if (parts[j] && typeof parts[j] === \"object\" && typeof parts[j].text === \"string\") {\n                  contentPieces.push(sanitizeChatGPTText(parts[j].text));\n                }\n              }\n              var content = contentPieces.join(\"\\n\").trim();\n              if (content) {\n                messages.push({\n                  role: role === \"assistant\" ? \"assistant\" : \"user\",\n                  content\n                });\n              }\n            }\n          } catch (e) {\n            swallowSoft(e, \"chatgpt-utils:parseChatGPTConversation\");\n          }\n          if (!model) model = CHATGPT_DEFAULT_MODEL;\n          return { messages, model, tokens };\n        }\n        var api = {\n          getConvIdFromPath,\n          shouldResetChatConversation,\n          shouldResetConversationOnNav,\n          orderChatGPTMapping,\n          sanitizeChatGPTText,\n          parseChatGPTConversation\n        };\n        if (typeof window !== \"undefined\") {\n          window.ChatGPTConversationParser = api;\n        }\n        if (typeof module !== \"undefined\" && module.exports) {\n          module.exports = api;\n        }\n      })();\n      (function() {\n        function parsePerplexityThread(json) {\n          function getTrim(obj, name) {\n            if (!obj || typeof obj !== \"object\") return void 0;\n            var keys = Object.keys(obj);\n            for (var i2 = 0; i2 < keys.length; i2++) {\n              if (keys[i2].trim() === name) return obj[keys[i2]];\n            }\n            return void 0;\n          }\n          var model = \"\";\n          var pieces = [];\n          var ids = [];\n          var count = 0;\n          var lastText = \"\";\n          var messages = [];\n          try {\n            var entries = getTrim(json, \"entries\");\n            if (!Array.isArray(entries)) entries = [];\n            for (var i = 0; i < entries.length; i++) {\n              var entry = entries[i];\n              if (!entry || typeof entry !== \"object\") continue;\n              var queryStr = getTrim(entry, \"query_str\") || \"\";\n              var displayModel = getTrim(entry, \"display_model\") || \"\";\n              var userSelectedModel = getTrim(entry, \"user_selected_model\") || \"\";\n              var threadUrlSlug = getTrim(entry, \"thread_url_slug\") || \"\";\n              var entryModel = displayModel || userSelectedModel || \"\";\n              if (entryModel) model = entryModel;\n              var entryId = threadUrlSlug || \"entry\" + i;\n              if (queryStr && typeof queryStr === \"string\" && queryStr.trim()) {\n                pieces.push(queryStr.trim());\n                ids.push(entryId + \"_user\");\n                count++;\n                lastText = queryStr.trim();\n                messages.push({ role: \"user\", text: queryStr.trim() });\n              }\n              var blocks = getTrim(entry, \"blocks\");\n              var assistantPushed = false;\n              if (Array.isArray(blocks)) {\n                var assistantTextParts = [];\n                for (var j = 0; j < blocks.length; j++) {\n                  var block = blocks[j];\n                  if (!block || typeof block !== \"object\") continue;\n                  var wfBlock = getTrim(block, \"workflow_block\");\n                  if (wfBlock && typeof wfBlock === \"object\") {\n                    var steps = getTrim(wfBlock, \"steps\");\n                    if (Array.isArray(steps)) {\n                      for (var s = 0; s < steps.length; s++) {\n                        var step = steps[s];\n                        if (!step || typeof step !== \"object\") continue;\n                        var items = getTrim(step, \"items\");\n                        if (Array.isArray(items)) {\n                          for (var it = 0; it < items.length; it++) {\n                            var item = items[it];\n                            if (!item || typeof item !== \"object\") continue;\n                            if (getTrim(item, \"type\") === \"WORKFLOW_ITEM_TEXT\") {\n                              var payload = getTrim(item, \"payload\");\n                              if (payload && typeof payload === \"object\") {\n                                var textPayload = getTrim(payload, \"text_payload\");\n                                if (textPayload && typeof textPayload === \"object\") {\n                                  var text = getTrim(textPayload, \"text\");\n                                  if (typeof text === \"string\" && text.trim()) {\n                                    assistantTextParts.push(text.trim());\n                                  }\n                                }\n                              }\n                            }\n                          }\n                        }\n                      }\n                    }\n                  }\n                  var wrBlock = getTrim(block, \"web_result_block\");\n                  if (wrBlock && typeof wrBlock === \"object\") {\n                    var webResults = getTrim(wrBlock, \"web_results\");\n                    if (Array.isArray(webResults)) {\n                      for (var w = 0; w < webResults.length; w++) {\n                        var wr = webResults[w];\n                        if (!wr || typeof wr !== \"object\") continue;\n                        var wrName = getTrim(wr, \"name\") || \"\";\n                        var wrSnippet = getTrim(wr, \"snippet\") || \"\";\n                        if (wrName || wrSnippet) {\n                          var wrText = (wrName ? wrName + \": \" : \"\") + (wrSnippet || \"\");\n                          if (wrText.trim()) assistantTextParts.push(\"[source] \" + wrText.trim());\n                        }\n                      }\n                    }\n                  }\n                }\n                if (assistantTextParts.length > 0) {\n                  var assistantText = assistantTextParts.join(\"\\n\").trim();\n                  if (assistantText) {\n                    pieces.push(assistantText);\n                    ids.push(entryId + \"_assistant\");\n                    count++;\n                    lastText = assistantText;\n                    messages.push({ role: \"assistant\", text: assistantText });\n                    assistantPushed = true;\n                  }\n                }\n              }\n              if (!assistantPushed) {\n                var entryText = getTrim(entry, \"text\");\n                if (typeof entryText === \"string\" && entryText.trim()) {\n                  var stepsJson = null;\n                  try {\n                    stepsJson = JSON.parse(entryText);\n                  } catch (e1) {\n                    stepsJson = null;\n                  }\n                  var stepItems = null;\n                  if (Array.isArray(stepsJson)) stepItems = stepsJson;\n                  else if (stepsJson && typeof stepsJson === \"object\") {\n                    stepItems = Object.keys(stepsJson).map(function(k) {\n                      return stepsJson[k];\n                    });\n                  }\n                  var answerText = \"\";\n                  if (stepItems) {\n                    for (var si = 0; si < stepItems.length; si++) {\n                      var stepItem = stepItems[si];\n                      if (!stepItem || typeof stepItem !== \"object\") continue;\n                      if (getTrim(stepItem, \"step_type\") !== \"FINAL\") continue;\n                      var stepContent = getTrim(stepItem, \"content\");\n                      var contentObj = null;\n                      if (typeof stepContent === \"string\") {\n                        try {\n                          contentObj = JSON.parse(stepContent);\n                        } catch (e2) {\n                          contentObj = null;\n                        }\n                      } else if (stepContent && typeof stepContent === \"object\") {\n                        contentObj = stepContent;\n                      }\n                      if (!contentObj) continue;\n                      var answerRaw = getTrim(contentObj, \"answer\");\n                      if (typeof answerRaw === \"string\" && answerRaw.trim()) {\n                        var answerObj = null;\n                        try {\n                          answerObj = JSON.parse(answerRaw);\n                        } catch (e3) {\n                          answerObj = null;\n                        }\n                        if (answerObj && typeof answerObj === \"object\") {\n                          var answerField = getTrim(answerObj, \"answer\");\n                          if (typeof answerField === \"string\") answerText = answerField;\n                        } else if (typeof answerObj === \"string\") {\n                          answerText = answerObj;\n                        }\n                      } else if (answerRaw && typeof answerRaw === \"object\") {\n                        var answerField2 = getTrim(answerRaw, \"answer\");\n                        if (typeof answerField2 === \"string\") answerText = answerField2;\n                      }\n                      if (answerText) break;\n                    }\n                  }\n                  answerText = answerText.trim();\n                  if (answerText) {\n                    pieces.push(answerText);\n                    ids.push(entryId + \"_assistant\");\n                    count++;\n                    lastText = answerText;\n                    messages.push({ role: \"assistant\", text: answerText });\n                  }\n                }\n              }\n            }\n          } catch (e) {\n            swallowSoft(e, \"perplexity-utils:parsePerplexityThread\");\n          }\n          return {\n            text: pieces.join(\"\\n\"),\n            count,\n            lastText,\n            modelSlug: model,\n            pieces,\n            ids,\n            messages,\n            model\n          };\n        }\n        function stripPerplexityHistoryTruncation(urlStr) {\n          var src = String(urlStr || \"\");\n          if (!src) return src;\n          var hash = \"\";\n          var h = src.indexOf(\"#\");\n          if (h !== -1) {\n            hash = src.slice(h);\n            src = src.slice(0, h);\n          }\n          var q = src.indexOf(\"?\");\n          if (q === -1) return src + hash;\n          var base = src.slice(0, q);\n          var parts = src.slice(q + 1).split(\"&\");\n          var kept = [];\n          for (var i = 0; i < parts.length; i++) {\n            if (!parts[i]) continue;\n            var name = parts[i].split(\"=\")[0];\n            if (name === \"limit\" || name === \"offset\" || name === \"from_first\") continue;\n            kept.push(parts[i]);\n          }\n          return base + (kept.length ? \"?\" + kept.join(\"&\") : \"\") + hash;\n        }\n        if (typeof window !== \"undefined\") {\n          window.parsePerplexityThread = parsePerplexityThread;\n          window.stripPerplexityHistoryTruncation = stripPerplexityHistoryTruncation;\n        }\n        if (typeof module !== \"undefined\" && module.exports) {\n          module.exports = {\n            parsePerplexityThread,\n            stripPerplexityHistoryTruncation\n          };\n        }\n      })();\n      (function() {\n        \"use strict\";\n        var ARCHIVE_KEY_PREFIX = \"aiCmArchive:\";\n        var CONV_SOURCE_KEY_PREFIX = \"aiCmConvSource:\";\n        var SOURCE_ARCHIVE = \"archive\";\n        var SOURCE_LIVE = \"live\";\n        var ARCHIVE_RECORD_VERSION = 1;\n        var FORMATS = {\n          GEMINI_TAKEOUT: \"gemini-takeout\",\n          CHATGPT_CONVERSATIONS: \"chatgpt-conversations\",\n          CLAUDE_CONVERSATIONS: \"claude-conversations\",\n          PERPLEXITY_THREADS: \"perplexity-threads\"\n        };\n        var SERVICE_BY_FORMAT = {};\n        SERVICE_BY_FORMAT[FORMATS.GEMINI_TAKEOUT] = \"gemini\";\n        SERVICE_BY_FORMAT[FORMATS.CHATGPT_CONVERSATIONS] = \"chatgpt\";\n        SERVICE_BY_FORMAT[FORMATS.CLAUDE_CONVERSATIONS] = \"claude\";\n        SERVICE_BY_FORMAT[FORMATS.PERPLEXITY_THREADS] = \"perplexity\";\n        var FORMAT_LABEL = {};\n        FORMAT_LABEL[FORMATS.GEMINI_TAKEOUT] = \"Gemini Takeout\";\n        FORMAT_LABEL[FORMATS.CHATGPT_CONVERSATIONS] = \"ChatGPT conversations.json\";\n        FORMAT_LABEL[FORMATS.CLAUDE_CONVERSATIONS] = \"Claude export\";\n        FORMAT_LABEL[FORMATS.PERPLEXITY_THREADS] = \"Perplexity threads\";\n        var MAX_CONVERSATION_BYTES = 2 * 1024 * 1024;\n        var MAX_TOTAL_BYTES = 8 * 1024 * 1024;\n        var MAX_MESSAGES_PER_CONVERSATION = 5e3;\n        var MAX_ARCHIVE_SIZE = 50 * 1024 * 1024;\n        function archiveStorageKey(convId) {\n          return ARCHIVE_KEY_PREFIX + String(convId == null ? \"\" : convId);\n        }\n        function convSourceStorageKey(convId) {\n          return CONV_SOURCE_KEY_PREFIX + String(convId == null ? \"\" : convId);\n        }\n        function normalizeText(v) {\n          if (typeof v !== \"string\") return \"\";\n          return v.replace(/\\r\\n?/g, \"\\n\").replace(/[ \\t]+$/gm, \"\").trim();\n        }\n        function collapseWs(v) {\n          return String(v == null ? \"\" : v).replace(/\\s+/g, \" \").trim();\n        }\n        function hash6(s) {\n          var str = String(s == null ? \"\" : s);\n          var h = 5381;\n          for (var i = 0; i < str.length; i++) {\n            h = (h << 5) + h + str.charCodeAt(i) | 0;\n          }\n          var hex = (h >>> 0).toString(16);\n          while (hex.length < 6) hex = \"0\" + hex;\n          return hex.slice(-6);\n        }\n        function normalizeRole(role) {\n          var r = collapseWs(role).toLowerCase();\n          if (r === \"user\" || r === \"human\" || r === \"me\" || r === \"prompt\" || r === \"you\") return \"user\";\n          if (r === \"assistant\" || r === \"model\" || r === \"bot\" || r === \"ai\" || r === \"gpt\" || r === \"gemini\" || r === \"claude\") return \"assistant\";\n          return \"\";\n        }\n        function toMs(v) {\n          if (typeof v === \"number\" && isFinite(v)) {\n            return v > 1e12 ? Math.round(v) : Math.round(v * 1e3);\n          }\n          if (typeof v === \"string\" && v) {\n            var t = Date.parse(v);\n            if (!isNaN(t)) return t;\n            var trimmed = v.replace(/(\\.\\d{3})\\d+/, \"$1\");\n            if (trimmed !== v) {\n              t = Date.parse(trimmed);\n              if (!isNaN(t)) return t;\n            }\n          }\n          return 0;\n        }\n        function arrayifyConversations(json) {\n          if (Array.isArray(json)) return json;\n          if (!json || typeof json !== \"object\") return [];\n          if (Array.isArray(json.conversations)) return json.conversations;\n          return [json];\n        }\n        function resolveOrderChatGPTMapping(deps) {\n          if (deps && typeof deps.orderChatGPTMapping === \"function\") return deps.orderChatGPTMapping;\n          try {\n            if (typeof __require === \"function\") {\n              var m = __require(\"./chatgpt-conversation-parser.js\");\n              if (m && typeof m.orderChatGPTMapping === \"function\") return m.orderChatGPTMapping;\n            }\n          } catch (eR) {\n          }\n          try {\n            if (typeof window !== \"undefined\" && window.ChatGPTConversationParser && typeof window.ChatGPTConversationParser.orderChatGPTMapping === \"function\") {\n              return window.ChatGPTConversationParser.orderChatGPTMapping;\n            }\n          } catch (eW) {\n          }\n          return null;\n        }\n        function resolveSanitizeChatGPT(deps) {\n          if (deps && typeof deps.sanitizeChatGPTText === \"function\") return deps.sanitizeChatGPTText;\n          try {\n            if (typeof __require === \"function\") {\n              var m = __require(\"./chatgpt-conversation-parser.js\");\n              if (m && typeof m.sanitizeChatGPTText === \"function\") return m.sanitizeChatGPTText;\n            }\n          } catch (eR) {\n          }\n          try {\n            if (typeof window !== \"undefined\" && window.ChatGPTConversationParser && typeof window.ChatGPTConversationParser.sanitizeChatGPTText === \"function\") {\n              return window.ChatGPTConversationParser.sanitizeChatGPTText;\n            }\n          } catch (eW) {\n          }\n          return function(s) {\n            return s;\n          };\n        }\n        function resolveParsePerplexityThread(deps) {\n          if (deps && typeof deps.parsePerplexityThread === \"function\") return deps.parsePerplexityThread;\n          try {\n            if (typeof __require === \"function\") {\n              var m = __require(\"./perplexity-parser.js\");\n              if (m && typeof m.parsePerplexityThread === \"function\") return m.parsePerplexityThread;\n            }\n          } catch (eR) {\n          }\n          try {\n            if (typeof window !== \"undefined\" && typeof window.parsePerplexityThread === \"function\") {\n              return window.parsePerplexityThread;\n            }\n          } catch (eW) {\n          }\n          return null;\n        }\n        function normalizeMessage(raw, ordinal) {\n          if (!raw || typeof raw !== \"object\") return null;\n          var role = normalizeRole(raw.role != null ? raw.role : raw.sender);\n          if (!role) return null;\n          var text = normalizeText(raw.text != null ? raw.text : raw.content);\n          if (!text) return null;\n          return {\n            id: typeof raw.id === \"string\" && raw.id ? raw.id : \"a:\" + (ordinal || 0) + \":\" + hash6(role + \"\\0\" + text),\n            role,\n            text,\n            ts: typeof raw.ts === \"number\" && isFinite(raw.ts) ? raw.ts : toMs(raw.created_at != null ? raw.created_at : raw.time)\n          };\n        }\n        function finalizeConversation(conv) {\n          var messages = [];\n          var textLen = 0;\n          var raw = conv && Array.isArray(conv.messages) ? conv.messages : [];\n          for (var i = 0; i < raw.length; i++) {\n            var m = normalizeMessage(raw[i], messages.length);\n            if (!m) continue;\n            if (messages.length >= MAX_MESSAGES_PER_CONVERSATION) break;\n            messages.push(m);\n            textLen += m.text.length;\n          }\n          var title = normalizeText(conv && conv.title);\n          if (!title) {\n            for (var t = 0; t < messages.length; t++) {\n              if (messages[t].role === \"user\") {\n                title = collapseWs(messages[t].text).slice(0, 80);\n                break;\n              }\n            }\n          }\n          return {\n            convId: String(conv && conv.convId || \"\"),\n            service: conv && conv.service || \"\",\n            format: conv && conv.format || \"\",\n            title,\n            updatedAt: conv && typeof conv.updatedAt === \"number\" && isFinite(conv.updatedAt) ? conv.updatedAt : 0,\n            messages,\n            count: messages.length,\n            textLen\n          };\n        }\n        function looksLikeGeminiActivity(item) {\n          if (!item || typeof item !== \"object\") return false;\n          var url = String(item.titleUrl || item.title_url || \"\");\n          if (/gemini\\.google\\.com\\/app\\//.test(url)) return true;\n          return collapseWs(item.header).toLowerCase() === \"gemini apps\";\n        }\n        function detectArchiveFormat(json) {\n          var items = arrayifyConversations(json);\n          if (!items.length) return null;\n          var limit = Math.min(items.length, 20);\n          for (var i = 0; i < limit; i++) {\n            var it = items[i];\n            if (!it || typeof it !== \"object\") continue;\n            if (it.mapping && typeof it.mapping === \"object\") return FORMATS.CHATGPT_CONVERSATIONS;\n            if (Array.isArray(it.chat_messages)) return FORMATS.CLAUDE_CONVERSATIONS;\n            if (Array.isArray(it.entries) || it.thread && Array.isArray(it.thread.entries)) return FORMATS.PERPLEXITY_THREADS;\n            if (looksLikeGeminiActivity(it)) return FORMATS.GEMINI_TAKEOUT;\n          }\n          return null;\n        }\n        function serviceOfFormat(format) {\n          return SERVICE_BY_FORMAT[format] || \"\";\n        }\n        function messageTextOf(m) {\n          if (!m || typeof m !== \"object\") return \"\";\n          return normalizeText(m.text != null ? m.text : m.content);\n        }\n        function aggregateMessageList(conv) {\n          if (Array.isArray(conv.messages)) return conv.messages;\n          if (Array.isArray(conv.chat_messages)) return conv.chat_messages;\n          if (Array.isArray(conv.entries)) return conv.entries;\n          return [];\n        }\n        function detectFullTextAnomaly(conv) {\n          if (!conv || typeof conv !== \"object\") return null;\n          if (typeof conv.full !== \"string\") return null;\n          var fullText = normalizeText(conv.full);\n          if (!fullText) return null;\n          var raw = aggregateMessageList(conv);\n          var msgsLen = 0;\n          for (var i = 0; i < raw.length; i++) msgsLen += messageTextOf(raw[i]).length;\n          if (fullText.length <= msgsLen) return null;\n          return {\n            convId: String(conv.convId || conv.conversation_id || conv.uuid || conv.id || \"\"),\n            code: \"full-longer-than-messages\",\n            fullLen: fullText.length,\n            msgsLen,\n            over: fullText.length - msgsLen,\n            msgCount: raw.length\n          };\n        }\n        function collectFullTextAnomalies(json) {\n          var items = arrayifyConversations(json);\n          var out = [];\n          for (var i = 0; i < items.length; i++) {\n            var a = detectFullTextAnomaly(items[i]);\n            if (a) out.push(a);\n          }\n          return out;\n        }\n        function reportFullTextAnomalies(json, deps) {\n          var d = deps || {};\n          var warn = typeof d.warn === \"function\" ? d.warn : typeof console !== \"undefined\" && console && typeof console.warn === \"function\" ? function(msg) {\n            console.warn(msg);\n          } : null;\n          var anomalies = collectFullTextAnomalies(json);\n          if (warn) {\n            for (var i = 0; i < anomalies.length; i++) {\n              var a = anomalies[i];\n              warn(\"[AI CM][archive] \\u0430\\u043D\\u043E\\u043C\\u0430\\u043B\\u0438\\u044F full>messages convId=\" + (a.convId || \"-\") + \" full=\" + a.fullLen + \" msgs=\" + a.msgsLen + \" over=\" + a.over + \" msgsCount=\" + a.msgCount);\n            }\n          }\n          return anomalies;\n        }\n        function extractConvIdFromUrl(url) {\n          var m = String(url == null ? \"\" : url).match(/\\/app\\/(?!prompts(?:\\/|$)|new(?:\\/|$)|apikey(?:\\/|$))([A-Za-z0-9_-]+)/);\n          return m ? m[1] : \"\";\n        }\n        var GEMINI_PROMPT_PREFIX = /^(prompted|asked|you asked|said|запрос:?|вы спросили:?|запрос\\s)\\s*/i;\n        var GEMINI_RESPONSE_DETAIL = /^(response|answer|ответ|ответ модели|model response)$/i;\n        function geminiActivityUserText(rec) {\n          var title = normalizeText(rec.title != null ? rec.title : rec.description);\n          if (!title) return \"\";\n          return normalizeText(title.replace(GEMINI_PROMPT_PREFIX, \"\"));\n        }\n        function geminiActivityAssistantText(rec) {\n          var direct = normalizeText(rec.response != null ? rec.response : rec.answer);\n          if (direct) return direct;\n          var details = rec.details;\n          if (!Array.isArray(details)) return \"\";\n          for (var i = 0; i < details.length; i++) {\n            var d = details[i];\n            if (!d || typeof d !== \"object\") continue;\n            if (!GEMINI_RESPONSE_DETAIL.test(collapseWs(d.name))) continue;\n            var val = normalizeText(d.value);\n            if (val) return val;\n          }\n          return \"\";\n        }\n        function parseGeminiTakeout(json) {\n          var items = Array.isArray(json) ? json : json && Array.isArray(json.items) ? json.items : [];\n          var order = [];\n          var byConv = {};\n          var skippedNoConvId = 0;\n          var skippedEmpty = 0;\n          for (var i = 0; i < items.length; i++) {\n            var rec = items[i];\n            if (!rec || typeof rec !== \"object\") {\n              skippedEmpty++;\n              continue;\n            }\n            var convId = extractConvIdFromUrl(rec.titleUrl != null ? rec.titleUrl : rec.title_url);\n            if (!convId) {\n              skippedNoConvId++;\n              continue;\n            }\n            var ts = toMs(rec.time);\n            var userText = geminiActivityUserText(rec);\n            var assistantText = geminiActivityAssistantText(rec);\n            if (!userText && !assistantText) {\n              skippedEmpty++;\n              continue;\n            }\n            if (!byConv[convId]) {\n              byConv[convId] = {\n                convId,\n                service: SERVICE_BY_FORMAT[FORMATS.GEMINI_TAKEOUT],\n                format: FORMATS.GEMINI_TAKEOUT,\n                title: \"\",\n                updatedAt: 0,\n                messages: []\n              };\n              order.push(convId);\n            }\n            var conv = byConv[convId];\n            if (userText) conv.messages.push({ role: \"user\", text: userText, ts });\n            if (assistantText) conv.messages.push({ role: \"assistant\", text: assistantText, ts });\n            if (ts > conv.updatedAt) conv.updatedAt = ts;\n            if (!conv.title && userText) conv.title = collapseWs(userText).slice(0, 80);\n          }\n          var out = [];\n          for (var k = 0; k < order.length; k++) out.push(finalizeConversation(byConv[order[k]]));\n          return { conversations: out, skippedNoConvId, skippedEmpty };\n        }\n        function parseChatGPTArchive(json, deps) {\n          var orderFn = resolveOrderChatGPTMapping(deps);\n          if (!orderFn) return { conversations: [], error: \"chatgpt-parser-unavailable\", skippedNoConvId: 0, skippedEmpty: 0 };\n          var sanitize = resolveSanitizeChatGPT(deps);\n          var items = arrayifyConversations(json);\n          var out = [];\n          var skippedNoConvId = 0;\n          var skippedEmpty = 0;\n          for (var i = 0; i < items.length; i++) {\n            var c = items[i];\n            if (!c || typeof c !== \"object\" || !c.mapping || typeof c.mapping !== \"object\") {\n              skippedEmpty++;\n              continue;\n            }\n            var convId = String(c.conversation_id || c.id || \"\");\n            if (!convId) {\n              skippedNoConvId++;\n              continue;\n            }\n            var keys = orderFn(c.mapping);\n            var messages = [];\n            for (var k = 0; k < keys.length; k++) {\n              var node = c.mapping[keys[k]];\n              var msg = node && node.message;\n              if (!msg || !msg.content) continue;\n              var role = normalizeRole(msg.author && msg.author.role);\n              if (!role) continue;\n              var parts = Array.isArray(msg.content.parts) ? msg.content.parts : [];\n              var pieces = [];\n              for (var p = 0; p < parts.length; p++) {\n                if (typeof parts[p] === \"string\") {\n                  var s = sanitize(parts[p]);\n                  if (normalizeText(s)) pieces.push(normalizeText(s));\n                } else if (parts[p] && typeof parts[p] === \"object\" && typeof parts[p].text === \"string\") {\n                  var s2 = sanitize(parts[p].text);\n                  if (normalizeText(s2)) pieces.push(normalizeText(s2));\n                }\n              }\n              var text = normalizeText(pieces.join(\"\\n\"));\n              if (!text) continue;\n              messages.push({ role, text, ts: toMs(msg.create_time) });\n            }\n            out.push(finalizeConversation({\n              convId,\n              service: SERVICE_BY_FORMAT[FORMATS.CHATGPT_CONVERSATIONS],\n              format: FORMATS.CHATGPT_CONVERSATIONS,\n              title: c.title,\n              updatedAt: toMs(c.update_time != null ? c.update_time : c.create_time),\n              messages\n            }));\n          }\n          return { conversations: out, skippedNoConvId, skippedEmpty };\n        }\n        function claudeMessageText(msg) {\n          var parts = [];\n          if (Array.isArray(msg.content)) {\n            for (var i = 0; i < msg.content.length; i++) {\n              var b = msg.content[i];\n              if (!b || typeof b !== \"object\") continue;\n              if (b.type === \"text\" && typeof b.text === \"string\") {\n                var t = normalizeText(b.text);\n                if (t) parts.push(t);\n              }\n            }\n          }\n          if (!parts.length) {\n            var fallback = normalizeText(msg.text);\n            if (fallback) parts.push(fallback);\n          }\n          return normalizeText(parts.join(\"\\n\"));\n        }\n        function parseClaudeArchive(json) {\n          var items = arrayifyConversations(json);\n          var out = [];\n          var skippedNoConvId = 0;\n          var skippedEmpty = 0;\n          for (var i = 0; i < items.length; i++) {\n            var c = items[i];\n            if (!c || typeof c !== \"object\" || !Array.isArray(c.chat_messages)) {\n              skippedEmpty++;\n              continue;\n            }\n            var convId = String(c.uuid || c.id || \"\");\n            if (!convId) {\n              skippedNoConvId++;\n              continue;\n            }\n            var messages = [];\n            for (var k = 0; k < c.chat_messages.length; k++) {\n              var msg = c.chat_messages[k];\n              if (!msg || typeof msg !== \"object\") continue;\n              var role = normalizeRole(msg.sender);\n              if (!role) continue;\n              var text = claudeMessageText(msg);\n              if (!text) continue;\n              messages.push({\n                id: typeof msg.uuid === \"string\" && msg.uuid ? msg.uuid : void 0,\n                role,\n                text,\n                ts: toMs(msg.created_at)\n              });\n            }\n            var providerDate = String(c.updated_at || c.created_at || \"\");\n            out.push(finalizeConversation({\n              convId,\n              service: SERVICE_BY_FORMAT[FORMATS.CLAUDE_CONVERSATIONS],\n              format: FORMATS.CLAUDE_CONVERSATIONS,\n              title: c.name || c.title,\n              updatedAt: toMs(providerDate),\n              messages\n            }));\n          }\n          return { conversations: out, skippedNoConvId, skippedEmpty };\n        }\n        function parsePerplexityArchive(json, deps) {\n          var parseThread = resolveParsePerplexityThread(deps);\n          if (!parseThread) return { conversations: [], error: \"perplexity-parser-unavailable\", skippedNoConvId: 0, skippedEmpty: 0 };\n          var items = arrayifyConversations(json);\n          var out = [];\n          var skippedNoConvId = 0;\n          var skippedEmpty = 0;\n          for (var i = 0; i < items.length; i++) {\n            var it = items[i];\n            if (!it || typeof it !== \"object\") {\n              skippedEmpty++;\n              continue;\n            }\n            var thread = it.thread && typeof it.thread === \"object\" ? it.thread : it;\n            var entries = Array.isArray(it.entries) ? it.entries : Array.isArray(thread.entries) ? thread.entries : null;\n            if (!entries) {\n              skippedEmpty++;\n              continue;\n            }\n            var convId = String(thread.id || thread.slug || it.id || it.slug || \"\");\n            if (!convId) {\n              skippedNoConvId++;\n              continue;\n            }\n            var parsed = parseThread({ entries }) || {};\n            var msgs = Array.isArray(parsed.messages) ? parsed.messages : [];\n            var messages = [];\n            for (var k = 0; k < msgs.length; k++) {\n              var m = msgs[k];\n              if (!m || typeof m !== \"object\") continue;\n              var role = normalizeRole(m.role);\n              var text = normalizeText(m.text);\n              if (!role || !text) continue;\n              messages.push({ role, text, ts: 0 });\n            }\n            out.push(finalizeConversation({\n              convId,\n              service: SERVICE_BY_FORMAT[FORMATS.PERPLEXITY_THREADS],\n              format: FORMATS.PERPLEXITY_THREADS,\n              title: thread.title || it.title,\n              updatedAt: toMs(thread.updated_at || it.updated_at),\n              messages\n            }));\n          }\n          return { conversations: out, skippedNoConvId, skippedEmpty };\n        }\n        function parseArchive(json, deps) {\n          reportFullTextAnomalies(json, deps);\n          var format = detectArchiveFormat(json);\n          if (!format) {\n            return { ok: false, format: null, service: \"\", error: \"unknown-format\", conversations: [], skippedNoConvId: 0, skippedEmpty: 0 };\n          }\n          var res;\n          if (format === FORMATS.GEMINI_TAKEOUT) res = parseGeminiTakeout(json);\n          else if (format === FORMATS.CHATGPT_CONVERSATIONS) res = parseChatGPTArchive(json, deps);\n          else if (format === FORMATS.CLAUDE_CONVERSATIONS) res = parseClaudeArchive(json);\n          else res = parsePerplexityArchive(json, deps);\n          if (res.error) {\n            return { ok: false, format, service: serviceOfFormat(format), error: res.error, conversations: [], skippedNoConvId: 0, skippedEmpty: 0 };\n          }\n          return {\n            ok: true,\n            format,\n            service: serviceOfFormat(format),\n            error: null,\n            conversations: res.conversations || [],\n            skippedNoConvId: res.skippedNoConvId || 0,\n            skippedEmpty: res.skippedEmpty || 0\n          };\n        }\n        function parseArchiveText(text, deps) {\n          var json = null;\n          try {\n            json = JSON.parse(String(text == null ? \"\" : text));\n          } catch (e) {\n            return { ok: false, format: null, service: \"\", error: \"invalid-json\", conversations: [], skippedNoConvId: 0, skippedEmpty: 0 };\n          }\n          return parseArchive(json, deps);\n        }\n        function buildArchiveRecord(conversation, extra) {\n          var conv = finalizeConversation(conversation);\n          var x = extra || {};\n          return {\n            v: ARCHIVE_RECORD_VERSION,\n            convId: conv.convId,\n            service: conv.service,\n            format: conv.format,\n            title: conv.title,\n            count: conv.count,\n            textLen: conv.textLen,\n            messages: conv.messages,\n            importedAt: typeof x.importedAt === \"number\" ? x.importedAt : Date.now(),\n            fileName: String(x.fileName || \"\")\n          };\n        }\n        function buildConvSourceRecord(archiveRecord, extra) {\n          var r = archiveRecord || {};\n          var x = extra || {};\n          var rec = {\n            kind: SOURCE_ARCHIVE,\n            service: String(r.service || \"\"),\n            format: String(r.format || \"\"),\n            count: typeof r.count === \"number\" ? r.count : 0,\n            textLen: typeof r.textLen === \"number\" ? r.textLen : 0,\n            importedAt: typeof r.importedAt === \"number\" ? r.importedAt : Date.now()\n          };\n          rec.label = describeSource(rec);\n          if (x.fileName) rec.fileName = String(x.fileName);\n          return (\n            /** @type {ArchiveSourceRecord} */\n            rec\n          );\n        }\n        function buildLiveSourceRecord(extra) {\n          var x = extra || {};\n          var rec = {\n            kind: SOURCE_LIVE,\n            service: String(x.service || \"\"),\n            format: \"\",\n            count: typeof x.count === \"number\" ? x.count : 0,\n            textLen: typeof x.textLen === \"number\" ? x.textLen : 0,\n            importedAt: 0\n          };\n          rec.label = describeSource(rec);\n          return (\n            /** @type {ArchiveSourceRecord} */\n            rec\n          );\n        }\n        function describeSource(record) {\n          if (!record || typeof record !== \"object\") return \"\\u2014\";\n          if (record.kind === SOURCE_LIVE) return \"live (\\u0441\\u0435\\u0442\\u044C/DOM)\";\n          if (record.kind !== SOURCE_ARCHIVE) return \"\\u2014\";\n          var fmt = FORMAT_LABEL[record.format] || record.format || \"\\u0430\\u0440\\u0445\\u0438\\u0432\";\n          var n = typeof record.count === \"number\" && record.count > 0 ? \" \\xB7 \" + record.count + \" \\u0441\\u043E\\u043E\\u0431\\u0449.\" : \"\";\n          return \"\\u0430\\u0440\\u0445\\u0438\\u0432: \" + fmt + n;\n        }\n        function sourceBadge(record) {\n          if (!record || typeof record !== \"object\") return \"\";\n          if (record.kind === SOURCE_ARCHIVE) return \"\\u{1F4E6} \\u0430\\u0440\\u0445\\u0438\\u0432\";\n          if (record.kind === SOURCE_LIVE) return \"\\u26A1 live\";\n          return \"\";\n        }\n        function isArchiveRecordFor(record, convId) {\n          if (!record || typeof record !== \"object\") return false;\n          if (!convId) return false;\n          return String(record.convId || \"\") === String(convId);\n        }\n        function recordBytes(rec) {\n          try {\n            return JSON.stringify(rec).length;\n          } catch (e) {\n            return Infinity;\n          }\n        }\n        function planArchiveImport(conversations, opts) {\n          var o = opts || {};\n          var perConv = typeof o.maxConversationBytes === \"number\" ? o.maxConversationBytes : MAX_CONVERSATION_BYTES;\n          var total = typeof o.maxTotalBytes === \"number\" ? o.maxTotalBytes : MAX_TOTAL_BYTES;\n          var fileName = o.fileName || \"\";\n          var importedAt = typeof o.importedAt === \"number\" ? o.importedAt : Date.now();\n          var accepted = [];\n          var skipped = [];\n          var used = 0;\n          var list = Array.isArray(conversations) ? conversations : [];\n          for (var i = 0; i < list.length; i++) {\n            var conv = list[i];\n            if (!conv || !conv.convId) {\n              skipped.push({ convId: \"\", reason: \"no-conv-id\", bytes: 0 });\n              continue;\n            }\n            if (!conv.messages || !conv.messages.length) {\n              skipped.push({ convId: conv.convId, reason: \"empty\", bytes: 0 });\n              continue;\n            }\n            var rec = buildArchiveRecord(conv, { fileName, importedAt });\n            var bytes = recordBytes(rec);\n            if (bytes > perConv) {\n              skipped.push({ convId: conv.convId, reason: \"too-large\", bytes });\n              continue;\n            }\n            if (used + bytes > total) {\n              skipped.push({ convId: conv.convId, reason: \"budget-exceeded\", bytes });\n              continue;\n            }\n            used += bytes;\n            accepted.push(rec);\n          }\n          return { accepted, skipped, bytes: used };\n        }\n        var Api = {\n          ARCHIVE_KEY_PREFIX,\n          CONV_SOURCE_KEY_PREFIX,\n          ARCHIVE_RECORD_VERSION,\n          FORMATS,\n          SERVICE_BY_FORMAT,\n          FORMAT_LABEL,\n          SOURCE_ARCHIVE,\n          SOURCE_LIVE,\n          MAX_CONVERSATION_BYTES,\n          MAX_TOTAL_BYTES,\n          MAX_MESSAGES_PER_CONVERSATION,\n          MAX_ARCHIVE_SIZE,\n          archiveStorageKey,\n          convSourceStorageKey,\n          normalizeText,\n          normalizeRole,\n          normalizeMessage,\n          hash6,\n          toMs,\n          detectArchiveFormat,\n          serviceOfFormat,\n          detectFullTextAnomaly,\n          collectFullTextAnomalies,\n          reportFullTextAnomalies,\n          extractConvIdFromUrl,\n          parseGeminiTakeout,\n          parseChatGPTArchive,\n          parseClaudeArchive,\n          parsePerplexityArchive,\n          parseArchive,\n          parseArchiveText,\n          buildArchiveRecord,\n          buildConvSourceRecord,\n          buildLiveSourceRecord,\n          describeSource,\n          sourceBadge,\n          isArchiveRecordFor,\n          recordBytes,\n          planArchiveImport\n        };\n        if (typeof window !== \"undefined\") window.AiCmArchiveImport = Api;\n        if (typeof module !== \"undefined\" && module.exports) module.exports = Api;\n      })();\n      (function() {\n        \"use strict\";\n        function aiCmI18nMessage2(key, fallback, substitutions) {\n          try {\n            if (typeof chrome !== \"undefined\" && chrome.i18n && typeof chrome.i18n.getMessage === \"function\") {\n              var message = substitutions ? chrome.i18n.getMessage(key, substitutions) : chrome.i18n.getMessage(key);\n              if (message) return message;\n            }\n          } catch (eMessage) {\n          }\n          return fallback;\n        }\n        var REASONING_SECTION_TAG = \"[REASONING]\";\n        var ANSWER_SECTION_TAG = \"[ANSWER]\";\n        function reasoningOfMessage(msg) {\n          if (!msg || typeof msg !== \"object\") return \"\";\n          var r = msg.reasoning;\n          return typeof r === \"string\" ? r : \"\";\n        }\n        function withReasoningSections(text, reasoning) {\n          var t = typeof text === \"string\" ? text : \"\";\n          var r = typeof reasoning === \"string\" ? reasoning : \"\";\n          if (!r) return t;\n          if (t.indexOf(r) !== -1) return t;\n          return REASONING_SECTION_TAG + \"\\n\" + r + \"\\n\\n\" + ANSWER_SECTION_TAG + \"\\n\" + t;\n        }\n        function messageTextWithReasoning(msg) {\n          if (!msg || typeof msg !== \"object\") return \"\";\n          return withReasoningSections(msg.text, reasoningOfMessage(msg));\n        }\n        function reasoningOfMessageForExport(msg, useHidden) {\n          var r = reasoningOfMessage(msg);\n          if (r) return r;\n          if (useHidden !== true || !msg || typeof msg !== \"object\") return \"\";\n          return typeof msg.hiddenReasoning === \"string\" ? msg.hiddenReasoning : \"\";\n        }\n        function markersMessageTextWithReasoning(msg, useHidden) {\n          return withReasoningSections(\n            messageTextForMarkers(msg),\n            reasoningOfMessageForExport(msg, useHidden)\n          );\n        }\n        var TXT_ROLE_MARKER_SITES = [\"qwen\"];\n        function isTxtRoleMarkerHistory(history) {\n          try {\n            var site = String(history && history.site || \"\").toLowerCase();\n            return TXT_ROLE_MARKER_SITES.indexOf(site) !== -1;\n          } catch (e) {\n            return false;\n          }\n        }\n        function txtRoleMarker(role) {\n          return role === \"user\" ? \"USER:\" : \"ASSISTANT:\";\n        }\n        function mdRoleMarker(role) {\n          return role === \"user\" ? \"### USER\" : \"### ASSISTANT\";\n        }\n        var CONTAINER_MIN_CONTAINED = 2;\n        var CONTAINER_COVER_MIN = 0.8;\n        function messageTextForMarkers(msg) {\n          if (!msg || typeof msg !== \"object\") return \"\";\n          if (typeof msg.text === \"string\" && msg.text) return msg.text;\n          if (typeof msg.content === \"string\") return msg.content;\n          return typeof msg.text === \"string\" ? msg.text : \"\";\n        }\n        function dropContainerMessages(list) {\n          var src = Array.isArray(list) ? list : [];\n          var texts = [];\n          for (var t = 0; t < src.length; t++) texts.push(messageTextForMarkers(src[t]));\n          var keep = [];\n          for (var c = 0; c < src.length; c++) {\n            var candidate = texts[c];\n            var contained = 0;\n            var covered = 0;\n            var longest = 0;\n            if (candidate) {\n              for (var j = 0; j < texts.length; j++) {\n                var other = texts[j];\n                if (j === c || !other || other.length >= candidate.length) continue;\n                if (candidate.indexOf(other) === -1) continue;\n                contained++;\n                covered += other.length;\n                if (other.length > longest) longest = other.length;\n              }\n            }\n            var isContainer = contained >= CONTAINER_MIN_CONTAINED && covered >= CONTAINER_COVER_MIN * candidate.length && candidate.length >= 2 * longest;\n            if (!isContainer) keep.push(src[c]);\n          }\n          return keep;\n        }\n        function diagTxtRoleStructure(list, totalCount) {\n          if (!diagOn()) return false;\n          try {\n            var kept = Array.isArray(list) ? list.length : -1;\n            var total = typeof totalCount === \"number\" ? totalCount : kept;\n            var first = Array.isArray(list) && list.length > 0 ? list[0] : null;\n            var text = messageTextForMarkers(first);\n            var kind = \"\\u043D\\u0435\\u0442\";\n            if (first && typeof first === \"object\") {\n              if (typeof first.text === \"string\") kind = \"text\";\n              else if (typeof first.content === \"string\") kind = \"content\";\n            }\n            console.log(DIAG_PREFIX + \" txt-roles site=qwen isArray=\" + Array.isArray(list) + \" msgs=\" + total + \" kept=\" + kept + \" dropped-containers=\" + (kept >= 0 && total >= kept ? total - kept : 0) + \" first.role=\" + (first && first.role !== void 0 && first.role !== null ? String(first.role) : \"(\\u043D\\u0435\\u0442)\") + \" first.kind=\" + kind + \" first.len=\" + text.length + \" first.head=\" + (diagHead(text, 60) || \"\\u043F\\u0443\\u0441\\u0442\\u043E\"));\n          } catch (eLogRoles) {\n          }\n          return true;\n        }\n        function renderReferenceText(list) {\n          return buildReferenceText(list);\n        }\n        function renderReferenceTextWithRoleMarkers(list) {\n          var src = Array.isArray(list) ? list : [];\n          var parts = [];\n          for (var i = 0; i < src.length; i++) {\n            var m = src[i] || {};\n            var text = renderReferenceText([{ role: m.role, text: messageTextForMarkers(m) }]);\n            if (text === null) return null;\n            if (!String(text).trim()) continue;\n            parts.push(txtRoleMarker(m.role) + \"\\n\" + text);\n          }\n          return parts.join(\"\\n\\n\");\n        }\n        function buildTxtFromHistory(history) {\n          var hist = history || {};\n          var site = typeof hist.site === \"string\" ? hist.site : \"\";\n          var messages = history && Array.isArray(history.messages) ? history.messages : [];\n          var marked = isTxtRoleMarkerHistory(history);\n          var kept = marked ? dropContainerMessages(messages) : messages;\n          var forTxt = kept.map(function(m) {\n            var text = marked ? markersMessageTextWithReasoning(m, true) : messageTextWithReasoning(m);\n            if (!m || typeof m !== \"object\" || text === m.text) return m;\n            var copy = {};\n            for (var k in m) {\n              if (Object.prototype.hasOwnProperty.call(m, k)) copy[k] = m[k];\n            }\n            copy.text = text;\n            return copy;\n          });\n          var out;\n          if (marked) {\n            diagTxtRoleStructure(forTxt, messages.length);\n            out = renderReferenceTextWithRoleMarkers(forTxt);\n          } else {\n            out = renderReferenceText(forTxt);\n          }\n          if (site === \"gemini\" && hist.sourceTier && out) out = hist.sourceTier + \"\\n\\n\" + out;\n          return out === null ? \"\" : out;\n        }\n        function exportTokenSnapshot(history) {\n          var h = history || {};\n          var tokens = typeof h.tokens === \"number\" ? h.tokens : 0;\n          var limit = typeof h.limit === \"number\" ? h.limit : 0;\n          var percent = typeof h.percent === \"number\" ? h.percent : 0;\n          if (limit > 0) {\n            var calc = Math.round(tokens / limit * 1e3) / 10;\n            if (calc !== percent) percent = calc;\n          }\n          return { tokens, limit, percent };\n        }\n        function buildMdFromHistory(history, platform) {\n          var h = history || {};\n          var site = typeof h.site === \"string\" ? h.site : \"\";\n          var lines = [];\n          lines.push(aiCmI18nMessage2(\"export_md_title\", \"# AI Context Monitor \\u2014 \\u044D\\u043A\\u0441\\u043F\\u043E\\u0440\\u0442 \\u0438\\u0441\\u0442\\u043E\\u0440\\u0438\\u0438\"));\n          lines.push(\"\");\n          lines.push(aiCmI18nMessage2(\"export_md_platform\", \"\\u041F\\u043B\\u0430\\u0442\\u0444\\u043E\\u0440\\u043C\\u0430: \" + (platform || \"AI Chat\"), [platform || \"AI Chat\"]));\n          lines.push(aiCmI18nMessage2(\"export_md_model\", \"\\u041C\\u043E\\u0434\\u0435\\u043B\\u044C: \" + (h.model || \"\\u2014\"), [h.model || \"\\u2014\"]));\n          var exportedAt = (/* @__PURE__ */ new Date()).toISOString();\n          lines.push(aiCmI18nMessage2(\"export_md_date\", \"\\u0414\\u0430\\u0442\\u0430 \\u044D\\u043A\\u0441\\u043F\\u043E\\u0440\\u0442\\u0430: \" + exportedAt, [exportedAt]));\n          var snap = exportTokenSnapshot(h);\n          var tokens = snap.tokens;\n          var limit = snap.limit;\n          var percent = snap.percent;\n          if (tokens === 0 && limit === 0) {\n            lines.push(\"\\u0422\\u043E\\u043A\\u0435\\u043D\\u044B: \\u043D/\\u0434 (\" + percent + \"%)\");\n          } else {\n            lines.push(aiCmI18nMessage2(\"export_md_tokens\", \"\\u0422\\u043E\\u043A\\u0435\\u043D\\u044B: \" + tokens + \" / \" + limit + \" (\" + percent + \"%)\", [String(tokens), String(limit), String(percent)]));\n          }\n          lines.push(\"\");\n          if (site === \"gemini\" && h.sourceTier) {\n            lines.push(h.sourceTier, \"\");\n          }\n          var mdMarked = isTxtRoleMarkerHistory(h);\n          var messages = Array.isArray(h.messages) ? h.messages : [];\n          if (mdMarked) messages = dropContainerMessages(messages);\n          for (var i = 0; i < messages.length; i++) {\n            var msg = messages[i] || {};\n            if (typeof aiCmDiagLine === \"function\") {\n              aiCmDiagLine(\"claude-role-builder\", { msgRole: msg.role, mdMarked });\n            }\n            var title = mdMarked ? mdRoleMarker(msg.role) : msg.role === \"user\" || msg.role === \"human\" ? aiCmI18nMessage2(\"export_md_role_user\", \"## \\u041F\\u043E\\u043B\\u044C\\u0437\\u043E\\u0432\\u0430\\u0442\\u0435\\u043B\\u044C\") : aiCmI18nMessage2(\"export_md_role_assistant\", \"## \\u0410\\u0441\\u0441\\u0438\\u0441\\u0442\\u0435\\u043D\\u0442\");\n            lines.push(title);\n            lines.push(\"\");\n            lines.push(mdMarked ? markersMessageTextWithReasoning(msg, true) : messageTextWithReasoning(msg));\n            lines.push(\"\");\n          }\n          return lines.join(\"\\n\");\n        }\n        function buildJsonFromHistory(history, platform) {\n          var h = history || {};\n          return JSON.stringify({\n            platform: platform || \"AI Chat\",\n            model: h.model || \"\",\n            exportedAt: (/* @__PURE__ */ new Date()).toISOString(),\n            tokens: typeof h.tokens === \"number\" ? h.tokens : 0,\n            limit: typeof h.limit === \"number\" ? h.limit : 0,\n            percent: typeof h.percent === \"number\" ? h.percent : 0,\n            // Two-Tier (v89): аддитивное поле метаданных. undefined → JSON.stringify ключ НЕ\n            // добавляет, поэтому у прочих платформ и у Gemini без метки байты прежние.\n            sourceTier: h.sourceTier,\n            messages: Array.isArray(h.messages) ? h.messages : []\n          }, null, 2);\n        }\n        var DIAG_PREFIX = \"[AI CM][diag]\";\n        function diagOn() {\n          try {\n            if (typeof sessionStorage !== \"undefined\" && sessionStorage && sessionStorage.getItem(\"aiCmDebug\") === \"1\") return true;\n          } catch (eSess) {\n          }\n          try {\n            if (typeof window !== \"undefined\" && window && window.__aiCmDebugLogs === true) return true;\n          } catch (eWin) {\n          }\n          return false;\n        }\n        function diagHead(v, n) {\n          try {\n            var lim = typeof n === \"number\" && n > 0 ? n : 100;\n            if (v === void 0 || v === null) return \"\";\n            var s = String(v);\n            if (!s) return \"\";\n            var flat = s.replace(/\\s+/g, \" \").trim();\n            if (!flat) return \"\";\n            return flat.length > lim ? flat.slice(0, lim) + \"\\u2026\" : flat;\n          } catch (eHead) {\n            return \"\";\n          }\n        }\n        function diagStack() {\n          try {\n            var lines = String(new Error().stack || \"\").split(\"\\n\");\n            var out = [];\n            for (var i = 1; i < lines.length && out.length < 4; i++) {\n              var s = String(lines[i] || \"\").replace(/\\s+/g, \" \").trim();\n              if (!s || s.indexOf(\"diag\") !== -1) continue;\n              out.push(s);\n            }\n            return out.join(\" <- \");\n          } catch (eStack) {\n            return \"\";\n          }\n        }\n        function diagDownload(trigger, content, fileName, extra) {\n          try {\n            if (typeof aiCmDiagDownload === \"function\") return aiCmDiagDownload(trigger, content, fileName, extra);\n          } catch (eGlobal) {\n          }\n          if (!diagOn()) return false;\n          try {\n            var e = extra || {};\n            var url = \"\";\n            try {\n              url = String(typeof location !== \"undefined\" && location && location.href || \"\");\n            } catch (eUrl) {\n            }\n            console.log(DIAG_PREFIX + \" download trigger=\" + (trigger || \"(\\u043D\\u0435\\u0442)\") + \" file=\" + (fileName === void 0 || fileName === null || String(fileName) === \"\" ? \"\\u043F\\u0443\\u0441\\u0442\\u043E\\u0435\" : String(fileName)) + \" bytes100=\" + (diagHead(content, 100) || \"\\u043F\\u0443\\u0441\\u0442\\u043E\") + \" len=\" + (content === void 0 || content === null ? 0 : String(content).length) + \" mime=\" + (e.mime === void 0 ? \"(\\u043D\\u0435\\u0442)\" : e.mime) + \" url=\" + url + \" threadId=\" + (e.threadId === void 0 || e.threadId === \"\" ? \"(\\u043D\\u0435\\u0442)\" : e.threadId) + \" site=\" + (e.site === void 0 ? \"\" : e.site) + \" reason=\" + (e.reason === void 0 ? \"\" : e.reason) + \" src=\" + diagStack());\n          } catch (eLog) {\n          }\n          return true;\n        }\n        var XSSI_PREFIX_LEN = 4;\n        function startsWithXssiPrefix(content) {\n          try {\n            if (content === void 0 || content === null) return false;\n            var s = String(content);\n            if (s.length < XSSI_PREFIX_LEN) return false;\n            return s.charCodeAt(0) === 41 && s.charCodeAt(1) === 93 && s.charCodeAt(2) === 125 && s.charCodeAt(3) === 39;\n          } catch (eXssi) {\n            return false;\n          }\n        }\n        function downloadBlockReason(content, fileName) {\n          if (startsWithXssiPrefix(content)) return \"xssi-prefix\";\n          if (fileName === void 0 || fileName === null || String(fileName).trim() === \"\") return \"empty-name\";\n          return null;\n        }\n        function diagDownloadBlocked(trigger, content, fileName, reason, extra) {\n          try {\n            if (typeof aiCmDiagDownloadBlocked === \"function\") {\n              return aiCmDiagDownloadBlocked(trigger, content, fileName, reason, extra);\n            }\n          } catch (eGlobalBlocked) {\n          }\n          if (!diagOn()) return false;\n          try {\n            var e = extra || {};\n            var url = \"\";\n            try {\n              url = String(typeof location !== \"undefined\" && location && location.href || \"\");\n            } catch (eUrlB) {\n            }\n            console.log(DIAG_PREFIX + \" download-blocked reason=\" + (reason || \"(\\u043D\\u0435\\u0442)\") + \" trigger=\" + (trigger || \"(\\u043D\\u0435\\u0442)\") + \" file=\" + (fileName === void 0 || fileName === null || String(fileName) === \"\" ? \"\\u043F\\u0443\\u0441\\u0442\\u043E\\u0435\" : String(fileName)) + \" bytes100=\" + (diagHead(content, 100) || \"\\u043F\\u0443\\u0441\\u0442\\u043E\") + \" len=\" + (content === void 0 || content === null ? 0 : String(content).length) + \" mime=\" + (e.mime === void 0 ? \"(\\u043D\\u0435\\u0442)\" : e.mime) + \" url=\" + url + \" threadId=\" + (e.threadId === void 0 || e.threadId === \"\" ? \"(\\u043D\\u0435\\u0442)\" : e.threadId) + \" site=\" + (e.site === void 0 ? \"\" : e.site) + \" src=\" + diagStack());\n          } catch (eLogBlocked) {\n          }\n          return true;\n        }\n        function downloadBlob2(content, fileName, mimeType, trigger, extra) {\n          var ex = extra || {};\n          var blockReason = downloadBlockReason(content, fileName);\n          if (blockReason) {\n            try {\n              diagDownloadBlocked(\n                trigger || \"builder-download\",\n                content,\n                fileName,\n                blockReason,\n                { mime: mimeType, threadId: ex.threadId, site: ex.site }\n              );\n            } catch (eDiagBlocked) {\n            }\n            return false;\n          }\n          try {\n            diagDownload(\n              trigger || \"builder-download\",\n              content,\n              fileName,\n              { mime: mimeType, threadId: ex.threadId, site: ex.site, reason: ex.reason }\n            );\n          } catch (eDiag) {\n          }\n          try {\n            var blob = new Blob([content], { type: mimeType });\n            var url = URL.createObjectURL(blob);\n            var a = document.createElement(\"a\");\n            a.href = url;\n            a.download = fileName;\n            document.body.appendChild(a);\n            a.click();\n            a.remove();\n            setTimeout(function() {\n              URL.revokeObjectURL(url);\n            }, 1e3);\n          } catch (e) {\n            console.warn(\"[export] \\u043D\\u0435 \\u0443\\u0434\\u0430\\u043B\\u043E\\u0441\\u044C \\u0441\\u043A\\u0430\\u0447\\u0430\\u0442\\u044C \\u0444\\u0430\\u0439\\u043B:\", e);\n          }\n          return true;\n        }\n        var Api = {\n          buildTxtFromHistory,\n          buildMdFromHistory,\n          buildJsonFromHistory,\n          downloadBlob: downloadBlob2,\n          // O-27 (защитный фикс): причина отказа точки скачивания (null — выдача разрешена) и\n          // сама точка отказа наружу — для пинов тестов и переиспользования вызывающим кодом.\n          aiCmDownloadBlockReason: downloadBlockReason,\n          aiCmDiagDownloadBlocked: diagDownloadBlocked,\n          // O-27/O-32: диагностические хелперы наружу (content.js/export-manager.js зовут их\n          // через window.AiCmExportBuilders, если глобальный utils/debug.js не подключён).\n          aiCmDiagOn: diagOn,\n          aiCmDiagHead: diagHead,\n          aiCmDiagDownload: diagDownload,\n          // O-35: рендер reasoning контрактом DeepSeek — чистая функция наружу (пины тестов\n          // и переиспользование; на боевом пути вызывается только двумя сборщиками выше).\n          aiCmMessageTextWithReasoning: messageTextWithReasoning,\n          aiCmWithReasoningSections: withReasoningSections,\n          // O-37 (C): источник размышления для маркерного пути (reasoning, иначе поле захвата\n          // hiddenReasoning) и композиция «текст сообщения + секции» — чистые функции наружу;\n          // на боевом пути их зовут только buildTxtFromHistory/buildMdFromHistory выше.\n          aiCmReasoningOfMessageForExport: reasoningOfMessageForExport,\n          aiCmMarkersMessageTextWithReasoning: markersMessageTextWithReasoning,\n          // O-36 (D2): маркеры ролей txt-экспорта — чистые предикаты наружу (пины тестов;\n          // на боевом пути вызываются только сборщиком buildTxtFromHistory выше).\n          aiCmTxtRoleMarker: txtRoleMarker,\n          aiCmIsTxtRoleMarkerHistory: isTxtRoleMarkerHistory,\n          aiCmTxtRoleMarkerSites: TXT_ROLE_MARKER_SITES,\n          // O-36 (D2.1): маркер роли md (Qwen Studio), текст сообщения для маркерного пути\n          // (с фолбэком на .content) и контейнер-чистка — чистые функции наружу для пинов\n          // и переиспользования; на боевом пути их зовут только два сборщика выше.\n          aiCmMdRoleMarker: mdRoleMarker,\n          aiCmMessageTextForMarkers: messageTextForMarkers,\n          aiCmDropContainerMessages: dropContainerMessages,\n          aiCmDiagTxtRoleStructure: diagTxtRoleStructure,\n          aiCmContainerRules: { minContained: CONTAINER_MIN_CONTAINED, coverMin: CONTAINER_COVER_MIN }\n        };\n        if (typeof module !== \"undefined\" && module.exports) module.exports = Api;\n        if (typeof window !== \"undefined\") window.AiCmExportBuilders = Api;\n      })();\n      console.log(\"AI Context Monitor: \\u041D\\u0430\\u0441\\u0442\\u0440\\u043E\\u0439\\u043A\\u0438 \\u0437\\u0430\\u0433\\u0440\\u0443\\u0436\\u0435\\u043D\\u044B\");\n      var siteEl = document.getElementById(\"stat-site\");\n      var modelEl = document.getElementById(\"stat-model\");\n      var tokensEl = document.getElementById(\"stat-tokens\");\n      var limitEl = document.getElementById(\"stat-limit\");\n      var percentEl = document.getElementById(\"stat-percent\");\n      var modelSelect = document.getElementById(\"model-select\");\n      var customLimit = document.getElementById(\"custom-limit\");\n      var showWidget = document.getElementById(\"show-widget\");\n      var apiKeyInput = document.getElementById(\"api-key\");\n      var toggleApiKeyBtn = document.getElementById(\"toggle-api-key\");\n      var exactCountCheckbox = document.getElementById(\"exact-count\");\n      var exactCountWarningEl = document.getElementById(\"exact-count-warning\");\n      var aiCmByokUiDisabled = aiCmIsFirefox();\n      var versionEl = document.querySelector(\".version\");\n      var exportMdBtn = document.getElementById(\"export-md\");\n      var exportJsonBtn = document.getElementById(\"export-json\");\n      var exportPdfBtn = document.getElementById(\"export-pdf\");\n      var exportTxtBtn = document.getElementById(\"export-txt\");\n      var exportHintEl = document.getElementById(\"export-hint\");\n      var staleWarningEl = document.getElementById(\"stale-warning\");\n      var exportDiagBtn = document.getElementById(\"export-diag\");\n      var sourceEl = document.getElementById(\"stat-source\");\n      function percentColor(p) {\n        if (p < 50) return \"#22c55e\";\n        if (p < 80) return \"#eab308\";\n        return \"#ef4444\";\n      }\n      try {\n        manifest = chrome.runtime.getManifest();\n        if (versionEl && manifest.version) versionEl.textContent = \"v\" + manifest.version;\n      } catch (e) {\n        aiCmPopupDiagLine(\"manifest-version\", { err: String(e) });\n      }\n      var manifest;\n      var privacyLink = document.getElementById(\"privacy-link\");\n      privacyLink && privacyLink.addEventListener(\"click\", function(e) {\n        e.preventDefault();\n        try {\n          chrome.tabs.create({ url: chrome.runtime.getURL(\"privacy/privacy.html\") });\n        } catch (ePrivacy) {\n          console.warn(\"[privacy] \\u043D\\u0435 \\u0443\\u0434\\u0430\\u043B\\u043E\\u0441\\u044C \\u043E\\u0442\\u043A\\u0440\\u044B\\u0442\\u044C \\u043F\\u043E\\u043B\\u0438\\u0442\\u0438\\u043A\\u0443 \\u043A\\u043E\\u043D\\u0444\\u0438\\u0434\\u0435\\u043D\\u0446\\u0438\\u0430\\u043B\\u044C\\u043D\\u043E\\u0441\\u0442\\u0438:\", ePrivacy);\n        }\n      });\n      var helpLink = document.getElementById(\"help-link\");\n      helpLink && helpLink.addEventListener(\"click\", function(e) {\n        e.preventDefault();\n        try {\n          chrome.tabs.create({ url: chrome.runtime.getURL(\"docs/index.html\") });\n        } catch (eHelp) {\n          console.warn(\"[help] \\u043D\\u0435 \\u0443\\u0434\\u0430\\u043B\\u043E\\u0441\\u044C \\u043E\\u0442\\u043A\\u0440\\u044B\\u0442\\u044C \\u0440\\u0443\\u043A\\u043E\\u0432\\u043E\\u0434\\u0441\\u0442\\u0432\\u043E:\", eHelp);\n        }\n      });\n      var siteLabels = {\n        \"chatgpt\": \"ChatGPT\",\n        \"gemini\": \"Gemini\",\n        \"aistudio\": \"Google AI Studio\",\n        \"google_search\": \"Google Search AI\",\n        \"deepseek\": \"DeepSeek\",\n        \"claude\": \"Claude\",\n        \"perplexity\": \"Perplexity\"\n      };\n      chrome.storage.sync.get([\"selectedModel\", \"customLimit\", \"showWidget\"], function(data) {\n        if (data.selectedModel) modelSelect.value = data.selectedModel;\n        if (data.customLimit) customLimit.value = data.customLimit;\n        if (data.showWidget !== void 0) showWidget.checked = data.showWidget;\n      });\n      var AI_CM_BYOK_SESSION_KEY = \"aiCmApiKeySession\";\n      var AI_CM_BYOK_LEGACY_KEYS = [\n        \"ai_cm_gemini_api_key\",\n        \"ai_cm_api_key\",\n        \"ai_cm_byok_key\",\n        \"aiCmGeminiApiKey\",\n        \"aiCmApiKey\",\n        \"gemini_api_key\"\n      ];\n      var apiKeyStatusEl = document.getElementById(\"api-key-status\");\n      var removeApiKeyBtn = document.getElementById(\"api-key-remove\");\n      function aiCmFirstLegacyByokKey(data) {\n        for (var iLk = 0; iLk < AI_CM_BYOK_LEGACY_KEYS.length; iLk++) {\n          var vLk = data ? data[AI_CM_BYOK_LEGACY_KEYS[iLk]] : null;\n          if (typeof vLk === \"string\" && vLk) return vLk;\n        }\n        return \"\";\n      }\n      function aiCmPurgeLegacyByokKeys() {\n        try {\n          if (!chrome.storage || !chrome.storage.local || typeof chrome.storage.local.remove !== \"function\") return;\n          chrome.storage.local.remove(AI_CM_BYOK_LEGACY_KEYS);\n        } catch (ePurge) {\n          console.warn(\"[AI CM][catch] aiCmPurgeLegacyByokKeys:\", ePurge);\n        }\n      }\n      function aiCmI18nMessage(key, fallback, substitutions) {\n        try {\n          if (typeof chrome !== \"undefined\" && chrome.i18n && typeof chrome.i18n.getMessage === \"function\") {\n            var message = substitutions ? chrome.i18n.getMessage(key, substitutions) : chrome.i18n.getMessage(key);\n            if (message) return message;\n          }\n        } catch (eMessage) {\n          aiCmPopupDiagLine(\"aiCmI18nMessage\", { err: String(eMessage) });\n        }\n        return fallback;\n      }\n      function aiCmRenderApiKeyStatus(hasKey) {\n        if (!apiKeyStatusEl) return;\n        apiKeyStatusEl.textContent = hasKey ? aiCmI18nMessage(\"options_byok_status_set\", \"\\u041A\\u043B\\u044E\\u0447: \\u0437\\u0430\\u0434\\u0430\\u043D\") : aiCmI18nMessage(\"options_byok_status_unset\", \"\\u041A\\u043B\\u044E\\u0447: \\u043D\\u0435 \\u0437\\u0430\\u0434\\u0430\\u043D\");\n      }\n      function aiCmSaveByokKey(value) {\n        try {\n          if (chrome.storage && chrome.storage.session && typeof chrome.storage.session.set === \"function\") {\n            var patch = {};\n            patch[AI_CM_BYOK_SESSION_KEY] = value;\n            chrome.storage.session.set(patch);\n          }\n        } catch (eSet) {\n          console.warn(\"[AI CM][catch] aiCmSaveByokKey:\", eSet);\n        }\n        aiCmPurgeLegacyByokKeys();\n      }\n      var aiCmByokHasKeyState = null;\n      function aiCmRenderExactCountWarning(show) {\n        if (!exactCountWarningEl) return;\n        exactCountWarningEl.textContent = show ? aiCmI18nMessage(\n          \"options_exact_count_nokey\",\n          \"\\u041A\\u043B\\u044E\\u0447 API \\u043D\\u0435 \\u043D\\u0430\\u0439\\u0434\\u0435\\u043D. \\u0412\\u0432\\u0435\\u0434\\u0438\\u0442\\u0435 \\u043A\\u043B\\u044E\\u0447 \\u0437\\u0430\\u043D\\u043E\\u0432\\u043E, \\u0447\\u0442\\u043E\\u0431\\u044B \\u0432\\u043A\\u043B\\u044E\\u0447\\u0438\\u0442\\u044C \\u0442\\u043E\\u0447\\u043D\\u044B\\u0439 \\u043F\\u043E\\u0434\\u0441\\u0447\\u0451\\u0442\"\n        ) : \"\";\n      }\n      function aiCmSyncExactCountWithByok(hasKey) {\n        if (hasKey !== true && hasKey !== false) return;\n        aiCmByokHasKeyState = hasKey;\n        if (hasKey || !exactCountCheckbox || !exactCountCheckbox.checked) {\n          aiCmRenderExactCountWarning(false);\n          return;\n        }\n        exactCountCheckbox.checked = false;\n        aiCmRenderExactCountWarning(true);\n        try {\n          chrome.storage.local.set({ ai_cm_exact_token_count: false });\n        } catch (eSync) {\n          console.warn(\"[AI CM][catch] aiCmSyncExactCountWithByok:\", eSync);\n        }\n      }\n      function aiCmLoadByokKey() {\n        try {\n          let onSession = function(data) {\n            if (handled) return;\n            handled = true;\n            var key = data ? data[AI_CM_BYOK_SESSION_KEY] : \"\";\n            if (typeof key === \"string\" && key) {\n              if (apiKeyInput) apiKeyInput.value = key;\n              aiCmRenderApiKeyStatus(true);\n              aiCmSyncExactCountWithByok(true);\n              return;\n            }\n            aiCmRenderApiKeyStatus(false);\n            aiCmSyncExactCountWithByok(false);\n            try {\n              chrome.storage.local.get(AI_CM_BYOK_LEGACY_KEYS, function(dl) {\n                var legacy = aiCmFirstLegacyByokKey(dl);\n                if (!legacy) return;\n                aiCmSaveByokKey(legacy);\n                if (apiKeyInput) apiKeyInput.value = legacy;\n                aiCmRenderApiKeyStatus(true);\n                aiCmSyncExactCountWithByok(true);\n                console.log(\"[AI CM][byok] migrated plaintext\\u2192session\");\n              });\n            } catch (eLeg) {\n              aiCmPopupDiagLine(\"aiCmLoadByokKey\", { err: String(eLeg) });\n            }\n          };\n          if (!chrome.storage || !chrome.storage.session || typeof chrome.storage.session.get !== \"function\") {\n            aiCmRenderApiKeyStatus(false);\n            return;\n          }\n          var handled = false;\n          var maybePromise = chrome.storage.session.get([AI_CM_BYOK_SESSION_KEY], onSession);\n          if (maybePromise && typeof maybePromise.then === \"function\") {\n            maybePromise.then(onSession, function() {\n              if (!handled) {\n                handled = true;\n                aiCmRenderApiKeyStatus(false);\n                aiCmSyncExactCountWithByok(false);\n              }\n            });\n          }\n        } catch (eLoad) {\n          aiCmRenderApiKeyStatus(false);\n        }\n      }\n      chrome.storage.local.get([\"ai_cm_exact_token_count\"], function(data) {\n        if (aiCmByokUiDisabled) {\n          [apiKeyInput, exactCountCheckbox].forEach(function(el) {\n            var section = el && el.closest ? el.closest(\".section\") : null;\n            if (section) {\n              section.hidden = true;\n              section.style.display = \"none\";\n            }\n          });\n          if (data.ai_cm_exact_token_count) chrome.storage.local.set({ ai_cm_exact_token_count: false });\n          return;\n        }\n        if (data.ai_cm_exact_token_count === void 0) return;\n        exactCountCheckbox.checked = !!data.ai_cm_exact_token_count;\n        if (aiCmByokHasKeyState === false) aiCmSyncExactCountWithByok(false);\n      });\n      if (!aiCmByokUiDisabled) aiCmLoadByokKey();\n      modelSelect && modelSelect.addEventListener(\"change\", function() {\n        chrome.storage.sync.set({ selectedModel: modelSelect.value });\n      });\n      var CUSTOM_LIMIT_DEBOUNCE_MS = 500;\n      var customLimitWriteTimer = null;\n      function aiCmCancelCustomLimitWrite() {\n        if (customLimitWriteTimer !== null) {\n          clearTimeout(customLimitWriteTimer);\n          customLimitWriteTimer = null;\n        }\n      }\n      customLimit && customLimit.addEventListener(\"input\", function() {\n        aiCmCancelCustomLimitWrite();\n        customLimitWriteTimer = setTimeout(function() {\n          customLimitWriteTimer = null;\n          var value = customLimit.value ? parseInt(customLimit.value) : null;\n          chrome.storage.sync.set({ customLimit: value });\n        }, CUSTOM_LIMIT_DEBOUNCE_MS);\n      });\n      customLimit && customLimit.addEventListener(\"change\", function() {\n        if (!customLimit.value) {\n          aiCmCancelCustomLimitWrite();\n          customLimit.placeholder = aiCmI18nMessage(\"options_limit_placeholder\", \"\\u0410\\u0432\\u0442\\u043E\");\n          chrome.storage.sync.set({ customLimit: null });\n        }\n      });\n      showWidget && showWidget.addEventListener(\"change\", function() {\n        chrome.storage.sync.set({ showWidget: showWidget.checked });\n      });\n      var debugLogsCheckbox = document.getElementById(\"debugLogs\");\n      chrome.storage.local.get([\"aiCmDebugLogs\"], function(data) {\n        if (debugLogsCheckbox) debugLogsCheckbox.checked = data.aiCmDebugLogs === true;\n      });\n      debugLogsCheckbox && debugLogsCheckbox.addEventListener(\"change\", function() {\n        chrome.storage.local.set({ aiCmDebugLogs: debugLogsCheckbox.checked });\n      });\n      var includeHiddenCheckbox = document.getElementById(\"aiCmIncludeHiddenInExport\");\n      chrome.storage.local.get([\"aiCmIncludeHiddenInExport\"], function(data) {\n        if (includeHiddenCheckbox) includeHiddenCheckbox.checked = !!(data && data.aiCmIncludeHiddenInExport === true);\n      });\n      includeHiddenCheckbox && includeHiddenCheckbox.addEventListener(\"change\", function() {\n        chrome.storage.local.set({ aiCmIncludeHiddenInExport: includeHiddenCheckbox.checked });\n      });\n      try {\n        chrome.storage.onChanged.addListener(function(changes, areaName) {\n          if (areaName !== \"local\") return;\n          if (changes.aiCmIncludeHiddenInExport && includeHiddenCheckbox) {\n            includeHiddenCheckbox.checked = changes.aiCmIncludeHiddenInExport.newValue === true;\n          }\n        });\n      } catch (eHiddenSync) {\n        aiCmPopupDiagLine(\"hidden-sync\", { err: String(eHiddenSync) });\n      }\n      var proactiveCheckbox = document.getElementById(\"aiCmProactive\");\n      var proactiveNotifyCheckbox = document.getElementById(\"aiCmProactiveNotify\");\n      chrome.storage.local.get([\"aiCmProactive\", \"aiCmProactiveNotify\"], function(data) {\n        if (proactiveCheckbox) proactiveCheckbox.checked = !(data && data.aiCmProactive === false);\n        if (proactiveNotifyCheckbox) proactiveNotifyCheckbox.checked = !!(data && data.aiCmProactiveNotify === true);\n      });\n      proactiveCheckbox && proactiveCheckbox.addEventListener(\"change\", function() {\n        chrome.storage.local.set({ aiCmProactive: proactiveCheckbox.checked });\n      });\n      proactiveNotifyCheckbox && proactiveNotifyCheckbox.addEventListener(\"change\", function() {\n        chrome.storage.local.set({ aiCmProactiveNotify: proactiveNotifyCheckbox.checked });\n      });\n      try {\n        chrome.storage.onChanged.addListener(function(changes, areaName) {\n          if (areaName !== \"local\") return;\n          if (changes.aiCmProactive && proactiveCheckbox) {\n            proactiveCheckbox.checked = changes.aiCmProactive.newValue !== false;\n          }\n          if (changes.aiCmProactiveNotify && proactiveNotifyCheckbox) {\n            proactiveNotifyCheckbox.checked = changes.aiCmProactiveNotify.newValue === true;\n          }\n        });\n      } catch (e) {\n        aiCmPopupDiagLine(\"proactive-changed\", { err: String(e) });\n      }\n      var thrLowInput = document.getElementById(\"aiCmProactiveLow\");\n      var thrMedInput = document.getElementById(\"aiCmProactiveMedium\");\n      var thrHighInput = document.getElementById(\"aiCmProactiveHigh\");\n      var PROACTIVE_THRESHOLDS_DEFAULT = [70, 85, 95];\n      function validProactiveThresholds(arr) {\n        try {\n          if (!Array.isArray(arr) || arr.length < 3) return null;\n          var out = [];\n          for (var i = 0; i < 3; i++) {\n            var n = parseInt(arr[i], 10);\n            if (isNaN(n) || n < 1 || n > 100) return null;\n            out.push(n);\n          }\n          if (!(out[0] < out[1] && out[1] < out[2])) return null;\n          return out;\n        } catch (e) {\n          return null;\n        }\n      }\n      function readProactiveThresholdInputs() {\n        return [\n          thrLowInput ? thrLowInput.value : void 0,\n          thrMedInput ? thrMedInput.value : void 0,\n          thrHighInput ? thrHighInput.value : void 0\n        ];\n      }\n      function fillProactiveThresholdInputs(arr) {\n        if (!arr || arr.length < 3) return;\n        if (thrLowInput) thrLowInput.value = arr[0];\n        if (thrMedInput) thrMedInput.value = arr[1];\n        if (thrHighInput) thrHighInput.value = arr[2];\n      }\n      function applyProactiveThresholdInputs() {\n        try {\n          var raw = readProactiveThresholdInputs();\n          var t = validProactiveThresholds(raw);\n          if (!t) {\n            console.warn(\"[AI CM][thresholds] \\u0431\\u0438\\u0442\\u044B\\u0439 \\u0432\\u0432\\u043E\\u0434 \\u043F\\u043E\\u0440\\u043E\\u0433\\u043E\\u0432 \\u2192 \\u0444\\u043E\\u043B\\u0431\\u044D\\u043A [70,85,95]\", raw);\n            t = PROACTIVE_THRESHOLDS_DEFAULT;\n          }\n          fillProactiveThresholdInputs(t);\n          chrome.storage.local.set({ aiCmProactiveThresholds: t });\n        } catch (eP) {\n          aiCmPopupDiagLine(\"applyProactiveThresholdInputs\", { err: String(eP) });\n        }\n      }\n      try {\n        chrome.storage.local.get([\"aiCmProactiveThresholds\"], function(data) {\n          try {\n            var hasStored = data && data.aiCmProactiveThresholds !== void 0;\n            var t = validProactiveThresholds(hasStored ? data.aiCmProactiveThresholds : null);\n            if (hasStored && !t) {\n              console.warn(\"[AI CM][thresholds] \\u0431\\u0438\\u0442\\u044B\\u0435 \\u0441\\u043E\\u0445\\u0440\\u0430\\u043D\\u0451\\u043D\\u043D\\u044B\\u0435 aiCmProactiveThresholds \\u2192 \\u0434\\u0435\\u0444\\u043E\\u043B\\u0442 [70,85,95]\", data.aiCmProactiveThresholds);\n            }\n            fillProactiveThresholdInputs(t || PROACTIVE_THRESHOLDS_DEFAULT);\n          } catch (eInit) {\n            aiCmPopupDiagLine(\"thresholds-init\", { err: String(eInit) });\n          }\n        });\n      } catch (eLoad) {\n        aiCmPopupDiagLine(\"thresholds-load\", { err: String(eLoad) });\n      }\n      [thrLowInput, thrMedInput, thrHighInput].forEach(function(el) {\n        if (!el) return;\n        el.addEventListener(\"change\", applyProactiveThresholdInputs);\n        el.addEventListener(\"blur\", applyProactiveThresholdInputs);\n      });\n      try {\n        chrome.storage.onChanged.addListener(function(changes, areaName) {\n          if (areaName === \"local\" && changes.aiCmProactiveThresholds) {\n            var t2 = validProactiveThresholds(changes.aiCmProactiveThresholds.newValue);\n            if (!t2) return;\n            if (document.activeElement === thrLowInput || document.activeElement === thrMedInput || document.activeElement === thrHighInput) return;\n            fillProactiveThresholdInputs(t2);\n          }\n        });\n      } catch (e) {\n        aiCmPopupDiagLine(\"thresholds-changed\", { err: String(e) });\n      }\n      apiKeyInput && apiKeyInput.addEventListener(\"input\", function() {\n        aiCmSaveByokKey(apiKeyInput.value);\n        aiCmRenderApiKeyStatus(!!apiKeyInput.value);\n        aiCmSyncExactCountWithByok(!!apiKeyInput.value);\n      });\n      removeApiKeyBtn && removeApiKeyBtn.addEventListener(\"click\", function() {\n        try {\n          if (chrome.storage && chrome.storage.session && typeof chrome.storage.session.remove === \"function\") {\n            chrome.storage.session.remove([AI_CM_BYOK_SESSION_KEY]);\n          }\n        } catch (eRm) {\n          console.warn(\"[AI CM][catch] removeApiKey:\", eRm);\n        }\n        aiCmPurgeLegacyByokKeys();\n        if (apiKeyInput) apiKeyInput.value = \"\";\n        aiCmRenderApiKeyStatus(false);\n        aiCmSyncExactCountWithByok(false);\n      });\n      toggleApiKeyBtn && toggleApiKeyBtn.addEventListener(\"click\", function() {\n        if (apiKeyInput.type === \"password\") {\n          apiKeyInput.type = \"text\";\n          toggleApiKeyBtn.textContent = \"\\u{1F648}\";\n        } else {\n          apiKeyInput.type = \"password\";\n          toggleApiKeyBtn.textContent = \"\\u{1F441}\";\n        }\n        toggleApiKeyBtn.setAttribute(\"aria-pressed\", String(apiKeyInput.type === \"text\"));\n      });\n      exactCountCheckbox && exactCountCheckbox.addEventListener(\"change\", function() {\n        chrome.storage.local.set({ ai_cm_exact_token_count: exactCountCheckbox.checked });\n        if (aiCmByokHasKeyState === false && exactCountCheckbox.checked) {\n          aiCmSyncExactCountWithByok(false);\n        } else {\n          aiCmRenderExactCountWarning(false);\n        }\n      });\n      var autoExportCheckbox = document.getElementById(\"aiCmAutoExport\");\n      var autoExportPctInput = document.getElementById(\"aiCmAutoExportPct\");\n      var autoExportFmtSelect = document.getElementById(\"aiCmAutoExportFmt\");\n      function normalizeAutoExportFmt(v) {\n        return v === \"md\" || v === \"json\" ? v : \"txt\";\n      }\n      function clampAutoExportPct(v) {\n        var n = parseInt(v, 10);\n        if (isNaN(n)) return null;\n        if (n < 1) n = 1;\n        if (n > 100) n = 100;\n        return n;\n      }\n      var AI_CM_AUTO_EXPORT_PCT_DEFAULT = 90;\n      function aiCmAutoExportWriteFull() {\n        try {\n          var pctFull = clampAutoExportPct(autoExportPctInput.value);\n          pctFull = pctFull === null ? AI_CM_AUTO_EXPORT_PCT_DEFAULT : pctFull;\n          autoExportPctInput.value = pctFull;\n          chrome.storage.local.set({\n            aiCmAutoExport: autoExportCheckbox.checked === true,\n            aiCmAutoExportPct: pctFull,\n            aiCmAutoExportFmt: normalizeAutoExportFmt(autoExportFmtSelect.value)\n          });\n        } catch (eFull) {\n          aiCmPopupDiagLine(\"aiCmAutoExportWriteFull\", { err: String(eFull) });\n        }\n      }\n      try {\n        chrome.storage.local.get([\"aiCmAutoExport\", \"aiCmAutoExportPct\", \"aiCmAutoExportFmt\"], function(data) {\n          try {\n            data = data || {};\n            if (autoExportCheckbox) autoExportCheckbox.checked = data.aiCmAutoExport === true;\n            var pctInit = clampAutoExportPct(data.aiCmAutoExportPct);\n            if (autoExportPctInput) autoExportPctInput.value = pctInit === null ? AI_CM_AUTO_EXPORT_PCT_DEFAULT : pctInit;\n            if (autoExportFmtSelect) autoExportFmtSelect.value = normalizeAutoExportFmt(data.aiCmAutoExportFmt);\n            var needsNormalize = typeof data.aiCmAutoExport !== \"boolean\" || pctInit === null || normalizeAutoExportFmt(data.aiCmAutoExportFmt) !== data.aiCmAutoExportFmt;\n            if (needsNormalize) aiCmAutoExportWriteFull();\n          } catch (eInit) {\n            aiCmPopupDiagLine(\"autoexport-init\", { err: String(eInit) });\n          }\n        });\n      } catch (eLoad) {\n        aiCmPopupDiagLine(\"autoexport-load\", { err: String(eLoad) });\n      }\n      autoExportCheckbox && autoExportCheckbox.addEventListener(\"change\", aiCmAutoExportWriteFull);\n      autoExportPctInput && autoExportPctInput.addEventListener(\"change\", aiCmAutoExportWriteFull);\n      autoExportPctInput && autoExportPctInput.addEventListener(\"blur\", aiCmAutoExportWriteFull);\n      autoExportFmtSelect && autoExportFmtSelect.addEventListener(\"change\", aiCmAutoExportWriteFull);\n      try {\n        chrome.storage.onChanged.addListener(function(changes, areaName) {\n          if (areaName === \"local\" && changes.aiCmDebugLogs) {\n            debugLogsCheckbox.checked = changes.aiCmDebugLogs.newValue === true;\n          }\n          if (areaName === \"local\" && changes.aiCmAutoExportPct && autoExportPctInput && document.activeElement !== autoExportPctInput) {\n            var pct = clampAutoExportPct(changes.aiCmAutoExportPct.newValue);\n            autoExportPctInput.value = pct === null ? 90 : pct;\n          }\n        });\n      } catch (e) {\n        aiCmPopupDiagLine(\"autoexport-changed\", { err: String(e) });\n      }\n      document.getElementById(\"reset-limit\") && document.getElementById(\"reset-limit\").addEventListener(\"click\", function() {\n        aiCmCancelCustomLimitWrite();\n        customLimit.value = \"\";\n        customLimit.placeholder = aiCmI18nMessage(\"options_limit_placeholder\", \"\\u0410\\u0432\\u0442\\u043E\");\n        chrome.storage.sync.set({ customLimit: null });\n      });\n      var chatDialogPathBySite = {\n        \"chatgpt\": /\\/(c|g|share)\\//,\n        \"gemini\": /\\/app\\//,\n        \"claude\": /\\/chat\\//,\n        \"perplexity\": /\\/(search|follow)\\//,\n        \"deepseek\": /\\/a\\//\n      };\n      function detectChatSite(hostname) {\n        if (!hostname) return null;\n        var host = String(hostname).toLowerCase();\n        if (host.indexOf(\"chatgpt.com\") !== -1) return \"chatgpt\";\n        if (host.indexOf(\"gemini.google.com\") !== -1) return \"gemini\";\n        if (host.indexOf(\"claude.ai\") !== -1) return \"claude\";\n        if (host.indexOf(\"perplexity.ai\") !== -1) return \"perplexity\";\n        if (host.indexOf(\"chat.deepseek.com\") !== -1) return \"deepseek\";\n        return null;\n      }\n      function isChatHome(hostname, pathname) {\n        var site = detectChatSite(hostname);\n        if (!site) return false;\n        return chatDialogPathBySite[site].test(String(pathname || \"\"));\n      }\n      function updateStatsFromState(state, tabHost, tabPath, fromCache) {\n        siteEl.textContent = siteLabels[state.site] || state.site || \"\\u2014\";\n        modelEl.textContent = state.model || \"\\u2014\";\n        tokensEl.textContent = typeof state.tokens === \"number\" ? state.tokens.toLocaleString() : \"\\u2014\";\n        limitEl.textContent = typeof state.limit === \"number\" ? state.limit.toLocaleString() : \"\\u2014\";\n        var p = state.percent || 0;\n        percentEl.textContent = p + \"%\";\n        percentEl.style.color = percentColor(p);\n        if (sourceEl) {\n          sourceEl.textContent = fromCache ? aiCmI18nMessage(\"options_source_cache\", \"\\u043A\\u044D\\u0448 (\\u043F\\u0440\\u043E\\u0448\\u043B\\u0430\\u044F \\u0431\\u0435\\u0441\\u0435\\u0434\\u0430)\") : state.sourceLabel || \"\\u2014\";\n        }\n        updateStaleWarning(state, tabHost, tabPath);\n      }\n      function updateStaleWarning(state, tabHost, tabPath) {\n        if (!staleWarningEl) return;\n        var showStale = !!(state && state.stale === true && isChatHome(tabHost, tabPath));\n        if (showStale) {\n          var siteLabel = siteLabels[state.site] || state.site || aiCmI18nMessage(\"options_stale_site_fallback\", \"\\u0441\\u0430\\u0439\\u0442\\u043E\\u043C\");\n          staleWarningEl.textContent = aiCmI18nMessage(\"options_stale_warning\", \"\\u0418\\u043D\\u0442\\u0435\\u0433\\u0440\\u0430\\u0446\\u0438\\u044F \\u0441 \" + siteLabel + \" \\u043C\\u043E\\u0433\\u043B\\u0430 \\u0443\\u0441\\u0442\\u0430\\u0440\\u0435\\u0442\\u044C: \\u0441\\u0430\\u0439\\u0442 \\u043D\\u0435 \\u043E\\u0442\\u0434\\u0430\\u0451\\u0442 \\u0434\\u0430\\u043D\\u043D\\u044B\\u0435 \\u0434\\u0438\\u0430\\u043B\\u043E\\u0433\\u0430. \\u041F\\u0440\\u043E\\u0432\\u0435\\u0440\\u044C\\u0442\\u0435 \\u043E\\u0431\\u043D\\u043E\\u0432\\u043B\\u0435\\u043D\\u0438\\u0435 \\u0440\\u0430\\u0441\\u0448\\u0438\\u0440\\u0435\\u043D\\u0438\\u044F.\", [siteLabel]);\n          staleWarningEl.style.display = \"block\";\n        } else {\n          staleWarningEl.style.display = \"none\";\n          staleWarningEl.textContent = \"\";\n        }\n      }\n      function aiCmPopupDiagLine(tag, fields) {\n        try {\n          if (typeof aiCmDiagLine === \"function\") return aiCmDiagLine(tag, fields);\n          var on = false;\n          try {\n            on = !!(typeof sessionStorage !== \"undefined\" && sessionStorage && sessionStorage.getItem(\"aiCmDebug\") === \"1\");\n          } catch (eSess) {\n            on = false;\n          }\n          if (!on) {\n            try {\n              on = window.__aiCmDebugLogs === true;\n            } catch (eWin) {\n              return false;\n            }\n          }\n          if (!on) return false;\n          var parts = [];\n          var f = fields || {};\n          for (var k in f) {\n            if (!Object.prototype.hasOwnProperty.call(f, k)) continue;\n            var v = f[k];\n            parts.push(k + \"=\" + (v === void 0 || v === null ? \"-\" : String(v)));\n          }\n          console.log(\"[AI CM][diag] \" + tag + \" \" + parts.join(\" \"));\n          return true;\n        } catch (eDiag) {\n          return false;\n        }\n      }\n      function showNoData(message) {\n        try {\n          aiCmPopupDiagLine(\"qwen-badge\", {\n            ts: Date.now(),\n            event: \"showNoData\",\n            reason: String(message || \"-\"),\n            url: String(typeof location !== \"undefined\" && location && location.href || \"\")\n          });\n        } catch (eQnd) {\n          aiCmPopupDiagLine(\"showNoData\", { err: String(eQnd) });\n        }\n        siteEl.textContent = message || aiCmI18nMessage(\"options_no_data\", \"\\u041D\\u0435\\u0442 \\u0434\\u0430\\u043D\\u043D\\u044B\\u0445\");\n        modelEl.textContent = \"\\u2014\";\n        tokensEl.textContent = \"\\u2014\";\n        limitEl.textContent = \"\\u2014\";\n        percentEl.textContent = \"\\u2014\";\n        percentEl.style.color = \"#8888aa\";\n      }\n      function formatTime(ts) {\n        try {\n          var d = new Date(ts);\n          return (\"0\" + d.getHours()).slice(-2) + \":\" + (\"0\" + d.getMinutes()).slice(-2);\n        } catch (e) {\n          return \"??:??\";\n        }\n      }\n      var cachedState = null;\n      function loadStats() {\n        try {\n          chrome.tabs.query({ active: true, currentWindow: true }, function(tabs) {\n            var tab = tabs && tabs[0];\n            if (!tab || !tab.url) {\n              showNoData(aiCmI18nMessage(\"options_no_active_tab\", \"\\u041D\\u0435\\u0442 \\u0430\\u043A\\u0442\\u0438\\u0432\\u043D\\u043E\\u0439 \\u0432\\u043A\\u043B\\u0430\\u0434\\u043A\\u0438\"));\n              return;\n            }\n            if (tab.url.indexOf(\"chrome://\") === 0 || tab.url.indexOf(\"chrome-extension://\") === 0) {\n              showNoData(aiCmI18nMessage(\"options_open_supported_site\", \"\\u041E\\u0442\\u043A\\u0440\\u043E\\u0439\\u0442\\u0435 \\u043F\\u043E\\u0434\\u0434\\u0435\\u0440\\u0436\\u0438\\u0432\\u0430\\u0435\\u043C\\u044B\\u0439 \\u0441\\u0430\\u0439\\u0442\"));\n              return;\n            }\n            var tabHost = \"\";\n            var tabPath = \"\";\n            try {\n              var activeTabUrl = new URL(tab.url);\n              tabHost = activeTabUrl.hostname;\n              tabPath = activeTabUrl.pathname;\n            } catch (e) {\n              aiCmPopupDiagLine(\"loadStats-tab-url\", { err: String(e) });\n            }\n            chrome.storage.local.get([\"aiCmState\", \"aiCmState:\" + tabHost], function(data) {\n              var state = data[\"aiCmState:\" + tabHost] || null;\n              if (!state && data.aiCmState && data.aiCmState.host === tabHost) {\n                state = data.aiCmState;\n              }\n              if (state) {\n                cachedState = state;\n                updateStatsFromState(state, tabHost, tabPath);\n                updateExportButtons();\n              } else if (cachedState && cachedState.host === tabHost) {\n                updateStatsFromState(cachedState, tabHost, tabPath, true);\n                var cachedAt = formatTime(cachedState.updatedAt);\n                siteEl.textContent += aiCmI18nMessage(\"options_data_from\", \" \\xB7 \\u0434\\u0430\\u043D\\u043D\\u044B\\u0435 \\u043E\\u0442 \" + cachedAt, [cachedAt]);\n              } else {\n                showNoData(aiCmI18nMessage(\"options_open_supported_site\", \"\\u041E\\u0442\\u043A\\u0440\\u043E\\u0439\\u0442\\u0435 \\u043F\\u043E\\u0434\\u0434\\u0435\\u0440\\u0436\\u0438\\u0432\\u0430\\u0435\\u043C\\u044B\\u0439 \\u0441\\u0430\\u0439\\u0442\"));\n              }\n            });\n          });\n        } catch (e) {\n          showNoData(aiCmI18nMessage(\"options_reload_page\", \"\\u041E\\u0431\\u043D\\u043E\\u0432\\u0438\\u0442\\u0435 \\u0441\\u0442\\u0440\\u0430\\u043D\\u0438\\u0446\\u0443\"));\n        }\n      }\n      try {\n        chrome.storage.onChanged.addListener(function(changes, areaName) {\n          if (areaName !== \"local\") return;\n          var candidates = [];\n          if (changes.aiCmState && changes.aiCmState.newValue) candidates.push(changes.aiCmState.newValue);\n          for (var key in changes) {\n            if (key.indexOf(\"aiCmState:\") === 0 && changes[key] && changes[key].newValue) {\n              candidates.push(changes[key].newValue);\n            }\n          }\n          if (!candidates.length) {\n            var removedForTab = false;\n            chrome.tabs.query({ active: true, currentWindow: true }, function(tabs) {\n              var tab = tabs && tabs[0];\n              var tabHost = \"\";\n              try {\n                if (tab && tab.url) tabHost = new URL(tab.url).hostname;\n              } catch (e) {\n                aiCmPopupDiagLine(\"stats-changed-removed\", { err: String(e) });\n              }\n              removedForTab = !tabHost && (!!changes.aiCmState || !!changes[\"aiCmState:\" + tabHost]) || !!tabHost && (!!changes[\"aiCmState:\" + tabHost] || !!changes.aiCmState && !!(changes.aiCmState.oldValue && changes.aiCmState.oldValue.host === tabHost));\n              if (!removedForTab) return;\n              cachedState = null;\n              showNoData(aiCmI18nMessage(\"options_open_supported_site\", \"\\u041E\\u0442\\u043A\\u0440\\u043E\\u0439\\u0442\\u0435 \\u043F\\u043E\\u0434\\u0434\\u0435\\u0440\\u0436\\u0438\\u0432\\u0430\\u0435\\u043C\\u044B\\u0439 \\u0441\\u0430\\u0439\\u0442\"));\n              updateStaleWarning(null, tabHost, \"\");\n              updateExportButtons();\n            });\n            return;\n          }\n          chrome.tabs.query({ active: true, currentWindow: true }, function(tabs) {\n            var tab = tabs && tabs[0];\n            var tabHost = \"\";\n            var tabPath = \"\";\n            try {\n              if (tab && tab.url) {\n                var activeTabUrl = new URL(tab.url);\n                tabHost = activeTabUrl.hostname;\n                tabPath = activeTabUrl.pathname;\n              }\n            } catch (e) {\n              aiCmPopupDiagLine(\"stats-changed-live\", { err: String(e) });\n            }\n            var best = null;\n            for (var i = 0; i < candidates.length; i++) {\n              var s = candidates[i];\n              if (s.host === tabHost && (!best || (s.updatedAt || 0) > (best.updatedAt || 0))) best = s;\n            }\n            if (best) {\n              cachedState = best;\n              updateStatsFromState(best, tabHost, tabPath);\n              updateExportButtons();\n            }\n          });\n        });\n      } catch (e) {\n        aiCmPopupDiagLine(\"stats-changed\", { err: String(e) });\n      }\n      var cachedHistory = null;\n      var currentTabHost = \"\";\n      function getActiveTabHost(cb) {\n        try {\n          chrome.tabs.query({ active: true, currentWindow: true }, function(tabs) {\n            var tab = tabs && tabs[0];\n            var host = \"\";\n            if (tab && tab.url) {\n              try {\n                host = new URL(tab.url).hostname;\n              } catch (e) {\n                host = \"\";\n              }\n            }\n            currentTabHost = host;\n            cb(host);\n          });\n        } catch (e) {\n          cb(\"\");\n        }\n      }\n      function updateExportButtons() {\n        if (!exportMdBtn || !exportJsonBtn || !exportPdfBtn) return;\n        var enabled = !!(cachedHistory && cachedHistory.host === currentTabHost);\n        var netMsgs = cachedState && cachedState.host === currentTabHost && typeof cachedState.netBaseMsgs === \"number\" ? cachedState.netBaseMsgs : 0;\n        if (!enabled && netMsgs > 0) enabled = true;\n        exportMdBtn.disabled = !enabled;\n        exportJsonBtn.disabled = !enabled;\n        exportPdfBtn.disabled = !enabled;\n        if (exportTxtBtn) exportTxtBtn.disabled = !enabled;\n        if (exportHintEl) {\n          if (enabled) {\n            var hintAt = cachedHistory && cachedHistory.host === currentTabHost ? cachedHistory.updatedAt : cachedState ? cachedState.updatedAt : 0;\n            var exportAt = formatTime(hintAt);\n            exportHintEl.textContent = aiCmI18nMessage(\"options_ready_to_export\", \"\\u0413\\u043E\\u0442\\u043E\\u0432\\u043E \\u043A \\u044D\\u043A\\u0441\\u043F\\u043E\\u0440\\u0442\\u0443 \\xB7 \\u0434\\u0430\\u043D\\u043D\\u044B\\u0435 \\u043E\\u0442 \" + exportAt, [exportAt]);\n          } else {\n            exportHintEl.textContent = aiCmI18nMessage(\"options_open_supported_site\", \"\\u041E\\u0442\\u043A\\u0440\\u043E\\u0439\\u0442\\u0435 \\u043F\\u043E\\u0434\\u0434\\u0435\\u0440\\u0436\\u0438\\u0432\\u0430\\u0435\\u043C\\u044B\\u0439 \\u0441\\u0430\\u0439\\u0442\");\n          }\n        }\n      }\n      function buildTxtText(hist) {\n        return window.AiCmExportBuilders ? window.AiCmExportBuilders.buildTxtFromHistory(hist || cachedHistory) : \"\";\n      }\n      function refreshExportState() {\n        getActiveTabHost(function(host) {\n          chrome.storage.local.get([\"aiCmHistory\", \"aiCmHistory:\" + host], function(data) {\n            var hist = data[\"aiCmHistory:\" + host] || null;\n            if (!hist && data.aiCmHistory && data.aiCmHistory.host === host) {\n              hist = data.aiCmHistory;\n            }\n            cachedHistory = hist;\n            updateExportButtons();\n          });\n        });\n      }\n      function pad2(n) {\n        return (n < 10 ? \"0\" : \"\") + n;\n      }\n      function buildFileName(ext, hist) {\n        hist = hist || cachedHistory;\n        var d = /* @__PURE__ */ new Date();\n        var stamp = d.getFullYear() + \"-\" + pad2(d.getMonth() + 1) + \"-\" + pad2(d.getDate()) + \"-\" + pad2(d.getHours()) + \"-\" + pad2(d.getMinutes());\n        var site = hist && hist.site || \"chat\";\n        var model = hist && hist.model || \"model\";\n        var safeSite = String(site).replace(/[^a-zA-Z0-9_-]+/g, \"-\").replace(/^-+|-+$/g, \"\") || \"chat\";\n        var safeModel = String(model).replace(/[^a-zA-Z0-9_.-]+/g, \"-\").replace(/^-+|-+$/g, \"\") || \"model\";\n        var lowConfPrefix = hist && hist.isLowConfidenceBase === true ? \"[LOW CONFIDENCE]_\" : \"\";\n        return lowConfPrefix + \"ai-context-monitor-\" + safeSite + \"-\" + safeModel + \"-\" + stamp + \".\" + ext;\n      }\n      function downloadBlob(content, fileName, mimeType, trigger) {\n        if (window.AiCmExportBuilders && window.AiCmExportBuilders.downloadBlob) {\n          window.AiCmExportBuilders.downloadBlob(content, fileName, mimeType, trigger || \"options\");\n        }\n      }\n      function getPlatform(hist) {\n        hist = hist || cachedHistory;\n        var site = hist && hist.site;\n        return siteLabels[site] || site || \"AI Chat\";\n      }\n      function buildJsonText(hist) {\n        hist = hist || cachedHistory;\n        var exportedAt = (/* @__PURE__ */ new Date()).toISOString();\n        return JSON.stringify({\n          platform: getPlatform(hist),\n          model: hist && hist.model || \"\",\n          exportedAt,\n          tokens: hist && typeof hist.tokens === \"number\" ? hist.tokens : 0,\n          limit: hist && typeof hist.limit === \"number\" ? hist.limit : 0,\n          percent: hist && typeof hist.percent === \"number\" ? hist.percent : 0,\n          messages: hist && Array.isArray(hist.messages) ? hist.messages : []\n        }, null, 2);\n      }\n      function buildMdText(hist) {\n        return window.AiCmExportBuilders ? window.AiCmExportBuilders.buildMdFromHistory(hist || cachedHistory, getPlatform(hist)) : \"\";\n      }\n      function getCurrentConvSnapshot(cb) {\n        try {\n          chrome.tabs.query({ active: true, currentWindow: true }, function(tabs) {\n            var tab = tabs && tabs[0];\n            if (!tab || !tab.id) {\n              cb(null);\n              return;\n            }\n            try {\n              chrome.tabs.sendMessage(tab.id, { type: \"aiCmExportCurrent\" }, function(resp) {\n                if (chrome.runtime.lastError || !resp || !resp.data) {\n                  cb(null);\n                  return;\n                }\n                cb(resp.data);\n              });\n            } catch (eS) {\n              cb(null);\n            }\n          });\n        } catch (eQ) {\n          cb(null);\n        }\n      }\n      function pickExportHistory(snap) {\n        if (snap && (snap.convId || Array.isArray(snap.messages) && snap.messages.length > 0)) return snap;\n        return cachedHistory;\n      }\n      exportMdBtn && exportMdBtn.addEventListener(\"click\", function() {\n        if (exportMdBtn.disabled) return;\n        getCurrentConvSnapshot(function(snap) {\n          var hist = pickExportHistory(snap);\n          if (!hist) return;\n          downloadBlob(buildMdText(hist), buildFileName(\"md\", hist), \"text/markdown\", \"options-md\");\n        });\n      });\n      exportJsonBtn && exportJsonBtn.addEventListener(\"click\", function() {\n        if (exportJsonBtn.disabled) return;\n        getCurrentConvSnapshot(function(snap) {\n          var hist = pickExportHistory(snap);\n          if (!hist) return;\n          downloadBlob(buildJsonText(hist), buildFileName(\"json\", hist), \"application/json\", \"options-json\");\n        });\n      });\n      exportTxtBtn && exportTxtBtn.addEventListener(\"click\", function() {\n        if (exportTxtBtn.disabled) return;\n        getCurrentConvSnapshot(function(snap) {\n          var hist = pickExportHistory(snap);\n          if (!hist) return;\n          var txt = buildTxtText(hist);\n          if (txt.charAt(0) !== \"\\uFEFF\") txt = \"\\uFEFF\" + txt;\n          downloadBlob(txt, buildFileName(\"txt\", hist), \"text/plain;charset=utf-8\", \"options-txt\");\n        });\n      });\n      exportPdfBtn && exportPdfBtn.addEventListener(\"click\", function() {\n        if (exportPdfBtn.disabled) return;\n        getActiveTab(function(tab) {\n          if (!tab || !tab.id) return;\n          var url = chrome.runtime.getURL(\"print/print.html\") + \"?tab=\" + tab.id;\n          try {\n            chrome.tabs.create({ url });\n          } catch (e) {\n            console.warn(\"[export-pdf] \\u043D\\u0435 \\u0443\\u0434\\u0430\\u043B\\u043E\\u0441\\u044C \\u043E\\u0442\\u043A\\u0440\\u044B\\u0442\\u044C \\u043F\\u0435\\u0447\\u0430\\u0442\\u043D\\u0443\\u044E \\u0444\\u043E\\u0440\\u043C\\u0443:\", e);\n          }\n        });\n      });\n      function getActiveTab(cb) {\n        try {\n          chrome.tabs.query({ active: true, currentWindow: true }, function(tabs) {\n            cb(tabs && tabs[0] ? tabs[0] : null);\n          });\n        } catch (e) {\n          cb(null);\n        }\n      }\n      function buildDiagnosticsFileName() {\n        return \"ai-context-monitor-diagnostics-\" + Date.now() + \".json\";\n      }\n      exportDiagBtn && exportDiagBtn.addEventListener(\"click\", function() {\n        getActiveTab(function(tab) {\n          if (!tab || !tab.id) {\n            downloadBlob(JSON.stringify({ error: \"\\u043D\\u0435\\u0442 \\u0430\\u043A\\u0442\\u0438\\u0432\\u043D\\u043E\\u0439 \\u0432\\u043A\\u043B\\u0430\\u0434\\u043A\\u0438\", at: (/* @__PURE__ */ new Date()).toISOString() }, null, 2), buildDiagnosticsFileName(), \"application/json\", \"options-diag\");\n            return;\n          }\n          try {\n            chrome.tabs.sendMessage(tab.id, { type: \"aiCmDiag\" }, function(response) {\n              var payload;\n              if (chrome.runtime.lastError) {\n                payload = {\n                  error: \"content script \\u043D\\u0435 \\u043E\\u0442\\u0432\\u0435\\u0442\\u0438\\u043B: \" + chrome.runtime.lastError.message,\n                  at: (/* @__PURE__ */ new Date()).toISOString()\n                };\n              } else {\n                payload = response && response.diag ? response.diag : { error: \"\\u043F\\u0443\\u0441\\u0442\\u043E\\u0439 \\u043E\\u0442\\u0432\\u0435\\u0442\", response: response || null };\n              }\n              downloadBlob(JSON.stringify(payload, null, 2), buildDiagnosticsFileName(), \"application/json\", \"options-diag\");\n            });\n          } catch (e) {\n            downloadBlob(JSON.stringify({ error: \"sendMessage error: \" + e.message, at: (/* @__PURE__ */ new Date()).toISOString() }, null, 2), buildDiagnosticsFileName(), \"application/json\", \"options-diag\");\n          }\n        });\n      });\n      try {\n        chrome.storage.onChanged.addListener(function(changes, areaName) {\n          if (areaName !== \"local\") return;\n          var hist = null;\n          if (changes.aiCmHistory && changes.aiCmHistory.newValue) hist = changes.aiCmHistory.newValue;\n          for (var key in changes) {\n            if (key.indexOf(\"aiCmHistory:\") === 0 && changes[key] && changes[key].newValue) {\n              var v = changes[key].newValue;\n              if (!hist || (v.updatedAt || 0) > (hist.updatedAt || 0)) hist = v;\n            }\n          }\n          if (!hist) return;\n          getActiveTabHost(function() {\n            if (hist.host === currentTabHost) cachedHistory = hist;\n            updateExportButtons();\n          });\n        });\n      } catch (e) {\n        aiCmPopupDiagLine(\"history-changed\", { err: String(e) });\n      }\n      var archiveFileInput = document.getElementById(\"archive-file\");\n      var archiveImportBtn = document.getElementById(\"archive-import\");\n      var archiveRefreshBtn = document.getElementById(\"archive-refresh\");\n      var archiveStatusEl = document.getElementById(\"archive-status\");\n      var archiveListEl = document.getElementById(\"archive-list\");\n      var AI_ARCHIVE_MAX_FILES = 20;\n      function aiCmArchiveApi() {\n        try {\n          return typeof window !== \"undefined\" && window.AiCmArchiveImport ? window.AiCmArchiveImport : null;\n        } catch (e) {\n          return null;\n        }\n      }\n      function aiCmSetArchiveStatus(text, isError) {\n        if (!archiveStatusEl) return;\n        archiveStatusEl.textContent = text || \"\";\n        archiveStatusEl.style.color = isError ? \"#ef4444\" : \"\";\n      }\n      function buildArchiveStoragePatch(records, fileName) {\n        const API = aiCmArchiveApi();\n        const patch = {};\n        if (!API || !Array.isArray(records)) return patch;\n        records.forEach(function(rec) {\n          if (!rec || !rec.convId) return;\n          patch[API.archiveStorageKey(rec.convId)] = rec;\n          patch[API.convSourceStorageKey(rec.convId)] = API.buildConvSourceRecord(rec, { fileName });\n        });\n        return patch;\n      }\n      function aiCmImportArchiveFiles(files, onDone) {\n        const API = aiCmArchiveApi();\n        if (!API) {\n          onDone(aiCmI18nMessage(\"options_archive_module_missing\", \"\\u043C\\u043E\\u0434\\u0443\\u043B\\u044C \\u0438\\u043C\\u043F\\u043E\\u0440\\u0442\\u0430 \\u043D\\u0435 \\u0437\\u0430\\u0433\\u0440\\u0443\\u0436\\u0435\\u043D (utils/archive-import.js)\"));\n          return;\n        }\n        const list = Array.prototype.slice.call(files || []).filter(function(f) {\n          return !!f;\n        }).slice(0, AI_ARCHIVE_MAX_FILES);\n        if (!list.length) {\n          onDone(aiCmI18nMessage(\"options_archive_no_files\", \"\\u0444\\u0430\\u0439\\u043B\\u044B \\u043D\\u0435 \\u0432\\u044B\\u0431\\u0440\\u0430\\u043D\\u044B\"));\n          return;\n        }\n        const report = {\n          files: 0,\n          conversations: 0,\n          accepted: 0,\n          bytes: 0,\n          skipped: [],\n          errors: [],\n          patch: {}\n        };\n        let idx = 0;\n        function step() {\n          if (idx >= list.length) {\n            onDone(null, report);\n            return;\n          }\n          const file = list[idx++];\n          report.files++;\n          const maxArchiveSize = Number(API.MAX_ARCHIVE_SIZE) || 0;\n          const fileSize = Number(file && file.size) || 0;\n          if (maxArchiveSize > 0 && fileSize > maxArchiveSize) {\n            const limitMb = String(Math.round(maxArchiveSize / (1024 * 1024)));\n            report.errors.push({\n              fileName: file.name,\n              error: \"file-too-large\",\n              size: fileSize,\n              limit: maxArchiveSize,\n              message: aiCmI18nMessage(\n                \"options_archive_file_too_large\",\n                \"\\u0444\\u0430\\u0439\\u043B \\u0441\\u043B\\u0438\\u0448\\u043A\\u043E\\u043C \\u0431\\u043E\\u043B\\u044C\\u0448\\u043E\\u0439 (\\u0431\\u043E\\u043B\\u044C\\u0448\\u0435 \" + limitMb + \" \\u041C\\u0411) \\u2014 \\u0447\\u0442\\u0435\\u043D\\u0438\\u0435 \\u043E\\u0442\\u043C\\u0435\\u043D\\u0435\\u043D\\u043E\",\n                [limitMb]\n              )\n            });\n            step();\n            return;\n          }\n          let reader;\n          try {\n            reader = new FileReader();\n          } catch (eNew) {\n            report.errors.push({ fileName: file.name, error: \"filereader-unavailable\" });\n            step();\n            return;\n          }\n          reader.onerror = function() {\n            report.errors.push({ fileName: file.name, error: \"read-error\" });\n            step();\n          };\n          reader.onload = function() {\n            try {\n              const parsed = API.parseArchiveText(String(reader.result == null ? \"\" : reader.result));\n              if (!parsed.ok) {\n                report.errors.push({ fileName: file.name, error: parsed.error });\n                step();\n                return;\n              }\n              report.conversations += parsed.conversations.length;\n              const plan = API.planArchiveImport(parsed.conversations, { fileName: file.name });\n              (plan.skipped || []).forEach(function(s) {\n                report.skipped.push({ fileName: file.name, convId: s.convId, reason: s.reason });\n              });\n              report.accepted += plan.accepted.length;\n              report.bytes += plan.bytes || 0;\n              Object.assign(report.patch, buildArchiveStoragePatch(plan.accepted, file.name));\n            } catch (eParse) {\n              report.errors.push({ fileName: file.name, error: \"parse-exception\" });\n            }\n            step();\n          };\n          try {\n            reader.readAsText(file);\n          } catch (eRead) {\n            report.errors.push({ fileName: file.name, error: \"read-exception\" });\n            step();\n          }\n        }\n        step();\n      }\n      function formatArchiveReport(report) {\n        if (!report) return \"\";\n        const parts = [];\n        var nFiles = String(report.files);\n        var nConvs = String(report.conversations);\n        var nAccepted = String(report.accepted);\n        parts.push(aiCmI18nMessage(\"options_archive_report_files\", \"\\u0444\\u0430\\u0439\\u043B\\u043E\\u0432: \" + nFiles, [nFiles]));\n        parts.push(aiCmI18nMessage(\"options_archive_report_conversations\", \"\\u0434\\u0438\\u0430\\u043B\\u043E\\u0433\\u043E\\u0432: \" + nConvs, [nConvs]));\n        parts.push(aiCmI18nMessage(\"options_archive_report_imported\", \"\\u0438\\u043C\\u043F\\u043E\\u0440\\u0442\\u0438\\u0440\\u043E\\u0432\\u0430\\u043D\\u043E: \" + nAccepted, [nAccepted]));\n        if (report.bytes) {\n          var kb = String(Math.round(report.bytes / 1024));\n          parts.push(aiCmI18nMessage(\"options_archive_report_kb\", \"\\u2248\" + kb + \" \\u041A\\u0411\", [kb]));\n        }\n        if (report.skipped && report.skipped.length) {\n          const byReason = {};\n          report.skipped.forEach(function(s) {\n            byReason[s.reason] = (byReason[s.reason] || 0) + 1;\n          });\n          var skippedList = Object.keys(byReason).map(function(r) {\n            return r + \"\\xD7\" + byReason[r];\n          }).join(\", \");\n          parts.push(aiCmI18nMessage(\"options_archive_report_skipped\", \"\\u043F\\u0440\\u043E\\u043F\\u0443\\u0449\\u0435\\u043D\\u043E: \" + skippedList, [skippedList]));\n        }\n        if (report.errors && report.errors.length) {\n          var errorList = report.errors.map(function(e) {\n            return e.fileName + \" (\" + (e.message || e.error) + \")\";\n          }).join(\", \");\n          parts.push(aiCmI18nMessage(\"options_archive_report_errors\", \"\\u043E\\u0448\\u0438\\u0431\\u043A\\u0438: \" + errorList, [errorList]));\n        }\n        return parts.join(\" \\xB7 \");\n      }\n      function aiCmListArchiveSourceKeys(cb) {\n        try {\n          if (chrome.storage.local.getKeys) {\n            chrome.storage.local.getKeys(function(keys) {\n              cb((keys || []).filter(function(k) {\n                return k.indexOf(\"aiCmArchive:\") === 0;\n              }).map(function(k) {\n                return k.slice(\"aiCmArchive:\".length);\n              }));\n            });\n            return;\n          }\n        } catch (eKeys) {\n          aiCmPopupDiagLine(\"aiCmListArchiveSourceKeys\", { err: String(eKeys) });\n        }\n        try {\n          chrome.storage.local.get(null, function(all) {\n            cb(Object.keys(all || {}).filter(function(k) {\n              return k.indexOf(\"aiCmArchive:\") === 0;\n            }).map(function(k) {\n              return k.slice(\"aiCmArchive:\".length);\n            }));\n          });\n        } catch (eAll) {\n          cb([]);\n        }\n      }\n      function aiCmRenderArchiveList() {\n        if (!archiveListEl) return;\n        const API = aiCmArchiveApi();\n        if (!API) {\n          archiveListEl.textContent = \"\";\n          return;\n        }\n        aiCmListArchiveSourceKeys(function(convIds) {\n          if (!convIds.length) {\n            archiveListEl.textContent = aiCmI18nMessage(\"options_archive_empty\", \"\\u0410\\u0440\\u0445\\u0438\\u0432\\u044B \\u043D\\u0435 \\u0438\\u043C\\u043F\\u043E\\u0440\\u0442\\u0438\\u0440\\u043E\\u0432\\u0430\\u043D\\u044B.\");\n            return;\n          }\n          const srcKeys = convIds.map(function(cid) {\n            return API.convSourceStorageKey(cid);\n          });\n          chrome.storage.local.get(srcKeys, function(data) {\n            archiveListEl.textContent = \"\";\n            convIds.forEach(function(cid) {\n              const rec = (data || {})[API.convSourceStorageKey(cid)] || null;\n              const row = document.createElement(\"div\");\n              row.className = \"archive-item\";\n              const info = document.createElement(\"span\");\n              info.className = \"archive-info\";\n              const label = rec ? rec.label || API.describeSource(rec) : aiCmI18nMessage(\"options_archive_fallback\", \"\\u0430\\u0440\\u0445\\u0438\\u0432\");\n              const when = rec && rec.importedAt ? \" \\xB7 \" + formatTime(rec.importedAt) : \"\";\n              const file = rec && rec.fileName ? \" \\xB7 \" + rec.fileName : \"\";\n              info.textContent = cid.slice(0, 8) + aiCmI18nMessage(\"options_info_separator\", \"\\xA0\\u2014\\xA0\") + label + when + file;\n              row.appendChild(info);\n              const del = document.createElement(\"button\");\n              del.className = \"btn-reset archive-del\";\n              del.type = \"button\";\n              del.textContent = aiCmI18nMessage(\"options_archive_delete\", \"\\u0423\\u0434\\u0430\\u043B\\u0438\\u0442\\u044C\");\n              del.setAttribute(\"data-conv-id\", cid);\n              del.addEventListener(\"click\", function() {\n                aiCmDeleteArchive(cid);\n              });\n              row.appendChild(del);\n              archiveListEl.appendChild(row);\n            });\n          });\n        });\n      }\n      function aiCmDeleteArchive(convId) {\n        const API = aiCmArchiveApi();\n        if (!API || !convId) return;\n        try {\n          chrome.storage.local.remove([API.archiveStorageKey(convId), API.convSourceStorageKey(convId)], function() {\n            var shortId = String(convId).slice(0, 8);\n            aiCmSetArchiveStatus(aiCmI18nMessage(\"options_archive_deleted\", \"\\u0430\\u0440\\u0445\\u0438\\u0432 \" + shortId + \" \\u0443\\u0434\\u0430\\u043B\\u0451\\u043D\", [shortId]));\n            aiCmRenderArchiveList();\n          });\n        } catch (eDel) {\n          var delErr = String(eDel && eDel.message || eDel);\n          aiCmSetArchiveStatus(aiCmI18nMessage(\"options_archive_delete_error\", \"\\u043D\\u0435 \\u0443\\u0434\\u0430\\u043B\\u043E\\u0441\\u044C \\u0443\\u0434\\u0430\\u043B\\u0438\\u0442\\u044C \\u0430\\u0440\\u0445\\u0438\\u0432: \" + delErr, [delErr]), true);\n        }\n      }\n      function aiCmApplyArchiveImport() {\n        const files = archiveFileInput && archiveFileInput.files;\n        aiCmSetArchiveStatus(aiCmI18nMessage(\"options_archive_reading\", \"\\u0447\\u0442\\u0435\\u043D\\u0438\\u0435 \\u0444\\u0430\\u0439\\u043B\\u043E\\u0432\\u2026\"));\n        aiCmImportArchiveFiles(files, function(err, report) {\n          if (err) {\n            aiCmSetArchiveStatus(err, true);\n            return;\n          }\n          const keys = Object.keys(report.patch);\n          if (!keys.length) {\n            var nothingReport = formatArchiveReport(report);\n            aiCmSetArchiveStatus(aiCmI18nMessage(\"options_archive_nothing\", \"\\u043D\\u0438\\u0447\\u0435\\u0433\\u043E \\u043D\\u0435 \\u0438\\u043C\\u043F\\u043E\\u0440\\u0442\\u0438\\u0440\\u043E\\u0432\\u0430\\u043D\\u043E \\xB7 \" + nothingReport, [nothingReport]), true);\n            aiCmRenderArchiveList();\n            return;\n          }\n          try {\n            chrome.storage.local.set(report.patch, function() {\n              var doneReport = formatArchiveReport(report);\n              aiCmSetArchiveStatus(aiCmI18nMessage(\"options_archive_done\", \"\\u0433\\u043E\\u0442\\u043E\\u0432\\u043E \\xB7 \" + doneReport, [doneReport]));\n              aiCmRenderArchiveList();\n            });\n          } catch (eSet) {\n            var setErr = String(eSet && eSet.message || eSet);\n            aiCmSetArchiveStatus(aiCmI18nMessage(\"options_archive_set_error\", \"\\u043E\\u0448\\u0438\\u0431\\u043A\\u0430 \\u0437\\u0430\\u043F\\u0438\\u0441\\u0438 \\u0432 \\u0445\\u0440\\u0430\\u043D\\u0438\\u043B\\u0438\\u0449\\u0435: \" + setErr, [setErr]), true);\n          }\n        });\n      }\n      archiveImportBtn && archiveImportBtn.addEventListener(\"click\", aiCmApplyArchiveImport);\n      archiveRefreshBtn && archiveRefreshBtn.addEventListener(\"click\", function() {\n        aiCmSetArchiveStatus(\"\");\n        aiCmRenderArchiveList();\n      });\n      try {\n        chrome.storage.onChanged.addListener(function(changes, areaName) {\n          if (areaName !== \"local\") return;\n          for (var k in changes) {\n            if (k.indexOf(\"aiCmArchive:\") === 0) {\n              aiCmRenderArchiveList();\n              return;\n            }\n          }\n        });\n      } catch (eArcCh) {\n        aiCmPopupDiagLine(\"archive-changed\", { err: String(eArcCh) });\n      }\n      document.addEventListener(\"DOMContentLoaded\", function() {\n        loadStats();\n        refreshExportState();\n        aiCmRenderArchiveList();\n      });\n      if (typeof module !== \"undefined\" && module.exports) {\n        module.exports = {\n          isChatHome,\n          buildArchiveStoragePatch,\n          aiCmImportArchiveFiles,\n          formatArchiveReport\n        };\n      }\n    }\n  });\n  require_entry_options();\n})();\n//# sourceMappingURL=options.js.map\n\n</script>\n\n</html>";
+  var OPTIONS_HTML = "<!DOCTYPE html>\n<html lang=\"ru\">\n\n<head>\n<script>window.__AI_CM_OPTIONS_FRAME__=true;</script>\n  <meta charset=\"UTF-8\">\n  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n  <title data-i18n=\"options_page_title\">AI Context Monitor</title>\n  <style>\n* {\n  margin: 0;\n  padding: 0;\n  box-sizing: border-box;\n}\n\nbody {\n  /* Minor-B (#19, WCAG 1.4.10): фиксированные 300px убраны — раскладка тянется по окну.\n     Потокобезопасность на 320px: `overflow-wrap: anywhere` обнуляет min-content текста,\n     поэтому длинные RU/EN-подписи переносятся, а не выпирают за вьюпорт. */\n  min-width: 0;\n  max-width: 100%;\n  overflow-wrap: anywhere;\n  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;\n  background: #1a1a2e;\n  color: #e0e0e0;\n}\n\n.popup {\n  /* Minor-B (#19): колонка контента без фиксированной ширины (max-width — не фикс). */\n  padding: 16px;\n  max-width: 720px;\n}\n\n.header {\n  display: flex;\n  align-items: center;\n  gap: 8px;\n  margin-bottom: 16px;\n  padding-bottom: 12px;\n  border-bottom: 1px solid #2a2a4a;\n}\n\n.logo {\n  font-size: 24px;\n}\n\nh1 {\n  font-size: 16px;\n  font-weight: 600;\n  color: #ffffff;\n}\n\n.stats {\n  background: #16213e;\n  border-radius: 10px;\n  padding: 12px;\n  margin-bottom: 16px;\n}\n\n.stat-row {\n  display: flex;\n  justify-content: space-between;\n  padding: 4px 0;\n  font-size: 13px;\n}\n\n.stat-row.highlight {\n  margin-top: 4px;\n  padding-top: 8px;\n  border-top: 1px solid #2a2a4a;\n  font-weight: 600;\n}\n\n.stat-label {\n  color: #8b8bad;\n}\n\n.stat-value {\n  color: #ffffff;\n  font-variant-numeric: tabular-nums;\n}\n\n.section {\n  margin-bottom: 12px;\n}\n\n.label {\n  display: block;\n  font-size: 12px;\n  color: #8b8bad;\n  margin-bottom: 4px;\n}\n\nselect, input {\n  width: 100%;\n  padding: 8px 10px;\n  border-radius: 8px;\n  border: 1px solid #2a2a4a;\n  background: #16213e;\n  color: #ffffff;\n  font-size: 13px;\n}\n\nselect:focus, input:focus {\n  border-color: #7c3aed;\n}\n\n/* v1.20 (M-3): видимый фокус для клавиатуры. Прежняя смена border-color на :focus\n   сохранена выше как дополнение; outline больше не подавляется.\n   Кнопки/ссылки получили обводку впервые — раньше у них не было :focus-стилей вовсе. */\nbutton:focus-visible,\nselect:focus-visible,\ninput:focus-visible,\na:focus-visible,\n[tabindex]:focus-visible {\n  outline: 2px solid #a78bfa;\n  outline-offset: 2px;\n}\n\n/* v1.20 (M-1): смысловые группы (role=\"group\") — обычные .section-контейнеры:\n   ни рамки, ни собственных отступов, поэтому раскладка остаётся прежней. */\n[role=\"group\"].section {\n  border: none;\n  margin: 0 0 12px 0;\n  padding: 0;\n  min-width: 0;\n}\n\n.hint {\n  display: block;\n  font-size: 10px;\n  color: #8b8bad;\n  margin-top: 4px;\n}\n\n.checkbox-row {\n  display: flex;\n  align-items: center;\n  gap: 8px;\n}\n\n/* O-7: тумблер сырого режима экспорта — внутри секции «Экспорт истории»,\n   после ряда кнопок; раскладку прочих секций не трогает. */\n.export-hidden-row {\n  margin-top: 8px;\n}\n\n\n.checkbox-row input[type=\"checkbox\"] {\n  width: auto;\n  accent-color: #7c3aed;\n}\n\n.checkbox-row label {\n  font-size: 13px;\n  cursor: pointer;\n}\n\n.footer {\n  text-align: center;\n  margin-top: 12px;\n  padding-top: 12px;\n  border-top: 1px solid #2a2a4a;\n}\n\n.version {\n  font-size: 11px;\n  color: #8b8bad;\n}\n\n/* v1.18 (P1): ссылка на политику конфиденциальности в футере */\n#privacy-link {\n  display: inline-block;\n  margin-left: 8px;\n  font-size: 11px;\n  color: #a78bfa;\n  text-decoration: none;\n  cursor: pointer;\n}\n\n#privacy-link:hover {\n  color: #c4b5fd;\n  text-decoration: underline;\n}\n\n/* v1.19 (M-6): ссылка на руководство в футере — стиль как у #privacy-link */\n#help-link {\n  display: inline-block;\n  margin-left: 8px;\n  font-size: 11px;\n  color: #a78bfa;\n  text-decoration: none;\n  cursor: pointer;\n}\n\n#help-link:hover {\n  color: #c4b5fd;\n  text-decoration: underline;\n}\n\n.input-row {\n  display: flex;\n  gap: 6px;\n}\n\n/* v1.8: ряд «Порог, %» — фикс ширины поля, чтобы цифра не заходила под стрелки спиннера */\n#auto-export-section .input-row {\n  gap: 8px;\n  align-items: center;\n}\n#aiCmAutoExportPct {\n  /* Minor-B (#19/#21): размер в ch вместо жёстких 64px; гарантия v1.8 («цифра не заходит\n     под стрелки спиннера») сохранена через min-width: 64px + padding-right: 20px. */\n  inline-size: 6ch !important;\n  min-width: 64px;\n  flex: 0 0 auto;\n  box-sizing: border-box;\n  padding-right: 20px;\n  height: 32px;\n}\n#aiCmAutoExportFmt {\n  flex: 1 1 auto;\n  min-width: 0;\n  height: 32px;\n}\n\n.input-row input {\n  flex: 1;\n  /* Minor-B (#19): flex-ребёнок без min-width: 0 не сжимается ниже min-content инпута. */\n  min-width: 0;\n}\n\n.btn-reset {\n  padding: 8px 12px;\n  border-radius: 8px;\n  border: 1px solid #2a2a4a;\n  background: #16213e;\n  color: #8b8bad;\n  font-size: 12px;\n  cursor: pointer;\n  white-space: nowrap;\n}\n\n.btn-reset:hover {\n  background: #2a2a4a;\n  color: #ffffff;\n}\n\n.api-key-row {\n  display: flex;\n  gap: 4px;\n}\n\n.api-key-row input {\n  flex: 1;\n  /* Minor-B (#19): без min-width: 0 поле ключа не сжимается на 320px. */\n  min-width: 0;\n}\n\n.btn-toggle {\n  padding: 8px 10px;\n  border-radius: 8px;\n  border: 1px solid #2a2a4a;\n  background: #16213e;\n  color: #e0e0e0;\n  font-size: 14px;\n  cursor: pointer;\n  white-space: nowrap;\n}\n\n.btn-toggle:hover {\n  background: #2a2a4a;\n}\n\n.export-row {\n  display: flex;\n  gap: 6px;\n}\n\n.btn-export {\n  flex: 1;\n  padding: 8px 10px;\n  border-radius: 8px;\n  border: 1px solid #2a2a4a;\n  background: #16213e;\n  color: #ffffff;\n  font-size: 12px;\n  cursor: pointer;\n  white-space: nowrap;\n}\n\n.btn-export:hover:not(:disabled) {\n  background: #2a2a4a;\n}\n\n.btn-export:disabled {\n  color: #9a9ab0;\n  cursor: not-allowed;\n}\n\n.stale-warning {\n  background: #3a1f2b;\n  border: 1px solid #7c3aed;\n  border-radius: 10px;\n  padding: 10px 12px;\n  margin-bottom: 12px;\n  font-size: 12px;\n  line-height: 1.45;\n  color: #f0b0c0;\n}\n\n/* T1 (v1.16): секция «Архивы» — первый ярус истории */\n.archive-list {\n  margin-top: 8px;\n  display: flex;\n  flex-direction: column;\n  gap: 4px;\n  font-size: 11px;\n  line-height: 1.4;\n  color: #c8c8e0;\n}\n\n.archive-item {\n  display: flex;\n  align-items: center;\n  justify-content: space-between;\n  gap: 6px;\n  padding: 4px 6px;\n  border: 1px solid #2a2a4a;\n  border-radius: 6px;\n}\n\n.archive-info {\n  overflow: hidden;\n  text-overflow: ellipsis;\n  white-space: nowrap;\n}\n\n.archive-del {\n  flex: 0 0 auto;\n  font-size: 11px;\n  padding: 2px 6px;\n}\n\n.archive-status {\n  display: block;\n  margin-top: 6px;\n}\n\n/* Аудит 1.6 (a11y, WCAG 2.2 target-size): минимальная область нажатия 24×24 px.\n   Блок только добавляющий: прежние объявления и цвета не изменены, раскладка\n   300-пиксельного попапа не затронута (габариты растут только до минимума). */\n.checkbox-row input[type=\"checkbox\"] {\n  min-width: 24px;\n  min-height: 24px;\n}\n\n.archive-del {\n  min-width: 24px;\n  min-height: 24px;\n}\n\n.btn-reset,\n.btn-toggle,\n.btn-export {\n  min-height: 24px;\n}\n\n#privacy-link,\n#help-link {\n  min-height: 24px;\n  line-height: 24px;\n}\n\n/* Major-подбатч 1 (аудит #10): свёрнутая секция «Дополнительно» (<details>/<summary>).\n   Блок только добавляющий: ни одно прежнее правило и ни один цвет не изменены. */\ndetails.section > summary {\n  cursor: pointer;\n  font-size: 12px;\n  color: #8b8bad;\n  padding: 4px 0;\n  margin-bottom: 4px;\n  list-style-position: inside;\n}\n\ndetails.section > summary::marker {\n  color: #a78bfa;\n}\n\ndetails.section > summary:hover {\n  color: #ffffff;\n}\n\n/* Аудит #10: :focus-visible для summary обязателен — подавлять обводку здесь нельзя\n   (это пинится в tests/a11y-options.test.js). Правило намеренно стоит ПОСЛЕ combined-правила\n   выше: a11y-пин берёт первое :focus-visible-правило файла и проверяет по нему\n   селекторы button/select/input/a/[tabindex]. */\nsummary:focus-visible {\n  outline: 2px solid #a78bfa;\n  outline-offset: 2px;\n}\n\n/* =====================================================================================\n * Minor-подбатч B (UI-аудит 2026-09-28, options: находки #19/#20/#21)\n * Блок только добавляющий. Изменены две прежние вещи (обе перечислены в отчёте):\n *   body — снята фикс-ширина 300px (#19);  #aiCmAutoExportPct — width → inline-size (#19).\n * ===================================================================================== */\n\n/* #20: сетка 2×2 для четырёх кнопок экспорта истории (MD / JSON / PDF / TXT).\n   minmax(72px, 1fr) не даёт кнопкам схлопнуться и не переполняет строку даже на 320px. */\n.export-grid {\n  display: grid;\n  grid-template-columns: repeat(2, minmax(72px, 1fr));\n  gap: 6px;\n  min-width: 0;\n}\n\n.export-grid .btn-export {\n  min-width: 0;\n}\n\n/* #20: MD — основной формат (primary); остальные кнопки остаются tonal (.btn-export).\n   Контраст: #ffffff на #7c3aed = 5.70:1; hover #ffffff на #6d28d9 = 7.10:1 (AA ≥ 4.5:1). */\n.export-grid .btn-export--primary {\n  background: #7c3aed;\n  border-color: #7c3aed;\n  color: #ffffff;\n  font-weight: 600;\n}\n\n.export-grid .btn-export--primary:hover:not(:disabled) {\n  background: #6d28d9;\n  border-color: #6d28d9;\n}\n\n/* #20: пока история недоступна, primary-вид не перебивает .btn-export:disabled. */\n.export-grid .btn-export--primary:disabled {\n  background: #16213e;\n  border-color: #2a2a4a;\n  color: #9a9ab0;\n}\n\n/* #21: ряд порогов — суффикс «%» внутри обёртки поля, размер в ch.\n   Число не уходит под стрелки спиннера: спиннер внутри инпута, «%» — снаружи него.\n   #21-polish: поля больше не растягиваются на всю ширину ряда — инпут компактный\n   (~8ch ≈ 55px, хватает под «100»), цифры по центру, «%» сразу за числом. */\n.thresholds-row {\n  gap: 8px;\n  align-items: center;\n}\n\n.threshold-field {\n  display: flex;\n  align-items: center;\n  gap: 2px;\n  flex: 0 0 auto;\n  min-width: 0;\n}\n\n.threshold-field input {\n  flex: 0 0 8ch;\n  min-width: 0;\n  inline-size: 8ch;\n  padding: 4px 2px;\n  font-size: 13px;\n  text-align: center;\n}\n\n.threshold-unit {\n  flex: 0 0 auto;\n  font-size: 11px;\n  color: #8b8bad;\n}\n\n/* #21: визуальная валидация диапазона 1–100 — чистый CSS, без aria-правок в options.js\n   (пин tests/a11y-options.test.js:340-342 допускает в options.js ровно одно aria-).\n   Контраст рамки: #ef4444 на фоне поля #16213e = 4.22:1 (≥ 3:1, WCAG 1.4.11). */\n#aiCmProactiveLow:invalid,\n#aiCmProactiveMedium:invalid,\n#aiCmProactiveHigh:invalid {\n  border-color: #ef4444;\n  outline: 1px solid #ef4444;\n}\n\n</style>\n</head>\n\n<body>\n  <div class=\"popup\">\n    <!-- Аудит 1.6 (a11y): весь контент попапа — ровно один main landmark -->\n    <main>\n    <div class=\"header\">\n      <span class=\"logo\">📊</span>\n      <h1 data-i18n=\"options_header_title\">AI Context Monitor</h1>\n    </div>\n\n    <!-- v1.20 (M-2): регион статистики объявляет изменения вежливо -->\n    <div class=\"stats\" id=\"stats\" aria-live=\"polite\">\n      <div class=\"stat-row\">\n        <span class=\"stat-label\" data-i18n=\"options_stat_site\">Сайт:</span>\n        <span class=\"stat-value\" id=\"stat-site\">—</span>\n      </div>\n      <div class=\"stat-row\">\n        <span class=\"stat-label\" data-i18n=\"options_stat_model\">Модель:</span>\n        <span class=\"stat-value\" id=\"stat-model\">—</span>\n      </div>\n      <div class=\"stat-row\">\n        <span class=\"stat-label\" data-i18n=\"options_stat_tokens\">Токены:</span>\n        <span class=\"stat-value\" id=\"stat-tokens\">—</span>\n      </div>\n      <div class=\"stat-row\">\n        <span class=\"stat-label\" data-i18n=\"options_stat_limit\">Лимит:</span>\n        <span class=\"stat-value\" id=\"stat-limit\">—</span>\n      </div>\n      <div class=\"stat-row highlight\">\n        <span class=\"stat-label\" data-i18n=\"options_stat_fill\">Заполнение:</span>\n        <span class=\"stat-value\" id=\"stat-percent\">—</span>\n      </div>\n      <div class=\"stat-row\">\n        <span class=\"stat-label\" data-i18n=\"options_stat_source\">Источник:</span>\n        <span class=\"stat-value\" id=\"stat-source\">—</span>\n      </div>\n    </div>\n\n    <!-- v1.20 (M-2): предупреждение об устаревших данных — срочное объявление -->\n    <div class=\"stale-warning\" id=\"stale-warning\" role=\"alert\" style=\"display: none;\"></div>\n\n    <div class=\"section\">\n      <!-- v1.20 (M-1): подпись связана с select через for/id -->\n      <label class=\"label\" for=\"model-select\" data-i18n=\"options_model_label\">Модель:</label>\n      <select id=\"model-select\">\n        <option value=\"auto\" data-i18n=\"options_model_auto\">Автоопределение</option>\n        <optgroup label=\"OpenAI\">\n          <option value=\"gpt-4o\">GPT-4o (128K)</option>\n          <option value=\"gpt-4o-mini\">GPT-4o Mini (128K)</option>\n          <option value=\"gpt-4-turbo\">GPT-4 Turbo (128K)</option>\n          <option value=\"gpt-4\">GPT-4 (8K)</option>\n          <option value=\"gpt-3.5-turbo\">GPT-3.5 Turbo (16K)</option>\n        </optgroup>\n        <optgroup label=\"Google\">\n          <option value=\"gemini-2.5-pro\">Gemini 2.5 Pro (1M)</option>\n          <option value=\"gemini-2.5-flash\">Gemini 2.5 Flash (1M)</option>\n          <option value=\"gemini-1.5-pro\">Gemini 1.5 Pro (2M)</option>\n        </optgroup>\n        <optgroup label=\"DeepSeek\">\n          <option value=\"deepseek-v3\">DeepSeek V3 (128K)</option>\n          <option value=\"deepseek-r1\">DeepSeek R1 (128K)</option>\n        </optgroup>\n      </select>\n    </div>\n\n    <div class=\"section\">\n      <label class=\"label\" data-i18n=\"options_limit_label\">Лимит контекста:</label>\n      <div class=\"input-row\">\n        <!-- v1.20 (M-1): поле без видимой текстовой подписи получает имя доступности -->\n        <input type=\"number\" id=\"custom-limit\" aria-label=\"Пользовательский лимит токенов\" data-i18n-aria-label=\"options_limit_aria\" placeholder=\"Авто\" data-i18n-placeholder=\"options_limit_placeholder\" min=\"1\" max=\"100\" step=\"1\">\n        <button id=\"reset-limit\" class=\"btn-reset\" data-i18n=\"options_limit_auto_btn\">Авто</button>\n      </div>\n      <span class=\"hint\" data-i18n=\"options_limit_hint\">Порог в % от Авто-порога: цвета и % считаются от этого порога. 100% = как Авто. Пусто = Авто</span>\n    </div>\n\n    <div class=\"section checkbox-row\">\n      <input type=\"checkbox\" id=\"show-widget\" checked>\n      <label for=\"show-widget\" data-i18n=\"options_show_widget\">Показывать индикатор на странице</label>\n    </div>\n    <!-- Major-подбатч 1 (аудит #10): проактивные пороги остаются видимыми; редкие\n         настройки (логи, автоэкспорт, API-ключ, экспорт, архивы) свёрнуты в Advanced ниже. -->\n    <!-- v1.20 (M-1): смысловая группа «Проактивные пороги» -->\n    <div class=\"section\" id=\"proactive-section\" role=\"group\" aria-labelledby=\"proactive-legend\">\n      <label class=\"label\" id=\"proactive-legend\" data-i18n=\"options_proactive_legend\">Проактивные пороги</label>\n      <div class=\"checkbox-row\">\n        <input type=\"checkbox\" id=\"aiCmProactive\" checked>\n        <label for=\"aiCmProactive\" data-i18n=\"options_proactive_badge\">Бейдж и уведомления о порогах</label>\n      </div>\n      <div class=\"checkbox-row\">\n        <input type=\"checkbox\" id=\"aiCmProactiveNotify\">\n        <label for=\"aiCmProactiveNotify\" data-i18n=\"options_proactive_notify\">Chrome-уведомления</label>\n      </div>\n      <div class=\"input-row\">\n        <label class=\"label\" for=\"aiCmProactiveLow\" data-i18n=\"options_proactive_levels_label\">Пороги уведомлений и бейджа (1–100, возрастающий порядок):</label>\n      </div>\n      <div class=\"input-row thresholds-row\">\n        <!-- v1.20 (M-1): у трёх числовых полей порога — собственные имена доступности (title сохранён) -->\n        <!-- Minor-B (#21): суффикс единицы «%», inputmode=numeric и общая подсказка о диапазоне 1–100.\n             «%» — языконейтральный символ-токен (как MD/JSON/PDF/TXT): литерал без data-i18n,\n             т.к. пин tests/i18n-locales.test.js:187-204 требует, чтобы ЛЮБОЕ совпадение ru/en\n             (кроме брендовых строк и options_info_separator) было переведено. -->\n        <span class=\"threshold-field\">\n          <input type=\"number\" id=\"aiCmProactiveLow\" aria-label=\"Низкий порог процентов\" data-i18n-aria-label=\"options_proactive_low_aria\" inputmode=\"numeric\" min=\"1\" max=\"100\" step=\"1\" value=\"70\" title=\"Низкий порог — зелёный\" data-i18n-title=\"options_proactive_low_title\" aria-describedby=\"proactive-threshold-msg\">\n          <span class=\"threshold-unit\">%</span>\n        </span>\n        <span class=\"threshold-field\">\n          <input type=\"number\" id=\"aiCmProactiveMedium\" aria-label=\"Средний порог процентов\" data-i18n-aria-label=\"options_proactive_medium_aria\" inputmode=\"numeric\" min=\"1\" max=\"100\" step=\"1\" value=\"85\" title=\"Средний порог — жёлтый\" data-i18n-title=\"options_proactive_medium_title\" aria-describedby=\"proactive-threshold-msg\">\n          <span class=\"threshold-unit\">%</span>\n        </span>\n        <span class=\"threshold-field\">\n          <input type=\"number\" id=\"aiCmProactiveHigh\" aria-label=\"Высокий порог процентов\" data-i18n-aria-label=\"options_proactive_high_aria\" inputmode=\"numeric\" min=\"1\" max=\"100\" step=\"1\" value=\"95\" title=\"Высокий порог — красный\" data-i18n-title=\"options_proactive_high_title\" aria-describedby=\"proactive-threshold-msg\">\n          <span class=\"threshold-unit\">%</span>\n        </span>\n      </div>\n      <!-- v2.0.13: кольцо на странице красится ТЕМИ ЖЕ порогами — подсказка переписана -->\n      <span class=\"hint\" data-i18n=\"options_ring_zones_hint\">Цвет кольца на странице — по тем же порогам: зелёный ниже нижнего, жёлтый между нижним и верхним, красный от верхнего. Пороги также управляют уведомлениями и автоэкспортом.</span>\n      <!-- Minor-B (#21): статическое сообщение о диапазоне и фактическом поведении,\n           связано с тремя полями порогов через aria-describedby (инвалидация — CSS :invalid) -->\n      <span class=\"hint\" id=\"proactive-threshold-msg\" data-i18n=\"options_proactive_hint\">Допустимо 1–100. Каждый порог срабатывает один раз на разговор; при неверном значении берётся 70/85/95</span>\n    </div>\n\n    <!-- Major-подбатч 1 (аудит #10): один свёрнутый блок для редких настроек.\n         Без атрибута open — по умолчанию закрыт. -->\n    <details class=\"section\" id=\"advanced-section\">\n      <summary data-i18n=\"options_advanced_summary\">Дополнительно</summary>\n\n      <div class=\"section checkbox-row\">\n        <input type=\"checkbox\" id=\"debugLogs\">\n        <label for=\"debugLogs\" data-i18n=\"options_debug_logs\">Подробные логи</label>\n      </div>\n\n      <!-- v1.20 (M-1): смысловая группа «Автоэкспорт чатов».\n           Выбран role=\"group\" + aria-labelledby (вместо fieldset/legend): имя группы\n           даёт существующая видимая подпись .label, а раскладка .section не меняется. -->\n      <div class=\"section\" id=\"auto-export-section\" role=\"group\" aria-labelledby=\"auto-export-legend\">\n        <label class=\"label\" id=\"auto-export-legend\" data-i18n=\"options_autoexport_legend\">Автоэкспорт чатов (все поддерживаемые платформы)</label>\n        <div class=\"checkbox-row\">\n          <input type=\"checkbox\" id=\"aiCmAutoExport\">\n          <label for=\"aiCmAutoExport\" data-i18n=\"options_autoexport_enable\">Автоэкспорт при пороге</label>\n        </div>\n        <div class=\"input-row\">\n          <label class=\"label\" for=\"aiCmAutoExportPct\" data-i18n=\"options_autoexport_pct_label\">Порог, %:</label>\n          <input type=\"number\" id=\"aiCmAutoExportPct\" min=\"1\" max=\"100\" step=\"1\" value=\"90\">\n          <select id=\"aiCmAutoExportFmt\" aria-label=\"Формат файла автоэкспорта\" data-i18n-aria-label=\"options_autoexport_fmt_aria\">\n            <option value=\"txt\">txt</option>\n            <option value=\"md\">md</option>\n            <option value=\"json\">json</option>\n          </select>\n        </div>\n        <span class=\"hint\" data-i18n=\"options_autoexport_hint\">Один раз скачивает историю чата при достижении порога</span>\n      </div>\n\n      <div class=\"section\">\n        <label class=\"label\" data-i18n=\"options_byok_label\">Gemini API — точный подсчёт токенов</label>\n        <!-- Major-подбатч 1 (аудит #12): у поля ключа появилась видимая подпись label[for] -->\n        <label class=\"label\" for=\"api-key\" data-i18n=\"options_byok_key_label\">API-ключ Google AI Studio</label>\n        <div class=\"api-key-row\">\n          <input type=\"password\" id=\"api-key\" placeholder=\"Введите API-ключ Google AI Studio\" data-i18n-placeholder=\"options_byok_key_placeholder\" autocomplete=\"off\">\n          <button id=\"toggle-api-key\" class=\"btn-toggle\" type=\"button\" aria-pressed=\"false\" title=\"Показать/скрыть ключ\" data-i18n-title=\"options_byok_toggle_title\">👁</button>\n        </div>\n        <span class=\"hint\" data-i18n=\"options_byok_hint\">Ключ хранится только до перезапуска браузера (chrome.storage.session). После перезапуска введите заново.</span>\n        <div class=\"api-key-row\">\n          <span class=\"hint\" id=\"api-key-status\" role=\"status\" data-i18n=\"options_byok_status_unset\">Ключ: не задан</span>\n          <button id=\"api-key-remove\" class=\"btn-toggle\" type=\"button\" data-i18n=\"options_byok_remove\">Убрать ключ</button>\n        </div>\n      </div>\n\n      <div class=\"section\">\n        <div class=\"checkbox-row\">\n          <input type=\"checkbox\" id=\"exact-count\">\n          <label for=\"exact-count\" data-i18n=\"options_exact_count\">Точный подсчёт токенов через Gemini API</label>\n        </div>\n        <!-- BYOK-синхронизация: ключ живёт в session (стирается при перезапуске), флаг — в local.\n             Текст подставляется из локали в options.js; пустой span == предупреждения нет. -->\n        <span class=\"hint\" id=\"exact-count-warning\" role=\"status\"></span>\n      </div>\n\n      <div class=\"section\">\n        <label class=\"label\" data-i18n=\"options_export_legend\">Экспорт истории</label>\n        <!-- Minor-B (#20): сетка 2×2, короткие визуальные подписи MD/JSON/PDF/TXT, доступное имя у каждой кнопки.\n             Локализованные строки действий («Сохранить .md», «Сохранить .txt (эталон)») переехали в title\n             через data-i18n-title: они остаются переводимыми и не дублируют короткую подпись. -->\n        <div class=\"export-grid\" id=\"export-history-grid\">\n          <button id=\"export-md\" class=\"btn-export btn-export--primary\" disabled title=\"Сохранить .md\" data-i18n-title=\"options_export_md\" aria-label=\"MD — сохранить историю в формате Markdown\" data-i18n-aria-label=\"options_export_md_aria\">MD</button>\n          <button id=\"export-json\" class=\"btn-export\" disabled title=\"Сохранить .json\" data-i18n-title=\"options_export_json\" aria-label=\"JSON — сохранить историю в формате JSON\" data-i18n-aria-label=\"options_export_json_aria\">JSON</button>\n          <button id=\"export-pdf\" class=\"btn-export\" disabled title=\"Сохранить .pdf\" data-i18n-title=\"options_export_pdf\" aria-label=\"PDF — сохранить историю в формате PDF\" data-i18n-aria-label=\"options_export_pdf_aria\">PDF</button>\n          <button id=\"export-txt\" class=\"btn-export\" disabled title=\"Сохранить .txt (эталон)\" data-i18n-title=\"options_export_txt\" aria-label=\"TXT — сохранить историю в формате TXT (эталон)\" data-i18n-aria-label=\"options_export_txt_aria\">TXT</button>\n        </div>\n        <div class=\"export-row\">\n          <button id=\"export-diag\" class=\"btn-export\" data-i18n=\"options_export_diag\">Экспорт диагностики</button>\n        </div>\n        <!-- O-7: единственный тумблер сырого режима экспорта (default OFF = текущее поведение) -->\n        <!-- D-O41 (UX): подсказка тумблера — reasoning автоматически попадает в экспорт, если он\n             есть в источнике; принудительное исключение (OFF) действует, когда reasoning в\n             источнике нет (force-exclude). Строки — ключ options_export_hidden_title (ru/en). -->\n        <div class=\"checkbox-row export-hidden-row\">\n          <input type=\"checkbox\" id=\"aiCmIncludeHiddenInExport\" title=\"Reasoning автоматически включается при наличии в источнике; тумблер принудительно исключает\" data-i18n-title=\"options_export_hidden_title\">\n          <label for=\"aiCmIncludeHiddenInExport\" data-i18n=\"options_export_hidden_label\">Включать reasoning и инъекции соседних расширений (DeepSeek++, Better DeepSeek) в экспорт</label>\n        </div>\n        <span class=\"hint\" data-i18n=\"options_export_hidden_hint\">Выключено: в файл попадают только вопросы и ответы, без размышлений и инъекций соседних расширений (DeepSeek++, Better DeepSeek). Включено: размышления и инъекции попадают в экспорт.</span>\n        <span class=\"hint\" id=\"export-hint\" data-i18n=\"options_open_supported_site\">Откройте поддерживаемый сайт</span>\n      </div>\n\n      <div class=\"section\" id=\"archive-section\">\n        <label class=\"label\" data-i18n=\"options_archive_legend\">Архивы (первый ярус истории)</label>\n        <div class=\"input-row\">\n          <input type=\"file\" id=\"archive-file\" accept=\".json,application/json\" multiple aria-label=\"Выбрать файлы архивов\" data-i18n-aria-label=\"options_archive_file_aria\">\n        </div>\n        <div class=\"input-row\">\n          <button id=\"archive-import\" class=\"btn-export\" type=\"button\" data-i18n=\"options_archive_import\">Импортировать</button>\n          <button id=\"archive-refresh\" class=\"btn-reset\" type=\"button\" data-i18n=\"options_archive_refresh\">Обновить список</button>\n        </div>\n        <span class=\"hint\" data-i18n=\"options_archive_hint\">Локальные экспорты: Gemini Takeout (MyActivity.json), ChatGPT conversations.json,\n          Claude conversations.json, Perplexity threads. Файлы читаются в браузере (FileReader) и никуда не отправляются.\n          Архив — первый ярус: он задаёт авторитетный пол истории и даёт терминальную полноту archive-complete.</span>\n        <!-- v1.20 (M-2): статус архива — вежливый live-region -->\n        <div class=\"hint archive-status\" id=\"archive-status\" role=\"status\"></div>\n        <div class=\"archive-list\" id=\"archive-list\"></div>\n      </div>\n    </details>\n\n    <div class=\"footer\">\n      <span class=\"version\"></span>\n      <a href=\"privacy/privacy.html\" id=\"privacy-link\" target=\"_blank\" rel=\"noopener\"><span data-i18n=\"options_footer_privacy\">Политика конфиденциальности</span></a>\n      <!-- v1.19 (M-6): ссылка на руководство docs/index.html (входит в пакет расширения) -->\n      <a href=\"../docs/index.html\" id=\"help-link\" target=\"_blank\" rel=\"noopener\"><span data-i18n=\"options_footer_help\">Помощь</span></a>\n    </div>\n    </main>\n  </div>\n</body>\n<script>\n// Р—Р°РіР»СѓС€РєРё РґР»СЏ Р»РѕРіРіРµСЂР° Рё РѕС‚Р»Р°РґРѕС‡РЅС‹С… С„СѓРЅРєС†РёР№ СЂР°СЃС€РёСЂРµРЅРёСЏ\nif (typeof window.debugLog === 'undefined') {\n  window.debugLog = function(...args) {\n    console.log('[AI CM DEBUG]', ...args);\n  };\n}\nif (typeof window.__aiCmSetDebugLogs === 'undefined') {\n  window.__aiCmSetDebugLogs = function() {};\n}\n\n// Р­РјСѓР»СЏС‚РѕСЂ Chrome API РґР»СЏ Pake / Tauri\n(function() {\n  window.chrome = window.chrome || {};\n\n  var messageListeners = [];\n  var storageListeners = [];\n\n  var onMessageStub = {\n    addListener: function(fn) {\n      if (typeof fn === 'function' && !messageListeners.includes(fn)) {\n        messageListeners.push(fn);\n      }\n    },\n    removeListener: function(fn) {\n      messageListeners = messageListeners.filter(function(l) { return l !== fn; });\n    },\n    hasListener: function(fn) { return messageListeners.includes(fn); }\n  };\n\n  var onChangedStub = {\n    addListener: function(fn) {\n      if (typeof fn === 'function' && !storageListeners.includes(fn)) {\n        storageListeners.push(fn);\n      }\n    },\n    removeListener: function(fn) {\n      storageListeners = storageListeners.filter(function(l) { return l !== fn; });\n    }\n  };\n\n  function createEventStub() {\n    return {\n      addListener: function() {},\n      removeListener: function() {},\n      hasListener: function() { return false; },\n      dispatch: function() {}\n    };\n  }\n\n  // Runtime API\n  window.chrome.runtime = window.chrome.runtime || {};\n  window.chrome.runtime.id = 'pake-ai-context-monitor';\n  window.chrome.runtime.getURL = window.chrome.runtime.getURL || function(path) { return path; };\n  window.chrome.runtime.getManifest = window.chrome.runtime.getManifest || function() {\n    return { version: '2.1.0', manifest_version: 3, name: 'AI Context Monitor' };\n  };\n  window.chrome.runtime.onMessage = onMessageStub;\n  window.chrome.runtime.onInstalled = createEventStub();\n  window.chrome.runtime.onStartup = createEventStub();\n  window.chrome.runtime.lastError = null;\n\n  // РћС‚РїСЂР°РІРєР° СЃРѕРѕР±С‰РµРЅРёР№ РјРµР¶РґСѓ С„РѕРЅРѕРІС‹Рј СЃРµСЂРІРёСЃРѕРј Рё СЃС‚СЂР°РЅРёС†РµР№\n  window.chrome.runtime.sendMessage = function(message, callback) {\n    return new Promise(function(resolve) {\n      var responded = false;\n      var sender = { id: 'pake-ai-context-monitor', tab: { id: 1 } };\n\n      var sendResponse = function(response) {\n        if (!responded) {\n          responded = true;\n          if (callback) callback(response);\n          resolve(response);\n        }\n      };\n\n      var listeners = messageListeners.slice();\n      listeners.forEach(function(listener) {\n        try {\n          listener(message, sender, sendResponse);\n        } catch (e) {\n          console.error('[AI CM Polyfill] РћС€РёР±РєР° РѕР±СЂР°Р±РѕС‚С‡РёРєР°:', e);\n        }\n      });\n\n      if (!responded) {\n        setTimeout(function() {\n          if (!responded) {\n            responded = true;\n            if (callback) callback();\n            resolve();\n          }\n        }, 10);\n      }\n    });\n  };\n\n  // Storage API\n  window.chrome.storage = window.chrome.storage || {};\n  window.chrome.storage.onChanged = onChangedStub;\n\n  // РќР°СЃС‚СЂРѕР№РєРё РѕС‚РєСЂС‹РІР°СЋС‚СЃСЏ РІ iframe РїРѕРІРµСЂС… СЃС‚СЂР°РЅРёС†С‹ (Р°РЅР°Р»РѕРі РёРєРѕРЅРєРё СЂР°СЃС€РёСЂРµРЅРёСЏ).\n  // Р—Р°РїРёСЃСЊ РёР· iframe РґРѕР»Р¶РЅР° СЃСЂР°Р·Сѓ РґРѕС…РѕРґРёС‚СЊ РґРѕ content.js РІ СЂРѕРґРёС‚РµР»СЊСЃРєРѕРј РѕРєРЅРµ.\n  var IS_OPTIONS_FRAME = (typeof window !== 'undefined') && window.__AI_CM_OPTIONS_FRAME__ === true;\n\n  function notifyStorage(changes, area) {\n    storageListeners.forEach(function(listener) {\n      try { listener(changes, area); } catch (e) {}\n    });\n    if (IS_OPTIONS_FRAME) {\n      try { parent.postMessage({ __aiCmStorage: 1, changes: changes, area: area }, '*'); } catch (e) {}\n    }\n  }\n\n  function readStored(store, key) {\n    var raw = store.getItem('ai_cm_' + key);\n    if (raw === null) return undefined;\n    try { return JSON.parse(raw); } catch (e) { return raw; }\n  }\n\n  if (!window.chrome.storage.local) {\n    window.chrome.storage.local = {\n      get: function(keys, callback) {\n        var res = {};\n        var defaults = {\n          showWidget: true,\n          showBadge: true,\n          enabled: true\n          // ai_cm_safe_pct_<site> РќР• Р·Р°РґР°С‘Рј: РєР°Рє Рё РІ Chrome, РїРѕСЂРѕРі РїРѕ СѓРјРѕР»С‡Р°РЅРёСЋ\n          // РЅРµ Р·Р°РґР°РЅ (100% РѕРєРЅР°), РїРѕРєР° РїРѕР»СЊР·РѕРІР°С‚РµР»СЊ СЃР°Рј РЅРµ РІС‹СЃС‚Р°РІРёС‚ РµРіРѕ РІ РїР°РЅРµР»Рё.\n        };\n\n        var keysArr = Array.isArray(keys) ? keys : (typeof keys === 'object' && keys !== null ? Object.keys(keys) : [keys]);\n\n        keysArr.forEach(function(k) {\n          var val = readStored(localStorage, k);\n          if (val !== undefined) {\n            res[k] = val;\n          } else {\n            res[k] = defaults[k] !== undefined ? defaults[k] : true;\n          }\n        });\n\n        if (typeof keys === 'object' && !Array.isArray(keys) && keys !== null) {\n          Object.keys(keys).forEach(function(k) {\n            if (res[k] === undefined) res[k] = keys[k];\n          });\n        }\n\n        if (callback) callback(res);\n        return Promise.resolve(res);\n      },\n      set: function(obj, callback) {\n        var changes = {};\n        if (obj && typeof obj === 'object') {\n          Object.keys(obj).forEach(function(k) {\n            var oldVal = readStored(localStorage, k);\n            var newVal = obj[k];\n            localStorage.setItem('ai_cm_' + k, typeof newVal === 'object' ? JSON.stringify(newVal) : newVal);\n            changes[k] = { oldValue: oldVal, newValue: newVal };\n          });\n        }\n        notifyStorage(changes, 'local');\n        if (callback) callback();\n        return Promise.resolve();\n      },\n      remove: function(keys, callback) {\n        var arr = Array.isArray(keys) ? keys : [keys];\n        var changes = {};\n        arr.forEach(function(k) {\n          var oldVal = readStored(localStorage, k);\n          if (oldVal !== undefined) {\n            localStorage.removeItem('ai_cm_' + k);\n            changes[k] = { oldValue: oldVal, newValue: undefined };\n          }\n        });\n        if (Object.keys(changes).length) notifyStorage(changes, 'local');\n        if (callback) callback();\n        return Promise.resolve();\n      },\n      getKeys: function(callback) {\n        var keys = [];\n        try {\n          for (var i = 0; i < localStorage.length; i++) {\n            var k = localStorage.key(i);\n            if (k && k.indexOf('ai_cm_') === 0) keys.push(k.slice(6));\n          }\n        } catch (e) {}\n        if (callback) callback(keys);\n        return Promise.resolve(keys);\n      }\n    };\n  }\n\n  // session: РєР°Рє РІ Chrome вЂ” РѕС‚РґРµР»СЊРЅРѕРµ С…СЂР°РЅРёР»РёС‰Рµ (BYOK-РєР»СЋС‡Рё РЅРµ РґРѕР»Р¶РЅС‹ РїРѕРїР°РґР°С‚СЊ РІ local)\n  if (!window.chrome.storage.session) {\n    window.chrome.storage.session = {\n      get: function(keys, callback) {\n        var res = {};\n        var keysArr = Array.isArray(keys) ? keys : (typeof keys === 'object' && keys !== null ? Object.keys(keys) : [keys]);\n        keysArr.forEach(function(k) {\n          var val = readStored(sessionStorage, 'sess_' + k);\n          if (val !== undefined) res[k] = val;\n        });\n        if (callback) callback(res);\n        return Promise.resolve(res);\n      },\n      set: function(obj, callback) {\n        var changes = {};\n        if (obj && typeof obj === 'object') {\n          Object.keys(obj).forEach(function(k) {\n            var oldVal = readStored(sessionStorage, 'sess_' + k);\n            var newVal = obj[k];\n            sessionStorage.setItem('ai_cm_sess_' + k, typeof newVal === 'object' ? JSON.stringify(newVal) : newVal);\n            changes[k] = { oldValue: oldVal, newValue: newVal };\n          });\n        }\n        notifyStorage(changes, 'session');\n        if (callback) callback();\n        return Promise.resolve();\n      },\n      remove: function(keys, callback) {\n        var arr = Array.isArray(keys) ? keys : [keys];\n        var changes = {};\n        arr.forEach(function(k) {\n          var oldVal = readStored(sessionStorage, 'sess_' + k);\n          if (oldVal !== undefined) {\n            sessionStorage.removeItem('ai_cm_sess_' + k);\n            changes[k] = { oldValue: oldVal, newValue: undefined };\n          }\n        });\n        if (Object.keys(changes).length) notifyStorage(changes, 'session');\n        if (callback) callback();\n        return Promise.resolve();\n      }\n    };\n  }\n\n  window.chrome.storage.sync = window.chrome.storage.local;\n\n  if (!IS_OPTIONS_FRAME) {\n    try {\n      window.addEventListener('message', function(ev) {\n        var d = ev && ev.data;\n        if (!d || d.__aiCmStorage !== 1 || !d.changes) return;\n        storageListeners.forEach(function(listener) {\n          try { listener(d.changes, d.area || 'local'); } catch (e) {}\n        });\n      });\n    } catch (e) {}\n  }\n\n  // Tabs API\n  window.chrome.tabs = window.chrome.tabs || {};\n  window.chrome.tabs.query = function(q, cb) {\n    var href = (typeof location !== 'undefined' ? location.href : '');\n    var title = (typeof document !== 'undefined' ? document.title : '');\n    // РќР°СЃС‚СЂРѕР№РєРё Р¶РёРІСѓС‚ РІ srcdoc-iframe: Р°РєС‚РёРІРЅР°СЏ \"РІРєР»Р°РґРєР°\" вЂ” СЌС‚Рѕ СЂРѕРґРёС‚РµР»СЊСЃРєР°СЏ СЃС‚СЂР°РЅРёС†Р°.\n    if (IS_OPTIONS_FRAME) {\n      try { if (parent && parent.location) href = parent.location.href; } catch (e) {}\n      try { if (parent && parent.document) title = parent.document.title; } catch (e) {}\n    }\n    var tab = { id: 1, active: true, currentWindow: true, url: href, title: title };\n    if (cb) cb([tab]);\n    return Promise.resolve([tab]);\n  };\n  window.chrome.tabs.sendMessage = function(tabId, message, callback) {\n    return window.chrome.runtime.sendMessage(message, callback);\n  };\n  window.chrome.tabs.create = function(opts, cb) {\n    try { if (opts && opts.url) window.open(opts.url, '_blank'); } catch (e) {}\n    if (cb) cb();\n  };\n  window.chrome.tabs.onUpdated = createEventStub();\n  window.chrome.tabs.onActivated = createEventStub();\n\n  window.chrome.action = window.chrome.action || {\n    setIcon: function() {}, setBadgeText: function() {}, setBadgeBackgroundColor: function() {}\n  };\n})();\n\n\n</script>\n<script>\n(() => {\n  var __defProp = Object.defineProperty;\n  var __getOwnPropDesc = Object.getOwnPropertyDescriptor;\n  var __getOwnPropNames = Object.getOwnPropertyNames;\n  var __hasOwnProp = Object.prototype.hasOwnProperty;\n  var __require = /* @__PURE__ */ ((x) => typeof require !== \"undefined\" ? require : typeof Proxy !== \"undefined\" ? new Proxy(x, {\n    get: (a, b) => (typeof require !== \"undefined\" ? require : a)[b]\n  }) : x)(function(x) {\n    if (typeof require !== \"undefined\") return require.apply(this, arguments);\n    throw Error('Dynamic require of \"' + x + '\" is not supported');\n  });\n  var __esm = (fn, res, err) => function __init() {\n    if (err) throw err[0];\n    try {\n      return fn && (res = (0, fn[__getOwnPropNames(fn)[0]])(fn = 0)), res;\n    } catch (e) {\n      throw err = [e], e;\n    }\n  };\n  var __commonJS = (cb, mod) => function __require2() {\n    try {\n      return mod || (0, cb[__getOwnPropNames(cb)[0]])((mod = { exports: {} }).exports, mod), mod.exports;\n    } catch (e) {\n      throw mod = 0, e;\n    }\n  };\n  var __export = (target, all) => {\n    for (var name in all)\n      __defProp(target, name, { get: all[name], enumerable: true });\n  };\n  var __copyProps = (to, from, except, desc) => {\n    if (from && typeof from === \"object\" || typeof from === \"function\") {\n      for (let key of __getOwnPropNames(from))\n        if (!__hasOwnProp.call(to, key) && key !== except)\n          __defProp(to, key, { get: () => from[key], enumerable: !(desc = __getOwnPropDesc(from, key)) || desc.enumerable });\n    }\n    return to;\n  };\n  var __toCommonJS = (mod) => __copyProps(__defProp({}, \"__esModule\", { value: true }), mod);\n\n  // ../utils/platform.ts\n  function aiCmIsFirefox() {\n    try {\n      var api = typeof browser !== \"undefined\" && browser && browser.runtime ? browser : typeof chrome !== \"undefined\" && chrome && chrome.runtime ? chrome : null;\n      if (!api) return false;\n      if (api.runtime && typeof api.runtime.getURL === \"function\") {\n        return String(api.runtime.getURL(\"\")).indexOf(\"moz-extension://\") === 0;\n      }\n      if (typeof api.getURL === \"function\") {\n        return String(api.getURL(\"\")).indexOf(\"moz-extension://\") === 0;\n      }\n      return false;\n    } catch (e) {\n      return false;\n    }\n  }\n  var init_platform = __esm({\n    \"../utils/platform.ts\"() {\n    }\n  });\n\n  // ../utils/buildReferenceText.ts\n  function cleanInline(s) {\n    s = s.replace(/\\[([^\\]]+)\\]\\(([^)\\s]+)\\)/g, \"$1\");\n    s = s.replace(/(\\*\\*|__)/g, \"\");\n    s = s.replace(/(?<![*\\w])\\*([^*\\n]+)\\*(?![\\w*])/g, \"$1\");\n    s = s.replace(/(?<![\\w_])\\_([^_\\n]+)\\_(?![\\w_])/g, \"$1\");\n    s = s.replace(/`/g, \"\");\n    return s;\n  }\n  function cleanLine(line) {\n    var s = String(line == null ? \"\" : line);\n    s = s.replace(/^#{1,6}\\s+/, \"\");\n    s = s.replace(/^>\\s?/, \"\");\n    s = s.replace(/^[-*+]\\s+/, \"\");\n    return s;\n  }\n  function cleanText(text) {\n    var lines = String(text).split(\"\\n\");\n    var out = [];\n    for (var i = 0; i < lines.length; i++) {\n      var line = lines[i];\n      var trimmed = line.trim();\n      if (/^-{3,}$/.test(trimmed)) continue;\n      out.push(cleanInline(cleanLine(line)));\n    }\n    return out.join(\"\\n\");\n  }\n  function buildReferenceText(messages) {\n    var list = Array.isArray(messages) ? messages : [];\n    var parts = [];\n    for (var i = 0; i < list.length; i++) {\n      var msg = list[i] || {};\n      parts.push(cleanText(msg.text == null ? \"\" : msg.text));\n    }\n    return parts.join(\"\\n\\n\");\n  }\n  var init_buildReferenceText = __esm({\n    \"../utils/buildReferenceText.ts\"() {\n    }\n  });\n\n  // ../utils/debug.ts\n  function __aiCmStringifyArg(a) {\n    if (typeof a === \"string\") return a;\n    try {\n      var s = JSON.stringify(a);\n      if (s === void 0) return String(a);\n      if (s.length > 500) s = s.slice(0, 500) + \"\\u2026\";\n      return s;\n    } catch (e) {\n      return String(a);\n    }\n  }\n  function __aiCmPushLogRing(line) {\n    try {\n      __aiCmLogRing.push(line);\n      if (__aiCmLogRing.length > __aiCmLogRingMax) __aiCmLogRing.shift();\n    } catch (e) {\n    }\n  }\n  function debugLog(level, ...rest) {\n    var args = Array.prototype.slice.call(arguments, 1);\n    try {\n      var line = args.map(__aiCmStringifyArg).join(\" \");\n      __aiCmPushLogRing(line);\n    } catch (e) {\n    }\n    if (level === \"error\" || level === \"warn\") {\n      (console[level] || console.log).apply(console, args);\n      return;\n    }\n    var enabled = DEBUG;\n    try {\n      if (typeof window !== \"undefined\" && window.__aiCmDebugLogs === true) enabled = true;\n    } catch (e) {\n    }\n    if (enabled) {\n      (console[level] || console.log).apply(console, args);\n    }\n  }\n  function swallow(error, tag) {\n    try {\n      if (typeof debugLog !== \"function\") return;\n      debugLog(\"error\", \"[swallow][\" + (tag || \"unlabeled\") + \"]\", error);\n    } catch (eSwallow) {\n    }\n  }\n  function aiCmDiagOn() {\n    try {\n      if (typeof sessionStorage !== \"undefined\" && sessionStorage && sessionStorage.getItem(\"aiCmDebug\") === \"1\") return true;\n    } catch (eSess) {\n    }\n    try {\n      if (typeof window !== \"undefined\" && window && window.__aiCmDebugLogs === true) return true;\n    } catch (eWin) {\n    }\n    return false;\n  }\n  function aiCmDiagHead(v, n) {\n    try {\n      var lim = typeof n === \"number\" && n > 0 ? n : 100;\n      if (v === void 0 || v === null) return \"(\\u043F\\u0443\\u0441\\u0442\\u043E)\";\n      var s = String(v);\n      if (!s) return \"(\\u043F\\u0443\\u0441\\u0442\\u043E)\";\n      var flat = s.replace(/\\s+/g, \" \").trim();\n      if (!flat) return \"(\\u043F\\u0443\\u0441\\u0442\\u043E/\\u043F\\u0440\\u043E\\u0431\\u0435\\u043B\\u044B)\";\n      return flat.length > lim ? flat.slice(0, lim) + \"\\u2026\" : flat;\n    } catch (eHead) {\n      return \"(\\u043E\\u0448\\u0438\\u0431\\u043A\\u0430)\";\n    }\n  }\n  function aiCmDiagStack(skip) {\n    try {\n      var st = String(new Error().stack || \"\");\n      if (!st) return \"\";\n      var lines = st.split(\"\\n\");\n      var out = [];\n      var from = 1 + (typeof skip === \"number\" && skip >= 0 ? skip : 0);\n      for (var i = from; i < lines.length && out.length < 4; i++) {\n        var s = String(lines[i] || \"\").replace(/\\s+/g, \" \").trim();\n        if (!s || s.indexOf(\"aiCmDiag\") !== -1) continue;\n        out.push(s);\n      }\n      return out.join(\" <- \");\n    } catch (eStack) {\n      return \"\";\n    }\n  }\n  function aiCmDiagLine2(tag, fields) {\n    if (!aiCmDiagOn()) return false;\n    try {\n      var parts = [];\n      var f = fields || {};\n      for (var k in f) {\n        if (!Object.prototype.hasOwnProperty.call(f, k)) continue;\n        var v = f[k];\n        parts.push(k + \"=\" + (v === void 0 || v === null ? \"(\\u043D\\u0435\\u0442)\" : String(v)));\n      }\n      console.log(\"[AI CM][diag] \" + tag + \" \" + parts.join(\" \"));\n    } catch (eLine) {\n    }\n    return true;\n  }\n  function aiCmDiagDownload(trigger, content, fileName, extra) {\n    if (!aiCmDiagOn()) return false;\n    var e = extra || {};\n    var url = \"\";\n    try {\n      url = String(typeof location !== \"undefined\" && location && location.href || \"\");\n    } catch (eUrl) {\n    }\n    return aiCmDiagLine2(\"download\", {\n      trigger: trigger || \"(\\u043D\\u0435\\u0442)\",\n      file: fileName === void 0 || fileName === null || String(fileName) === \"\" ? \"\\u043F\\u0443\\u0441\\u0442\\u043E\\u0435\" : String(fileName),\n      bytes100: aiCmDiagHead(content, 100),\n      len: content === void 0 || content === null ? 0 : String(content).length,\n      mime: e.mime,\n      url,\n      threadId: e.threadId,\n      site: e.site,\n      reason: e.reason,\n      src: aiCmDiagStack(1)\n    });\n  }\n  function aiCmDiagDownloadBlocked(trigger, content, fileName, reason, extra) {\n    if (!aiCmDiagOn()) return false;\n    var e = extra || {};\n    var url = \"\";\n    try {\n      url = String(typeof location !== \"undefined\" && location && location.href || \"\");\n    } catch (eUrlB) {\n    }\n    return aiCmDiagLine2(\"download-blocked\", {\n      reason: reason || \"(\\u043D\\u0435\\u0442)\",\n      trigger: trigger || \"(\\u043D\\u0435\\u0442)\",\n      file: fileName === void 0 || fileName === null || String(fileName) === \"\" ? \"\\u043F\\u0443\\u0441\\u0442\\u043E\\u0435\" : String(fileName),\n      bytes100: aiCmDiagHead(content, 100),\n      len: content === void 0 || content === null ? 0 : String(content).length,\n      mime: e.mime,\n      url,\n      threadId: e.threadId,\n      site: e.site,\n      src: aiCmDiagStack(1)\n    });\n  }\n  function swallowSoft(error, tag) {\n    var label = tag || \"unlabeled\";\n    var msg = \"\";\n    try {\n      msg = error && error.message ? String(error.message) : String(error);\n    } catch (eSoftMsg) {\n      msg = \"(\\u043D\\u0435\\u0447\\u0438\\u0442\\u0430\\u0435\\u043C\\u0430\\u044F \\u043E\\u0448\\u0438\\u0431\\u043A\\u0430)\";\n    }\n    try {\n      if (typeof __aiCmPushLogRing === \"function\") __aiCmPushLogRing(\"[swallow-soft][\" + label + \"] \" + msg);\n    } catch (eSoftRing) {\n      return void 0;\n    }\n    try {\n      if (typeof aiCmDiagLine2 !== \"function\") return;\n      aiCmDiagLine2(\"swallow-soft\", { tag: label, err: error });\n    } catch (eSoftDiag) {\n      return void 0;\n    }\n  }\n  var DEBUG, __aiCmLogRing, __aiCmLogRingMax;\n  var init_debug = __esm({\n    \"../utils/debug.ts\"() {\n      DEBUG = false;\n      __aiCmLogRing = [];\n      __aiCmLogRingMax = 200;\n      try {\n        if (typeof window !== \"undefined\") window.__aiCmSwallow = swallow;\n      } catch (eSwallowExport) {\n      }\n      try {\n        if (typeof window !== \"undefined\") window.__aiCmSwallowSoft = swallowSoft;\n      } catch (eSoftExport) {\n        __aiCmPushLogRing(\"[swallow-soft-export] \" + eSoftExport);\n      }\n    }\n  });\n\n  // ../utils/export-text-builders.ts\n  function aiCmI18nMessage(key, fallback, substitutions) {\n    try {\n      if (typeof chrome !== \"undefined\" && chrome.i18n && typeof chrome.i18n.getMessage === \"function\") {\n        var message = substitutions ? chrome.i18n.getMessage(key, substitutions) : chrome.i18n.getMessage(key);\n        if (message) return message;\n      }\n    } catch (eMessage) {\n    }\n    return fallback;\n  }\n  function reasoningOfMessage(msg) {\n    if (!msg || typeof msg !== \"object\") return \"\";\n    var r = msg.reasoning;\n    return typeof r === \"string\" ? r : \"\";\n  }\n  function withReasoningSections(text, reasoning) {\n    var t = typeof text === \"string\" ? text : \"\";\n    var r = typeof reasoning === \"string\" ? reasoning : \"\";\n    if (!r) return t;\n    if (t.indexOf(r) !== -1) return t;\n    return REASONING_SECTION_TAG + \"\\n\" + r + \"\\n\\n\" + ANSWER_SECTION_TAG + \"\\n\" + t;\n  }\n  function messageTextWithReasoning(msg) {\n    if (!msg || typeof msg !== \"object\") return \"\";\n    return withReasoningSections(msg.text, reasoningOfMessage(msg));\n  }\n  function reasoningOfMessageForExport(msg, useHidden) {\n    var r = reasoningOfMessage(msg);\n    if (r) return r;\n    if (useHidden !== true || !msg || typeof msg !== \"object\") return \"\";\n    return typeof msg.hiddenReasoning === \"string\" ? msg.hiddenReasoning : \"\";\n  }\n  function markersMessageTextWithReasoning(msg, useHidden) {\n    return withReasoningSections(\n      messageTextForMarkers(msg),\n      reasoningOfMessageForExport(msg, useHidden)\n    );\n  }\n  function isTxtRoleMarkerHistory(history) {\n    try {\n      var site = String(history && history.site || \"\").toLowerCase();\n      return TXT_ROLE_MARKER_SITES.indexOf(site) !== -1;\n    } catch (e) {\n      return false;\n    }\n  }\n  function txtRoleMarker(role) {\n    return role === \"user\" ? \"USER:\" : \"ASSISTANT:\";\n  }\n  function mdRoleMarker(role) {\n    return role === \"user\" ? \"### USER\" : \"### ASSISTANT\";\n  }\n  function messageTextForMarkers(msg) {\n    if (!msg || typeof msg !== \"object\") return \"\";\n    if (typeof msg.text === \"string\" && msg.text) return msg.text;\n    if (typeof msg.content === \"string\") return msg.content;\n    return typeof msg.text === \"string\" ? msg.text : \"\";\n  }\n  function dropContainerMessages(list) {\n    var src = Array.isArray(list) ? list : [];\n    var texts = [];\n    for (var t = 0; t < src.length; t++) texts.push(messageTextForMarkers(src[t]));\n    var keep = [];\n    for (var c = 0; c < src.length; c++) {\n      var candidate = texts[c];\n      var contained = 0;\n      var covered = 0;\n      var longest = 0;\n      if (candidate) {\n        for (var j = 0; j < texts.length; j++) {\n          var other = texts[j];\n          if (j === c || !other || other.length >= candidate.length) continue;\n          if (candidate.indexOf(other) === -1) continue;\n          contained++;\n          covered += other.length;\n          if (other.length > longest) longest = other.length;\n        }\n      }\n      var isContainer = contained >= CONTAINER_MIN_CONTAINED && covered >= CONTAINER_COVER_MIN * candidate.length && candidate.length >= 2 * longest;\n      if (!isContainer) keep.push(src[c]);\n    }\n    return keep;\n  }\n  function diagTxtRoleStructure(list, totalCount) {\n    if (!diagOn()) return false;\n    try {\n      var kept = Array.isArray(list) ? list.length : -1;\n      var total = typeof totalCount === \"number\" ? totalCount : kept;\n      var first = Array.isArray(list) && list.length > 0 ? list[0] : null;\n      var text = messageTextForMarkers(first);\n      var kind = \"\\u043D\\u0435\\u0442\";\n      if (first && typeof first === \"object\") {\n        if (typeof first.text === \"string\") kind = \"text\";\n        else if (typeof first.content === \"string\") kind = \"content\";\n      }\n      console.log(DIAG_PREFIX + \" txt-roles site=qwen isArray=\" + Array.isArray(list) + \" msgs=\" + total + \" kept=\" + kept + \" dropped-containers=\" + (kept >= 0 && total >= kept ? total - kept : 0) + \" first.role=\" + (first && first.role !== void 0 && first.role !== null ? String(first.role) : \"(\\u043D\\u0435\\u0442)\") + \" first.kind=\" + kind + \" first.len=\" + text.length + \" first.head=\" + (diagHead(text, 60) || \"\\u043F\\u0443\\u0441\\u0442\\u043E\"));\n    } catch (eLogRoles) {\n    }\n    return true;\n  }\n  function renderReferenceText(list) {\n    return buildReferenceText(list);\n  }\n  function renderReferenceTextWithRoleMarkers(list) {\n    var src = Array.isArray(list) ? list : [];\n    var parts = [];\n    for (var i = 0; i < src.length; i++) {\n      var m = src[i] || {};\n      var text = renderReferenceText([{ role: m.role, text: messageTextForMarkers(m) }]);\n      if (text === null) return null;\n      if (!String(text).trim()) continue;\n      parts.push(txtRoleMarker(m.role) + \"\\n\" + text);\n    }\n    return parts.join(\"\\n\\n\");\n  }\n  function buildTxtFromHistory(history) {\n    var hist = history || {};\n    var site = typeof hist.site === \"string\" ? hist.site : \"\";\n    var messages = history && Array.isArray(history.messages) ? history.messages : [];\n    var marked = isTxtRoleMarkerHistory(history);\n    var kept = marked ? dropContainerMessages(messages) : messages;\n    var forTxt = kept.map(function(m) {\n      var text = marked ? markersMessageTextWithReasoning(m, true) : messageTextWithReasoning(m);\n      if (!m || typeof m !== \"object\" || text === m.text) return m;\n      var copy = {};\n      for (var k in m) {\n        if (Object.prototype.hasOwnProperty.call(m, k)) copy[k] = m[k];\n      }\n      copy.text = text;\n      return copy;\n    });\n    var out;\n    if (marked) {\n      diagTxtRoleStructure(forTxt, messages.length);\n      out = renderReferenceTextWithRoleMarkers(forTxt);\n    } else {\n      out = renderReferenceText(forTxt);\n    }\n    if (site === \"gemini\" && hist.sourceTier && out) out = hist.sourceTier + \"\\n\\n\" + out;\n    return out === null ? \"\" : out;\n  }\n  function exportTokenSnapshot(history) {\n    var h = history || {};\n    var tokens = typeof h.tokens === \"number\" ? h.tokens : 0;\n    var limit = typeof h.limit === \"number\" ? h.limit : 0;\n    var percent = typeof h.percent === \"number\" ? h.percent : 0;\n    if (limit > 0) {\n      var calc = Math.round(tokens / limit * 1e3) / 10;\n      if (calc !== percent) percent = calc;\n    }\n    return { tokens, limit, percent };\n  }\n  function buildMdFromHistory(history, platform) {\n    var h = history || {};\n    var site = typeof h.site === \"string\" ? h.site : \"\";\n    var lines = [];\n    lines.push(aiCmI18nMessage(\"export_md_title\", \"# AI Context Monitor \\u2014 \\u044D\\u043A\\u0441\\u043F\\u043E\\u0440\\u0442 \\u0438\\u0441\\u0442\\u043E\\u0440\\u0438\\u0438\"));\n    lines.push(\"\");\n    lines.push(aiCmI18nMessage(\"export_md_platform\", \"\\u041F\\u043B\\u0430\\u0442\\u0444\\u043E\\u0440\\u043C\\u0430: \" + (platform || \"AI Chat\"), [platform || \"AI Chat\"]));\n    lines.push(aiCmI18nMessage(\"export_md_model\", \"\\u041C\\u043E\\u0434\\u0435\\u043B\\u044C: \" + (h.model || \"\\u2014\"), [h.model || \"\\u2014\"]));\n    var exportedAt = (/* @__PURE__ */ new Date()).toISOString();\n    lines.push(aiCmI18nMessage(\"export_md_date\", \"\\u0414\\u0430\\u0442\\u0430 \\u044D\\u043A\\u0441\\u043F\\u043E\\u0440\\u0442\\u0430: \" + exportedAt, [exportedAt]));\n    var snap = exportTokenSnapshot(h);\n    var tokens = snap.tokens;\n    var limit = snap.limit;\n    var percent = snap.percent;\n    if (tokens === 0 && limit === 0) {\n      lines.push(\"\\u0422\\u043E\\u043A\\u0435\\u043D\\u044B: \\u043D/\\u0434 (\" + percent + \"%)\");\n    } else {\n      lines.push(aiCmI18nMessage(\"export_md_tokens\", \"\\u0422\\u043E\\u043A\\u0435\\u043D\\u044B: \" + tokens + \" / \" + limit + \" (\" + percent + \"%)\", [String(tokens), String(limit), String(percent)]));\n    }\n    lines.push(\"\");\n    if (site === \"gemini\" && h.sourceTier) {\n      lines.push(h.sourceTier, \"\");\n    }\n    var mdMarked = isTxtRoleMarkerHistory(h);\n    var messages = Array.isArray(h.messages) ? h.messages : [];\n    if (mdMarked) messages = dropContainerMessages(messages);\n    for (var i = 0; i < messages.length; i++) {\n      var msg = messages[i] || {};\n      if (typeof aiCmDiagLine === \"function\") {\n        aiCmDiagLine(\"claude-role-builder\", { msgRole: msg.role, mdMarked });\n      }\n      var title = mdMarked ? mdRoleMarker(msg.role) : msg.role === \"user\" || msg.role === \"human\" ? aiCmI18nMessage(\"export_md_role_user\", \"## \\u041F\\u043E\\u043B\\u044C\\u0437\\u043E\\u0432\\u0430\\u0442\\u0435\\u043B\\u044C\") : aiCmI18nMessage(\"export_md_role_assistant\", \"## \\u0410\\u0441\\u0441\\u0438\\u0441\\u0442\\u0435\\u043D\\u0442\");\n      lines.push(title);\n      lines.push(\"\");\n      lines.push(mdMarked ? markersMessageTextWithReasoning(msg, true) : messageTextWithReasoning(msg));\n      lines.push(\"\");\n    }\n    return lines.join(\"\\n\");\n  }\n  function buildJsonFromHistory(history, platform) {\n    var h = history || {};\n    return JSON.stringify({\n      platform: platform || \"AI Chat\",\n      model: h.model || \"\",\n      exportedAt: (/* @__PURE__ */ new Date()).toISOString(),\n      tokens: typeof h.tokens === \"number\" ? h.tokens : 0,\n      limit: typeof h.limit === \"number\" ? h.limit : 0,\n      percent: typeof h.percent === \"number\" ? h.percent : 0,\n      // Two-Tier (v89): аддитивное поле метаданных. undefined → JSON.stringify ключ НЕ\n      // добавляет, поэтому у прочих платформ и у Gemini без метки байты прежние.\n      sourceTier: h.sourceTier,\n      messages: Array.isArray(h.messages) ? h.messages : []\n    }, null, 2);\n  }\n  function diagOn() {\n    try {\n      if (typeof sessionStorage !== \"undefined\" && sessionStorage && sessionStorage.getItem(\"aiCmDebug\") === \"1\") return true;\n    } catch (eSess) {\n    }\n    try {\n      var gRoot = globalThis;\n      if (gRoot && gRoot.__aiCmDebugLogs === true) return true;\n    } catch (eWin) {\n    }\n    return false;\n  }\n  function diagHead(v, n) {\n    try {\n      var lim = typeof n === \"number\" && n > 0 ? n : 100;\n      if (v === void 0 || v === null) return \"\";\n      var s = String(v);\n      if (!s) return \"\";\n      var flat = s.replace(/\\s+/g, \" \").trim();\n      if (!flat) return \"\";\n      return flat.length > lim ? flat.slice(0, lim) + \"\\u2026\" : flat;\n    } catch (eHead) {\n      return \"\";\n    }\n  }\n  function diagStack() {\n    try {\n      var lines = String(new Error().stack || \"\").split(\"\\n\");\n      var out = [];\n      for (var i = 1; i < lines.length && out.length < 4; i++) {\n        var s = String(lines[i] || \"\").replace(/\\s+/g, \" \").trim();\n        if (!s || s.indexOf(\"diag\") !== -1) continue;\n        out.push(s);\n      }\n      return out.join(\" <- \");\n    } catch (eStack) {\n      return \"\";\n    }\n  }\n  function diagDownload(trigger, content, fileName, extra) {\n    try {\n      if (typeof aiCmDiagDownload === \"function\") return aiCmDiagDownload(trigger, content, fileName, extra);\n    } catch (eGlobal) {\n    }\n    if (!diagOn()) return false;\n    try {\n      var e = extra || {};\n      var url = \"\";\n      try {\n        url = String(typeof location !== \"undefined\" && location && location.href || \"\");\n      } catch (eUrl) {\n      }\n      console.log(DIAG_PREFIX + \" download trigger=\" + (trigger || \"(\\u043D\\u0435\\u0442)\") + \" file=\" + (fileName === void 0 || fileName === null || String(fileName) === \"\" ? \"\\u043F\\u0443\\u0441\\u0442\\u043E\\u0435\" : String(fileName)) + \" bytes100=\" + (diagHead(content, 100) || \"\\u043F\\u0443\\u0441\\u0442\\u043E\") + \" len=\" + (content === void 0 || content === null ? 0 : String(content).length) + \" mime=\" + (e.mime === void 0 ? \"(\\u043D\\u0435\\u0442)\" : e.mime) + \" url=\" + url + \" threadId=\" + (e.threadId === void 0 || e.threadId === \"\" ? \"(\\u043D\\u0435\\u0442)\" : e.threadId) + \" site=\" + (e.site === void 0 ? \"\" : e.site) + \" reason=\" + (e.reason === void 0 ? \"\" : e.reason) + \" src=\" + diagStack());\n    } catch (eLog) {\n    }\n    return true;\n  }\n  function startsWithXssiPrefix(content) {\n    try {\n      if (content === void 0 || content === null) return false;\n      var s = String(content);\n      if (s.length < XSSI_PREFIX_LEN) return false;\n      return s.charCodeAt(0) === 41 && s.charCodeAt(1) === 93 && s.charCodeAt(2) === 125 && s.charCodeAt(3) === 39;\n    } catch (eXssi) {\n      return false;\n    }\n  }\n  function downloadBlockReason(content, fileName) {\n    if (startsWithXssiPrefix(content)) return \"xssi-prefix\";\n    if (fileName === void 0 || fileName === null || String(fileName).trim() === \"\") return \"empty-name\";\n    return null;\n  }\n  function diagDownloadBlocked(trigger, content, fileName, reason, extra) {\n    try {\n      if (typeof aiCmDiagDownloadBlocked === \"function\") {\n        return aiCmDiagDownloadBlocked(trigger, content, fileName, reason, extra);\n      }\n    } catch (eGlobalBlocked) {\n    }\n    if (!diagOn()) return false;\n    try {\n      var e = extra || {};\n      var url = \"\";\n      try {\n        url = String(typeof location !== \"undefined\" && location && location.href || \"\");\n      } catch (eUrlB) {\n      }\n      console.log(DIAG_PREFIX + \" download-blocked reason=\" + (reason || \"(\\u043D\\u0435\\u0442)\") + \" trigger=\" + (trigger || \"(\\u043D\\u0435\\u0442)\") + \" file=\" + (fileName === void 0 || fileName === null || String(fileName) === \"\" ? \"\\u043F\\u0443\\u0441\\u0442\\u043E\\u0435\" : String(fileName)) + \" bytes100=\" + (diagHead(content, 100) || \"\\u043F\\u0443\\u0441\\u0442\\u043E\") + \" len=\" + (content === void 0 || content === null ? 0 : String(content).length) + \" mime=\" + (e.mime === void 0 ? \"(\\u043D\\u0435\\u0442)\" : e.mime) + \" url=\" + url + \" threadId=\" + (e.threadId === void 0 || e.threadId === \"\" ? \"(\\u043D\\u0435\\u0442)\" : e.threadId) + \" site=\" + (e.site === void 0 ? \"\" : e.site) + \" src=\" + diagStack());\n    } catch (eLogBlocked) {\n    }\n    return true;\n  }\n  function downloadBlob(content, fileName, mimeType, trigger, extra) {\n    var ex = extra || {};\n    var blockReason = downloadBlockReason(content, fileName);\n    if (blockReason) {\n      try {\n        diagDownloadBlocked(\n          trigger || \"builder-download\",\n          content,\n          fileName,\n          blockReason,\n          { mime: mimeType, threadId: ex.threadId, site: ex.site }\n        );\n      } catch (eDiagBlocked) {\n      }\n      return false;\n    }\n    try {\n      diagDownload(\n        trigger || \"builder-download\",\n        content,\n        fileName,\n        { mime: mimeType, threadId: ex.threadId, site: ex.site, reason: ex.reason }\n      );\n    } catch (eDiag) {\n    }\n    try {\n      var blob = new Blob([content], { type: mimeType });\n      var url = URL.createObjectURL(blob);\n      var a = document.createElement(\"a\");\n      a.href = url;\n      a.download = fileName;\n      document.body.appendChild(a);\n      a.click();\n      a.remove();\n      setTimeout(function() {\n        URL.revokeObjectURL(url);\n      }, 1e3);\n    } catch (e) {\n      console.warn(\"[export] \\u043D\\u0435 \\u0443\\u0434\\u0430\\u043B\\u043E\\u0441\\u044C \\u0441\\u043A\\u0430\\u0447\\u0430\\u0442\\u044C \\u0444\\u0430\\u0439\\u043B:\", e);\n    }\n    return true;\n  }\n  var REASONING_SECTION_TAG, ANSWER_SECTION_TAG, TXT_ROLE_MARKER_SITES, CONTAINER_MIN_CONTAINED, CONTAINER_COVER_MIN, DIAG_PREFIX, XSSI_PREFIX_LEN, Api, export_text_builders_default;\n  var init_export_text_builders = __esm({\n    \"../utils/export-text-builders.ts\"() {\n      init_buildReferenceText();\n      init_debug();\n      REASONING_SECTION_TAG = \"[REASONING]\";\n      ANSWER_SECTION_TAG = \"[ANSWER]\";\n      TXT_ROLE_MARKER_SITES = [\"qwen\"];\n      CONTAINER_MIN_CONTAINED = 2;\n      CONTAINER_COVER_MIN = 0.8;\n      DIAG_PREFIX = \"[AI CM][diag]\";\n      XSSI_PREFIX_LEN = 4;\n      Api = {\n        buildTxtFromHistory,\n        buildMdFromHistory,\n        buildJsonFromHistory,\n        downloadBlob,\n        // O-27 (защитный фикс): причина отказа точки скачивания (null — выдача разрешена) и\n        // сама точка отказа наружу — для пинов тестов и переиспользования вызывающим кодом.\n        aiCmDownloadBlockReason: downloadBlockReason,\n        aiCmDiagDownloadBlocked: diagDownloadBlocked,\n        // O-27/O-32: диагностические хелперы наружу (content.js/export-manager.js зовут их\n        // через этот объект; канон строки по-прежнему utils/debug.ts, импортированный выше).\n        aiCmDiagOn: diagOn,\n        aiCmDiagHead: diagHead,\n        aiCmDiagDownload: diagDownload,\n        // O-35: рендер reasoning контрактом DeepSeek — чистая функция наружу (пины тестов\n        // и переиспользование; на боевом пути вызывается только двумя сборщиками выше).\n        aiCmMessageTextWithReasoning: messageTextWithReasoning,\n        aiCmWithReasoningSections: withReasoningSections,\n        // O-37 (C): источник размышления для маркерного пути (reasoning, иначе поле захвата\n        // hiddenReasoning) и композиция «текст сообщения + секции» — чистые функции наружу;\n        // на боевом пути их зовут только buildTxtFromHistory/buildMdFromHistory выше.\n        aiCmReasoningOfMessageForExport: reasoningOfMessageForExport,\n        aiCmMarkersMessageTextWithReasoning: markersMessageTextWithReasoning,\n        // O-36 (D2): маркеры ролей txt-экспорта — чистые предикаты наружу (пины тестов;\n        // на боевом пути вызываются только сборщиком buildTxtFromHistory выше).\n        aiCmTxtRoleMarker: txtRoleMarker,\n        aiCmIsTxtRoleMarkerHistory: isTxtRoleMarkerHistory,\n        aiCmTxtRoleMarkerSites: TXT_ROLE_MARKER_SITES,\n        // O-36 (D2.1): маркер роли md (Qwen Studio), текст сообщения для маркерного пути\n        // (с фолбэком на .content) и контейнер-чистка — чистые функции наружу для пинов\n        // и переиспользования; на боевом пути их зовут только два сборщика выше.\n        aiCmMdRoleMarker: mdRoleMarker,\n        aiCmMessageTextForMarkers: messageTextForMarkers,\n        aiCmDropContainerMessages: dropContainerMessages,\n        aiCmDiagTxtRoleStructure: diagTxtRoleStructure,\n        aiCmContainerRules: { minContained: CONTAINER_MIN_CONTAINED, coverMin: CONTAINER_COVER_MIN }\n      };\n      export_text_builders_default = Api;\n    }\n  });\n\n  // ../utils/chatgpt-conversation-parser.ts\n  var chatgpt_conversation_parser_exports = {};\n  __export(chatgpt_conversation_parser_exports, {\n    getConvIdFromPath: () => getConvIdFromPath,\n    orderChatGPTMapping: () => orderChatGPTMapping,\n    parseChatGPTConversation: () => parseChatGPTConversation,\n    sanitizeChatGPTText: () => sanitizeChatGPTText,\n    shouldResetChatConversation: () => shouldResetChatConversation,\n    shouldResetConversationOnNav: () => shouldResetConversationOnNav\n  });\n  function getConvIdFromPath(pathname) {\n    try {\n      var m = String(pathname || \"\").match(/\\/c\\/([A-Za-z0-9_-]+)/);\n      return m ? m[1] : \"\";\n    } catch (e) {\n      return \"\";\n    }\n  }\n  function shouldResetChatConversation(prevId, newId) {\n    if (!newId) return false;\n    return prevId !== newId;\n  }\n  function shouldResetConversationOnNav(prevId, newId) {\n    var p = prevId == null ? \"\" : String(prevId);\n    var n = newId == null ? \"\" : String(newId);\n    return p !== n;\n  }\n  function sanitizeChatGPTText(s) {\n    if (typeof s !== \"string\") return s;\n    return String(s).replace(/\\uE200entity\\uE202([^\\uE200\\uE201]*?)\\uE201/g, function(m, payload) {\n      try {\n        var arr = JSON.parse(payload);\n        if (Array.isArray(arr) && arr.length > 1 && typeof arr[1] === \"string\" && arr[1]) return arr[1];\n      } catch (e) {\n        swallowSoft(e, \"chatgpt-utils:sanitizeChatGPTText-entity\");\n      }\n      try {\n        var mt = String(payload).match(/\"([^\"]+)\"/g);\n        if (mt && mt.length > 1) {\n          var v = mt[1].replace(/^\"|\"$/g, \"\");\n          if (v) return v;\n        }\n      } catch (e2) {\n      }\n      return \"\";\n    }).replace(/\\uE200(?:cite|image_group)\\uE202[^\\uE200\\uE201]*?\\uE201/g, \"\").replace(/[\\uE000-\\uF8FF]/g, \"\").replace(/\\[entity\\](?:\\[[^\\]]*\\])+/g, \"\").replace(/\\[entity\\]/g, \"\").replace(/\\[cite:[^\\]]*\\]/g, \"\").replace(/[ \\t]{2,}/g, \" \");\n  }\n  function orderChatGPTMapping(mapping) {\n    var keys = Object.keys(mapping || {});\n    if (!keys.length) return [];\n    var byId = {};\n    for (var i = 0; i < keys.length; i++) {\n      var k = keys[i];\n      var n = mapping[k];\n      var nid = n && n.id != null ? String(n.id) : k;\n      byId[nid] = k;\n    }\n    var hasParent = false;\n    var hasChildren = false;\n    for (var p = 0; p < keys.length; p++) {\n      var np = mapping[keys[p]];\n      if (np && np.parent !== void 0) hasParent = true;\n      if (np && Array.isArray(np.children) && np.children.length) hasChildren = true;\n    }\n    var childrenOf = {};\n    for (var c0 = 0; c0 < keys.length; c0++) childrenOf[keys[c0]] = [];\n    var roots = [];\n    for (var m = 0; m < keys.length; m++) {\n      var kk = keys[m];\n      var nn = mapping[kk];\n      var pid = nn && nn.parent != null ? String(nn.parent) : null;\n      var pk = pid ? byId[pid] || pid : null;\n      if (pk) {\n        if (childrenOf[pk]) childrenOf[pk].push(kk);\n      } else if (hasParent) {\n        roots.push(kk);\n      }\n    }\n    if (!hasParent) {\n      if (hasChildren) {\n        var isChild = {};\n        for (var c1 = 0; c1 < keys.length; c1++) {\n          var n1 = mapping[keys[c1]];\n          if (n1 && Array.isArray(n1.children)) {\n            for (var c2 = 0; c2 < n1.children.length; c2++) {\n              var cid = String(n1.children[c2]);\n              isChild[byId[cid] || cid] = true;\n            }\n          }\n        }\n        roots = keys.filter(function(k2) {\n          return !isChild[k2];\n        });\n        if (!roots.length) roots = [keys[0]];\n      } else {\n        return keys.slice().sort(function(a, b) {\n          var ca = mapping[a] && mapping[a].message && mapping[a].message.create_time || 0;\n          var cb = mapping[b] && mapping[b].message && mapping[b].message.create_time || 0;\n          return ca - cb;\n        });\n      }\n    }\n    roots.sort(function(a, b) {\n      var ca = mapping[a] && mapping[a].message && mapping[a].message.create_time || 0;\n      var cb = mapping[b] && mapping[b].message && mapping[b].message.create_time || 0;\n      return ca - cb;\n    });\n    var out = [];\n    var visited = {};\n    function walk(k2) {\n      if (!k2 || visited[k2] || mapping[k2] === void 0) return;\n      visited[k2] = true;\n      out.push(k2);\n      var ch = childrenOf[k2] || [];\n      if (mapping[k2] && Array.isArray(mapping[k2].children) && mapping[k2].children.length) {\n        ch = mapping[k2].children.map(function(cid2) {\n          return byId[String(cid2)] || String(cid2);\n        });\n      }\n      for (var w = 0; w < ch.length; w++) walk(ch[w]);\n    }\n    for (var r = 0; r < roots.length; r++) walk(roots[r]);\n    for (var u = 0; u < keys.length; u++) if (!visited[keys[u]]) out.push(keys[u]);\n    return out;\n  }\n  function parseChatGPTConversation(json) {\n    var messages = [];\n    var model = \"\";\n    var tokens = 0;\n    try {\n      if (!json || typeof json !== \"object\") {\n        return { messages: [], model: CHATGPT_DEFAULT_MODEL, tokens: 0 };\n      }\n      if (json.model_slug) model = json.model_slug;\n      if (typeof json.tokens === \"number\") tokens = json.tokens;\n      var mapping = json.mapping || {};\n      var keys = orderChatGPTMapping(mapping);\n      for (var i = 0; i < keys.length; i++) {\n        var node = mapping[keys[i]];\n        var msg = node && node.message;\n        if (!msg || !msg.content) continue;\n        var role = msg.author && msg.author.role;\n        if (role === \"system\" || role === \"tool\") continue;\n        var parts = msg.content.parts || [];\n        var contentPieces = [];\n        for (var j = 0; j < parts.length; j++) {\n          if (typeof parts[j] === \"string\") {\n            contentPieces.push(sanitizeChatGPTText(parts[j]));\n          } else if (parts[j] && typeof parts[j] === \"object\" && typeof parts[j].text === \"string\") {\n            contentPieces.push(sanitizeChatGPTText(parts[j].text));\n          }\n        }\n        var content = contentPieces.join(\"\\n\").trim();\n        if (content) {\n          messages.push({\n            role: role === \"assistant\" ? \"assistant\" : \"user\",\n            content\n          });\n        }\n      }\n    } catch (e) {\n      swallowSoft(e, \"chatgpt-utils:parseChatGPTConversation\");\n    }\n    if (!model) model = CHATGPT_DEFAULT_MODEL;\n    return { messages, model, tokens };\n  }\n  var CHATGPT_DEFAULT_MODEL;\n  var init_chatgpt_conversation_parser = __esm({\n    \"../utils/chatgpt-conversation-parser.ts\"() {\n      init_debug();\n      CHATGPT_DEFAULT_MODEL = \"gpt-4o\";\n    }\n  });\n\n  // ../utils/perplexity-parser.ts\n  var perplexity_parser_exports = {};\n  __export(perplexity_parser_exports, {\n    parsePerplexityThread: () => parsePerplexityThread,\n    stripPerplexityHistoryTruncation: () => stripPerplexityHistoryTruncation\n  });\n  function parsePerplexityThread(json) {\n    function getTrim(obj, name) {\n      if (!obj || typeof obj !== \"object\") return void 0;\n      var rec = obj;\n      var keys = Object.keys(rec);\n      for (var i2 = 0; i2 < keys.length; i2++) {\n        if (keys[i2].trim() === name) return rec[keys[i2]];\n      }\n      return void 0;\n    }\n    function isAttachmentUrl(url) {\n      if (typeof url !== \"string\" || !url) return false;\n      return url.indexOf(\"ppl-ai-file-upload\") !== -1 && url.indexOf(\"/attachments/\") !== -1;\n    }\n    function isImageAttachment(url) {\n      if (!isAttachmentUrl(url)) return false;\n      var path = String(url).split(\"#\")[0].split(\"?\")[0];\n      return /\\.(jpe?g|png|gif|webp|bmp|svg|avif)$/i.test(path);\n    }\n    function stripUrlQuery(url) {\n      return String(url).split(\"#\")[0].split(\"?\")[0];\n    }\n    function collectEntryImages(entry2) {\n      var out = [];\n      var atts = getTrim(entry2, \"attachments\");\n      if (!Array.isArray(atts)) return out;\n      for (var a = 0; a < atts.length; a++) {\n        var att = atts[a];\n        var url = \"\";\n        if (typeof att === \"string\") url = att;\n        else if (att && typeof att === \"object\") url = getTrim(att, \"url\") || getTrim(att, \"src\") || \"\";\n        if (!isImageAttachment(url)) continue;\n        var clean = stripUrlQuery(url);\n        if (out.indexOf(clean) === -1) out.push(clean);\n      }\n      return out;\n    }\n    function basenameOf(url) {\n      var parts = String(url || \"\").split(\"/\");\n      return parts[parts.length - 1] || \"\";\n    }\n    var model = \"\";\n    var pieces = [];\n    var ids = [];\n    var count = 0;\n    var lastText = \"\";\n    var messages = [];\n    try {\n      var entries = getTrim(json, \"entries\");\n      if (!Array.isArray(entries)) entries = [];\n      for (var i = 0; i < entries.length; i++) {\n        var entry = entries[i];\n        if (!entry || typeof entry !== \"object\") continue;\n        var queryStr = getTrim(entry, \"query_str\") || \"\";\n        var displayModel = getTrim(entry, \"display_model\") || \"\";\n        var userSelectedModel = getTrim(entry, \"user_selected_model\") || \"\";\n        var threadUrlSlug = getTrim(entry, \"thread_url_slug\") || \"\";\n        var entryModel = displayModel || userSelectedModel || \"\";\n        if (entryModel) model = entryModel;\n        var entryId = threadUrlSlug || \"entry\" + i;\n        var entryImages = collectEntryImages(entry);\n        if (queryStr && typeof queryStr === \"string\" && queryStr.trim()) {\n          var userText = queryStr.trim();\n          for (var im = 0; im < entryImages.length; im++) {\n            userText += \"\\n[Image: \" + entryImages[im] + \"]\";\n          }\n          pieces.push(userText);\n          ids.push(entryId + \"_user\");\n          count++;\n          lastText = userText;\n          messages.push({ role: \"user\", text: userText });\n        }\n        var entryImageNames = [];\n        for (var inm = 0; inm < entryImages.length; inm++) {\n          entryImageNames.push(basenameOf(entryImages[inm]));\n        }\n        var blocks = getTrim(entry, \"blocks\");\n        var assistantPushed = false;\n        if (Array.isArray(blocks)) {\n          var assistantTextParts = [];\n          for (var j = 0; j < blocks.length; j++) {\n            var block = blocks[j];\n            if (!block || typeof block !== \"object\") continue;\n            var wfBlock = getTrim(block, \"workflow_block\");\n            if (wfBlock && typeof wfBlock === \"object\") {\n              var steps = getTrim(wfBlock, \"steps\");\n              if (Array.isArray(steps)) {\n                for (var s = 0; s < steps.length; s++) {\n                  var step = steps[s];\n                  if (!step || typeof step !== \"object\") continue;\n                  var items = getTrim(step, \"items\");\n                  if (Array.isArray(items)) {\n                    for (var it = 0; it < items.length; it++) {\n                      var item = items[it];\n                      if (!item || typeof item !== \"object\") continue;\n                      if (getTrim(item, \"type\") === \"WORKFLOW_ITEM_TEXT\") {\n                        var payload = getTrim(item, \"payload\");\n                        if (payload && typeof payload === \"object\") {\n                          var textPayload = getTrim(payload, \"text_payload\");\n                          if (textPayload && typeof textPayload === \"object\") {\n                            var text = getTrim(textPayload, \"text\");\n                            if (typeof text === \"string\" && text.trim()) {\n                              assistantTextParts.push(text.trim());\n                            }\n                          }\n                        }\n                      }\n                    }\n                  }\n                }\n              }\n            }\n            var wrBlock = getTrim(block, \"web_result_block\");\n            if (wrBlock && typeof wrBlock === \"object\") {\n              var webResults = getTrim(wrBlock, \"web_results\");\n              if (Array.isArray(webResults)) {\n                for (var w = 0; w < webResults.length; w++) {\n                  var wr = webResults[w];\n                  if (!wr || typeof wr !== \"object\") continue;\n                  var wrName = getTrim(wr, \"name\") || \"\";\n                  var wrSnippet = getTrim(wr, \"snippet\") || \"\";\n                  var wrUrl = getTrim(wr, \"url\");\n                  if (isAttachmentUrl(wrUrl)) continue;\n                  if (!wrUrl && wrName && !wrSnippet && entryImageNames.indexOf(basenameOf(String(wrName))) !== -1) continue;\n                  if (wrName || wrSnippet) {\n                    var wrText = (wrName ? wrName + \": \" : \"\") + (wrSnippet || \"\");\n                    if (wrText.trim()) assistantTextParts.push(\"[source] \" + wrText.trim());\n                  }\n                }\n              }\n            }\n          }\n          if (assistantTextParts.length > 0) {\n            var assistantText = assistantTextParts.join(\"\\n\").trim();\n            if (assistantText) {\n              pieces.push(assistantText);\n              ids.push(entryId + \"_assistant\");\n              count++;\n              lastText = assistantText;\n              messages.push({ role: \"assistant\", text: assistantText });\n              assistantPushed = true;\n            }\n          }\n        }\n        if (!assistantPushed) {\n          var entryText = getTrim(entry, \"text\");\n          if (typeof entryText === \"string\" && entryText.trim()) {\n            var stepsJson = null;\n            try {\n              stepsJson = JSON.parse(entryText);\n            } catch (e1) {\n              stepsJson = null;\n            }\n            var stepItems = null;\n            if (Array.isArray(stepsJson)) stepItems = stepsJson;\n            else if (stepsJson && typeof stepsJson === \"object\") {\n              stepItems = Object.keys(stepsJson).map(function(k) {\n                return stepsJson[k];\n              });\n            }\n            var answerText = \"\";\n            if (stepItems) {\n              for (var si = 0; si < stepItems.length; si++) {\n                var stepItem = stepItems[si];\n                if (!stepItem || typeof stepItem !== \"object\") continue;\n                if (getTrim(stepItem, \"step_type\") !== \"FINAL\") continue;\n                var stepContent = getTrim(stepItem, \"content\");\n                var contentObj = null;\n                if (typeof stepContent === \"string\") {\n                  try {\n                    contentObj = JSON.parse(stepContent);\n                  } catch (e2) {\n                    contentObj = null;\n                  }\n                } else if (stepContent && typeof stepContent === \"object\") {\n                  contentObj = stepContent;\n                }\n                if (!contentObj) continue;\n                var answerRaw = getTrim(contentObj, \"answer\");\n                if (typeof answerRaw === \"string\" && answerRaw.trim()) {\n                  var answerObj = null;\n                  try {\n                    answerObj = JSON.parse(answerRaw);\n                  } catch (e3) {\n                    answerObj = null;\n                  }\n                  if (answerObj && typeof answerObj === \"object\") {\n                    var answerField = getTrim(answerObj, \"answer\");\n                    if (typeof answerField === \"string\") answerText = answerField;\n                  } else if (typeof answerObj === \"string\") {\n                    answerText = answerObj;\n                  }\n                } else if (answerRaw && typeof answerRaw === \"object\") {\n                  var answerField2 = getTrim(answerRaw, \"answer\");\n                  if (typeof answerField2 === \"string\") answerText = answerField2;\n                }\n                if (answerText) break;\n              }\n            }\n            answerText = answerText.trim();\n            if (answerText) {\n              pieces.push(answerText);\n              ids.push(entryId + \"_assistant\");\n              count++;\n              lastText = answerText;\n              messages.push({ role: \"assistant\", text: answerText });\n            }\n          }\n        }\n      }\n    } catch (e) {\n      swallowSoft(e, \"perplexity-utils:parsePerplexityThread\");\n    }\n    return {\n      text: pieces.join(\"\\n\"),\n      count,\n      lastText,\n      modelSlug: model,\n      pieces,\n      ids,\n      messages,\n      model\n    };\n  }\n  function stripPerplexityHistoryTruncation(urlStr) {\n    var src = String(urlStr || \"\");\n    if (!src) return src;\n    var hash = \"\";\n    var h = src.indexOf(\"#\");\n    if (h !== -1) {\n      hash = src.slice(h);\n      src = src.slice(0, h);\n    }\n    var q = src.indexOf(\"?\");\n    if (q === -1) return src + hash;\n    var base = src.slice(0, q);\n    var parts = src.slice(q + 1).split(\"&\");\n    var kept = [];\n    for (var i = 0; i < parts.length; i++) {\n      if (!parts[i]) continue;\n      var name = parts[i].split(\"=\")[0];\n      if (name === \"limit\" || name === \"offset\" || name === \"from_first\") continue;\n      kept.push(parts[i]);\n    }\n    return base + (kept.length ? \"?\" + kept.join(\"&\") : \"\") + hash;\n  }\n  var init_perplexity_parser = __esm({\n    \"../utils/perplexity-parser.ts\"() {\n      init_debug();\n    }\n  });\n\n  // ../utils/archive-import.ts\n  function archiveStorageKey(convId) {\n    return ARCHIVE_KEY_PREFIX + String(convId == null ? \"\" : convId);\n  }\n  function convSourceStorageKey(convId) {\n    return CONV_SOURCE_KEY_PREFIX + String(convId == null ? \"\" : convId);\n  }\n  function normalizeText(v) {\n    if (typeof v !== \"string\") return \"\";\n    return v.replace(/\\r\\n?/g, \"\\n\").replace(/[ \\t]+$/gm, \"\").trim();\n  }\n  function collapseWs(v) {\n    return String(v == null ? \"\" : v).replace(/\\s+/g, \" \").trim();\n  }\n  function hash6(s) {\n    var str = String(s == null ? \"\" : s);\n    var h = 5381;\n    for (var i = 0; i < str.length; i++) {\n      h = (h << 5) + h + str.charCodeAt(i) | 0;\n    }\n    var hex = (h >>> 0).toString(16);\n    while (hex.length < 6) hex = \"0\" + hex;\n    return hex.slice(-6);\n  }\n  function normalizeRole(role) {\n    var r = collapseWs(role).toLowerCase();\n    if (r === \"user\" || r === \"human\" || r === \"me\" || r === \"prompt\" || r === \"you\") return \"user\";\n    if (r === \"assistant\" || r === \"model\" || r === \"bot\" || r === \"ai\" || r === \"gpt\" || r === \"gemini\" || r === \"claude\") return \"assistant\";\n    return \"\";\n  }\n  function toMs(v) {\n    if (typeof v === \"number\" && isFinite(v)) {\n      return v > 1e12 ? Math.round(v) : Math.round(v * 1e3);\n    }\n    if (typeof v === \"string\" && v) {\n      var t = Date.parse(v);\n      if (!isNaN(t)) return t;\n      var trimmed = v.replace(/(\\.\\d{3})\\d+/, \"$1\");\n      if (trimmed !== v) {\n        t = Date.parse(trimmed);\n        if (!isNaN(t)) return t;\n      }\n    }\n    return 0;\n  }\n  function arrayifyConversations(json) {\n    if (Array.isArray(json)) return json;\n    if (!json || typeof json !== \"object\") return [];\n    if (Array.isArray(json.conversations)) return json.conversations;\n    return [json];\n  }\n  function resolveOrderChatGPTMapping(deps) {\n    if (deps && typeof deps.orderChatGPTMapping === \"function\") return deps.orderChatGPTMapping;\n    try {\n      if (typeof __require === \"function\") {\n        var m = (init_chatgpt_conversation_parser(), __toCommonJS(chatgpt_conversation_parser_exports));\n        if (m && typeof m.orderChatGPTMapping === \"function\") return m.orderChatGPTMapping;\n      }\n    } catch (eR) {\n    }\n    try {\n      if (typeof window !== \"undefined\" && window.ChatGPTConversationParser && typeof window.ChatGPTConversationParser.orderChatGPTMapping === \"function\") {\n        return window.ChatGPTConversationParser.orderChatGPTMapping;\n      }\n    } catch (eW) {\n    }\n    return null;\n  }\n  function resolveSanitizeChatGPT(deps) {\n    if (deps && typeof deps.sanitizeChatGPTText === \"function\") return deps.sanitizeChatGPTText;\n    try {\n      if (typeof __require === \"function\") {\n        var m = (init_chatgpt_conversation_parser(), __toCommonJS(chatgpt_conversation_parser_exports));\n        if (m && typeof m.sanitizeChatGPTText === \"function\") return m.sanitizeChatGPTText;\n      }\n    } catch (eR) {\n    }\n    try {\n      if (typeof window !== \"undefined\" && window.ChatGPTConversationParser && typeof window.ChatGPTConversationParser.sanitizeChatGPTText === \"function\") {\n        return window.ChatGPTConversationParser.sanitizeChatGPTText;\n      }\n    } catch (eW) {\n    }\n    return function(s) {\n      return s;\n    };\n  }\n  function resolveParsePerplexityThread(deps) {\n    if (deps && typeof deps.parsePerplexityThread === \"function\") return deps.parsePerplexityThread;\n    try {\n      if (typeof __require === \"function\") {\n        var m = (init_perplexity_parser(), __toCommonJS(perplexity_parser_exports));\n        if (m && typeof m.parsePerplexityThread === \"function\") return m.parsePerplexityThread;\n      }\n    } catch (eR) {\n    }\n    try {\n      if (typeof window !== \"undefined\" && typeof window.parsePerplexityThread === \"function\") {\n        return window.parsePerplexityThread;\n      }\n    } catch (eW) {\n    }\n    return null;\n  }\n  function normalizeMessage(raw, ordinal) {\n    if (!raw || typeof raw !== \"object\") return null;\n    var role = normalizeRole(raw.role != null ? raw.role : raw.sender);\n    if (!role) return null;\n    var text = normalizeText(raw.text != null ? raw.text : raw.content);\n    if (!text) return null;\n    return {\n      id: typeof raw.id === \"string\" && raw.id ? raw.id : \"a:\" + (ordinal || 0) + \":\" + hash6(role + \"\\0\" + text),\n      role,\n      text,\n      ts: typeof raw.ts === \"number\" && isFinite(raw.ts) ? raw.ts : toMs(raw.created_at != null ? raw.created_at : raw.time)\n    };\n  }\n  function finalizeConversation(conv) {\n    var messages = [];\n    var textLen = 0;\n    var raw = conv && Array.isArray(conv.messages) ? conv.messages : [];\n    for (var i = 0; i < raw.length; i++) {\n      var m = normalizeMessage(raw[i], messages.length);\n      if (!m) continue;\n      if (messages.length >= MAX_MESSAGES_PER_CONVERSATION) break;\n      messages.push(m);\n      textLen += m.text.length;\n    }\n    var title = normalizeText(conv && conv.title);\n    if (!title) {\n      for (var t = 0; t < messages.length; t++) {\n        if (messages[t].role === \"user\") {\n          title = collapseWs(messages[t].text).slice(0, 80);\n          break;\n        }\n      }\n    }\n    return {\n      convId: String(conv && conv.convId || \"\"),\n      service: conv && conv.service || \"\",\n      format: conv && conv.format || \"\",\n      title,\n      updatedAt: conv && typeof conv.updatedAt === \"number\" && isFinite(conv.updatedAt) ? conv.updatedAt : 0,\n      messages,\n      count: messages.length,\n      textLen\n    };\n  }\n  function looksLikeGeminiActivity(item) {\n    if (!item || typeof item !== \"object\") return false;\n    var url = String(item.titleUrl || item.title_url || \"\");\n    if (/gemini\\.google\\.com\\/app\\//.test(url)) return true;\n    return collapseWs(item.header).toLowerCase() === \"gemini apps\";\n  }\n  function detectArchiveFormat(json) {\n    var items = arrayifyConversations(json);\n    if (!items.length) return null;\n    var limit = Math.min(items.length, 20);\n    for (var i = 0; i < limit; i++) {\n      var it = items[i];\n      if (!it || typeof it !== \"object\") continue;\n      if (it.mapping && typeof it.mapping === \"object\") return FORMATS.CHATGPT_CONVERSATIONS;\n      if (Array.isArray(it.chat_messages)) return FORMATS.CLAUDE_CONVERSATIONS;\n      if (Array.isArray(it.entries) || it.thread && Array.isArray(it.thread.entries)) return FORMATS.PERPLEXITY_THREADS;\n      if (looksLikeGeminiActivity(it)) return FORMATS.GEMINI_TAKEOUT;\n    }\n    return null;\n  }\n  function serviceOfFormat(format) {\n    return SERVICE_BY_FORMAT[format] || \"\";\n  }\n  function messageTextOf(m) {\n    if (!m || typeof m !== \"object\") return \"\";\n    return normalizeText(m.text != null ? m.text : m.content);\n  }\n  function aggregateMessageList(conv) {\n    if (Array.isArray(conv.messages)) return conv.messages;\n    if (Array.isArray(conv.chat_messages)) return conv.chat_messages;\n    if (Array.isArray(conv.entries)) return conv.entries;\n    return [];\n  }\n  function detectFullTextAnomaly(conv) {\n    if (!conv || typeof conv !== \"object\") return null;\n    if (typeof conv.full !== \"string\") return null;\n    var fullText = normalizeText(conv.full);\n    if (!fullText) return null;\n    var raw = aggregateMessageList(conv);\n    var msgsLen = 0;\n    for (var i = 0; i < raw.length; i++) msgsLen += messageTextOf(raw[i]).length;\n    if (fullText.length <= msgsLen) return null;\n    return {\n      convId: String(conv.convId || conv.conversation_id || conv.uuid || conv.id || \"\"),\n      code: \"full-longer-than-messages\",\n      fullLen: fullText.length,\n      msgsLen,\n      over: fullText.length - msgsLen,\n      msgCount: raw.length\n    };\n  }\n  function collectFullTextAnomalies(json) {\n    var items = arrayifyConversations(json);\n    var out = [];\n    for (var i = 0; i < items.length; i++) {\n      var a = detectFullTextAnomaly(items[i]);\n      if (a) out.push(a);\n    }\n    return out;\n  }\n  function reportFullTextAnomalies(json, deps) {\n    var d = deps || {};\n    var warn = typeof d.warn === \"function\" ? d.warn : typeof console !== \"undefined\" && console && typeof console.warn === \"function\" ? function(msg) {\n      console.warn(msg);\n    } : null;\n    var anomalies = collectFullTextAnomalies(json);\n    if (warn) {\n      for (var i = 0; i < anomalies.length; i++) {\n        var a = anomalies[i];\n        warn(\"[AI CM][archive] \\u0430\\u043D\\u043E\\u043C\\u0430\\u043B\\u0438\\u044F full>messages convId=\" + (a.convId || \"-\") + \" full=\" + a.fullLen + \" msgs=\" + a.msgsLen + \" over=\" + a.over + \" msgsCount=\" + a.msgCount);\n      }\n    }\n    return anomalies;\n  }\n  function extractConvIdFromUrl(url) {\n    var m = String(url == null ? \"\" : url).match(/\\/app\\/(?!prompts(?:\\/|$)|new(?:\\/|$)|apikey(?:\\/|$))([A-Za-z0-9_-]+)/);\n    return m ? m[1] : \"\";\n  }\n  function geminiActivityUserText(rec) {\n    var title = normalizeText(rec.title != null ? rec.title : rec.description);\n    if (!title) return \"\";\n    return normalizeText(title.replace(GEMINI_PROMPT_PREFIX, \"\"));\n  }\n  function geminiActivityAssistantText(rec) {\n    var direct = normalizeText(rec.response != null ? rec.response : rec.answer);\n    if (direct) return direct;\n    var details = rec.details;\n    if (!Array.isArray(details)) return \"\";\n    for (var i = 0; i < details.length; i++) {\n      var d = details[i];\n      if (!d || typeof d !== \"object\") continue;\n      if (!GEMINI_RESPONSE_DETAIL.test(collapseWs(d.name))) continue;\n      var val = normalizeText(d.value);\n      if (val) return val;\n    }\n    return \"\";\n  }\n  function parseGeminiTakeout(json) {\n    var items = Array.isArray(json) ? json : json && Array.isArray(json.items) ? json.items : [];\n    var order = [];\n    var byConv = {};\n    var skippedNoConvId = 0;\n    var skippedEmpty = 0;\n    for (var i = 0; i < items.length; i++) {\n      var rec = items[i];\n      if (!rec || typeof rec !== \"object\") {\n        skippedEmpty++;\n        continue;\n      }\n      var convId = extractConvIdFromUrl(rec.titleUrl != null ? rec.titleUrl : rec.title_url);\n      if (!convId) {\n        skippedNoConvId++;\n        continue;\n      }\n      var ts = toMs(rec.time);\n      var userText = geminiActivityUserText(rec);\n      var assistantText = geminiActivityAssistantText(rec);\n      if (!userText && !assistantText) {\n        skippedEmpty++;\n        continue;\n      }\n      if (!byConv[convId]) {\n        byConv[convId] = {\n          convId,\n          service: SERVICE_BY_FORMAT[FORMATS.GEMINI_TAKEOUT],\n          format: FORMATS.GEMINI_TAKEOUT,\n          title: \"\",\n          updatedAt: 0,\n          messages: []\n        };\n        order.push(convId);\n      }\n      var conv = byConv[convId];\n      if (userText) conv.messages.push({ role: \"user\", text: userText, ts });\n      if (assistantText) conv.messages.push({ role: \"assistant\", text: assistantText, ts });\n      if (ts > conv.updatedAt) conv.updatedAt = ts;\n      if (!conv.title && userText) conv.title = collapseWs(userText).slice(0, 80);\n    }\n    var out = [];\n    for (var k = 0; k < order.length; k++) out.push(finalizeConversation(byConv[order[k]]));\n    return { conversations: out, skippedNoConvId, skippedEmpty };\n  }\n  function parseChatGPTArchive(json, deps) {\n    var orderFn = resolveOrderChatGPTMapping(deps);\n    if (!orderFn) return { conversations: [], error: \"chatgpt-parser-unavailable\", skippedNoConvId: 0, skippedEmpty: 0 };\n    var sanitize = resolveSanitizeChatGPT(deps);\n    var items = arrayifyConversations(json);\n    var out = [];\n    var skippedNoConvId = 0;\n    var skippedEmpty = 0;\n    for (var i = 0; i < items.length; i++) {\n      var c = items[i];\n      if (!c || typeof c !== \"object\" || !c.mapping || typeof c.mapping !== \"object\") {\n        skippedEmpty++;\n        continue;\n      }\n      var convId = String(c.conversation_id || c.id || \"\");\n      if (!convId) {\n        skippedNoConvId++;\n        continue;\n      }\n      var keys = orderFn(c.mapping);\n      var messages = [];\n      for (var k = 0; k < keys.length; k++) {\n        var node = c.mapping[keys[k]];\n        var msg = node && node.message;\n        if (!msg || !msg.content) continue;\n        var role = normalizeRole(msg.author && msg.author.role);\n        if (!role) continue;\n        var parts = Array.isArray(msg.content.parts) ? msg.content.parts : [];\n        var pieces = [];\n        for (var p = 0; p < parts.length; p++) {\n          if (typeof parts[p] === \"string\") {\n            var s = sanitize(parts[p]);\n            if (normalizeText(s)) pieces.push(normalizeText(s));\n          } else if (parts[p] && typeof parts[p] === \"object\" && typeof parts[p].text === \"string\") {\n            var s2 = sanitize(parts[p].text);\n            if (normalizeText(s2)) pieces.push(normalizeText(s2));\n          }\n        }\n        var text = normalizeText(pieces.join(\"\\n\"));\n        if (!text) continue;\n        messages.push({ role, text, ts: toMs(msg.create_time) });\n      }\n      out.push(finalizeConversation({\n        convId,\n        service: SERVICE_BY_FORMAT[FORMATS.CHATGPT_CONVERSATIONS],\n        format: FORMATS.CHATGPT_CONVERSATIONS,\n        title: c.title,\n        updatedAt: toMs(c.update_time != null ? c.update_time : c.create_time),\n        messages\n      }));\n    }\n    return { conversations: out, skippedNoConvId, skippedEmpty };\n  }\n  function claudeMessageText(msg) {\n    var parts = [];\n    if (Array.isArray(msg.content)) {\n      for (var i = 0; i < msg.content.length; i++) {\n        var b = msg.content[i];\n        if (!b || typeof b !== \"object\") continue;\n        if (b.type === \"text\" && typeof b.text === \"string\") {\n          var t = normalizeText(b.text);\n          if (t) parts.push(t);\n        }\n      }\n    }\n    if (!parts.length) {\n      var fallback = normalizeText(msg.text);\n      if (fallback) parts.push(fallback);\n    }\n    return normalizeText(parts.join(\"\\n\"));\n  }\n  function parseClaudeArchive(json) {\n    var items = arrayifyConversations(json);\n    var out = [];\n    var skippedNoConvId = 0;\n    var skippedEmpty = 0;\n    for (var i = 0; i < items.length; i++) {\n      var c = items[i];\n      if (!c || typeof c !== \"object\" || !Array.isArray(c.chat_messages)) {\n        skippedEmpty++;\n        continue;\n      }\n      var convId = String(c.uuid || c.id || \"\");\n      if (!convId) {\n        skippedNoConvId++;\n        continue;\n      }\n      var messages = [];\n      for (var k = 0; k < c.chat_messages.length; k++) {\n        var msg = c.chat_messages[k];\n        if (!msg || typeof msg !== \"object\") continue;\n        var role = normalizeRole(msg.sender);\n        if (!role) continue;\n        var text = claudeMessageText(msg);\n        if (!text) continue;\n        messages.push({\n          id: typeof msg.uuid === \"string\" && msg.uuid ? msg.uuid : void 0,\n          role,\n          text,\n          ts: toMs(msg.created_at)\n        });\n      }\n      var providerDate = String(c.updated_at || c.created_at || \"\");\n      out.push(finalizeConversation({\n        convId,\n        service: SERVICE_BY_FORMAT[FORMATS.CLAUDE_CONVERSATIONS],\n        format: FORMATS.CLAUDE_CONVERSATIONS,\n        title: c.name || c.title,\n        updatedAt: toMs(providerDate),\n        messages\n      }));\n    }\n    return { conversations: out, skippedNoConvId, skippedEmpty };\n  }\n  function parsePerplexityArchive(json, deps) {\n    var parseThread = resolveParsePerplexityThread(deps);\n    if (!parseThread) return { conversations: [], error: \"perplexity-parser-unavailable\", skippedNoConvId: 0, skippedEmpty: 0 };\n    var items = arrayifyConversations(json);\n    var out = [];\n    var skippedNoConvId = 0;\n    var skippedEmpty = 0;\n    for (var i = 0; i < items.length; i++) {\n      var it = items[i];\n      if (!it || typeof it !== \"object\") {\n        skippedEmpty++;\n        continue;\n      }\n      var thread = it.thread && typeof it.thread === \"object\" ? it.thread : it;\n      var entries = Array.isArray(it.entries) ? it.entries : Array.isArray(thread.entries) ? thread.entries : null;\n      if (!entries) {\n        skippedEmpty++;\n        continue;\n      }\n      var convId = String(thread.id || thread.slug || it.id || it.slug || \"\");\n      if (!convId) {\n        skippedNoConvId++;\n        continue;\n      }\n      var parsed = parseThread({ entries }) || {};\n      var msgs = Array.isArray(parsed.messages) ? parsed.messages : [];\n      var messages = [];\n      for (var k = 0; k < msgs.length; k++) {\n        var m = msgs[k];\n        if (!m || typeof m !== \"object\") continue;\n        var role = normalizeRole(m.role);\n        var text = normalizeText(m.text);\n        if (!role || !text) continue;\n        messages.push({ role, text, ts: 0 });\n      }\n      out.push(finalizeConversation({\n        convId,\n        service: SERVICE_BY_FORMAT[FORMATS.PERPLEXITY_THREADS],\n        format: FORMATS.PERPLEXITY_THREADS,\n        title: thread.title || it.title,\n        updatedAt: toMs(thread.updated_at || it.updated_at),\n        messages\n      }));\n    }\n    return { conversations: out, skippedNoConvId, skippedEmpty };\n  }\n  function parseArchive(json, deps) {\n    reportFullTextAnomalies(json, deps);\n    var format = detectArchiveFormat(json);\n    if (!format) {\n      return { ok: false, format: null, service: \"\", error: \"unknown-format\", conversations: [], skippedNoConvId: 0, skippedEmpty: 0 };\n    }\n    var res;\n    if (format === FORMATS.GEMINI_TAKEOUT) res = parseGeminiTakeout(json);\n    else if (format === FORMATS.CHATGPT_CONVERSATIONS) res = parseChatGPTArchive(json, deps);\n    else if (format === FORMATS.CLAUDE_CONVERSATIONS) res = parseClaudeArchive(json);\n    else res = parsePerplexityArchive(json, deps);\n    if (res.error) {\n      return { ok: false, format, service: serviceOfFormat(format), error: res.error, conversations: [], skippedNoConvId: 0, skippedEmpty: 0 };\n    }\n    return {\n      ok: true,\n      format,\n      service: serviceOfFormat(format),\n      error: null,\n      conversations: res.conversations || [],\n      skippedNoConvId: res.skippedNoConvId || 0,\n      skippedEmpty: res.skippedEmpty || 0\n    };\n  }\n  function parseArchiveText(text, deps) {\n    var json = null;\n    try {\n      json = JSON.parse(String(text == null ? \"\" : text));\n    } catch (e) {\n      return { ok: false, format: null, service: \"\", error: \"invalid-json\", conversations: [], skippedNoConvId: 0, skippedEmpty: 0 };\n    }\n    return parseArchive(json, deps);\n  }\n  function buildArchiveRecord(conversation, extra) {\n    var conv = finalizeConversation(conversation);\n    var x = extra || {};\n    return {\n      v: ARCHIVE_RECORD_VERSION,\n      convId: conv.convId,\n      service: conv.service,\n      format: conv.format,\n      title: conv.title,\n      count: conv.count,\n      textLen: conv.textLen,\n      messages: conv.messages,\n      importedAt: typeof x.importedAt === \"number\" ? x.importedAt : Date.now(),\n      fileName: String(x.fileName || \"\")\n    };\n  }\n  function buildConvSourceRecord(archiveRecord, extra) {\n    var r = archiveRecord || {};\n    var x = extra || {};\n    var rec = {\n      kind: SOURCE_ARCHIVE,\n      service: String(r.service || \"\"),\n      format: String(r.format || \"\"),\n      count: typeof r.count === \"number\" ? r.count : 0,\n      textLen: typeof r.textLen === \"number\" ? r.textLen : 0,\n      importedAt: typeof r.importedAt === \"number\" ? r.importedAt : Date.now()\n    };\n    rec.label = describeSource(rec);\n    if (x.fileName) rec.fileName = String(x.fileName);\n    return rec;\n  }\n  function buildLiveSourceRecord(extra) {\n    var x = extra || {};\n    var rec = {\n      kind: SOURCE_LIVE,\n      service: String(x.service || \"\"),\n      format: \"\",\n      count: typeof x.count === \"number\" ? x.count : 0,\n      textLen: typeof x.textLen === \"number\" ? x.textLen : 0,\n      importedAt: 0\n    };\n    rec.label = describeSource(rec);\n    return rec;\n  }\n  function describeSource(record) {\n    if (!record || typeof record !== \"object\") return \"\\u2014\";\n    if (record.kind === SOURCE_LIVE) return \"live (\\u0441\\u0435\\u0442\\u044C/DOM)\";\n    if (record.kind !== SOURCE_ARCHIVE) return \"\\u2014\";\n    var fmt = FORMAT_LABEL[record.format] || record.format || \"\\u0430\\u0440\\u0445\\u0438\\u0432\";\n    var n = typeof record.count === \"number\" && record.count > 0 ? \" \\xB7 \" + record.count + \" \\u0441\\u043E\\u043E\\u0431\\u0449.\" : \"\";\n    return \"\\u0430\\u0440\\u0445\\u0438\\u0432: \" + fmt + n;\n  }\n  function sourceBadge(record) {\n    if (!record || typeof record !== \"object\") return \"\";\n    if (record.kind === SOURCE_ARCHIVE) return \"\\u{1F4E6} \\u0430\\u0440\\u0445\\u0438\\u0432\";\n    if (record.kind === SOURCE_LIVE) return \"\\u26A1 live\";\n    return \"\";\n  }\n  function isArchiveRecordFor(record, convId) {\n    if (!record || typeof record !== \"object\") return false;\n    if (!convId) return false;\n    return String(record.convId || \"\") === String(convId);\n  }\n  function recordBytes(rec) {\n    try {\n      return JSON.stringify(rec).length;\n    } catch (e) {\n      return Infinity;\n    }\n  }\n  function planArchiveImport(conversations, opts) {\n    var o = opts || {};\n    var perConv = typeof o.maxConversationBytes === \"number\" ? o.maxConversationBytes : MAX_CONVERSATION_BYTES;\n    var total = typeof o.maxTotalBytes === \"number\" ? o.maxTotalBytes : MAX_TOTAL_BYTES;\n    var fileName = o.fileName || \"\";\n    var importedAt = typeof o.importedAt === \"number\" ? o.importedAt : Date.now();\n    var accepted = [];\n    var skipped = [];\n    var used = 0;\n    var list = Array.isArray(conversations) ? conversations : [];\n    for (var i = 0; i < list.length; i++) {\n      var conv = list[i];\n      if (!conv || !conv.convId) {\n        skipped.push({ convId: \"\", reason: \"no-conv-id\", bytes: 0 });\n        continue;\n      }\n      if (!conv.messages || !conv.messages.length) {\n        skipped.push({ convId: conv.convId, reason: \"empty\", bytes: 0 });\n        continue;\n      }\n      var rec = buildArchiveRecord(conv, { fileName, importedAt });\n      var bytes = recordBytes(rec);\n      if (bytes > perConv) {\n        skipped.push({ convId: conv.convId, reason: \"too-large\", bytes });\n        continue;\n      }\n      if (used + bytes > total) {\n        skipped.push({ convId: conv.convId, reason: \"budget-exceeded\", bytes });\n        continue;\n      }\n      used += bytes;\n      accepted.push(rec);\n    }\n    return { accepted, skipped, bytes: used };\n  }\n  var ARCHIVE_KEY_PREFIX, CONV_SOURCE_KEY_PREFIX, SOURCE_ARCHIVE, SOURCE_LIVE, ARCHIVE_RECORD_VERSION, FORMATS, SERVICE_BY_FORMAT, FORMAT_LABEL, MAX_CONVERSATION_BYTES, MAX_TOTAL_BYTES, MAX_MESSAGES_PER_CONVERSATION, MAX_ARCHIVE_SIZE, GEMINI_PROMPT_PREFIX, GEMINI_RESPONSE_DETAIL, Api2, archive_import_default;\n  var init_archive_import = __esm({\n    \"../utils/archive-import.ts\"() {\n      ARCHIVE_KEY_PREFIX = \"aiCmArchive:\";\n      CONV_SOURCE_KEY_PREFIX = \"aiCmConvSource:\";\n      SOURCE_ARCHIVE = \"archive\";\n      SOURCE_LIVE = \"live\";\n      ARCHIVE_RECORD_VERSION = 1;\n      FORMATS = {\n        GEMINI_TAKEOUT: \"gemini-takeout\",\n        CHATGPT_CONVERSATIONS: \"chatgpt-conversations\",\n        CLAUDE_CONVERSATIONS: \"claude-conversations\",\n        PERPLEXITY_THREADS: \"perplexity-threads\"\n      };\n      SERVICE_BY_FORMAT = {};\n      SERVICE_BY_FORMAT[FORMATS.GEMINI_TAKEOUT] = \"gemini\";\n      SERVICE_BY_FORMAT[FORMATS.CHATGPT_CONVERSATIONS] = \"chatgpt\";\n      SERVICE_BY_FORMAT[FORMATS.CLAUDE_CONVERSATIONS] = \"claude\";\n      SERVICE_BY_FORMAT[FORMATS.PERPLEXITY_THREADS] = \"perplexity\";\n      FORMAT_LABEL = {};\n      FORMAT_LABEL[FORMATS.GEMINI_TAKEOUT] = \"Gemini Takeout\";\n      FORMAT_LABEL[FORMATS.CHATGPT_CONVERSATIONS] = \"ChatGPT conversations.json\";\n      FORMAT_LABEL[FORMATS.CLAUDE_CONVERSATIONS] = \"Claude export\";\n      FORMAT_LABEL[FORMATS.PERPLEXITY_THREADS] = \"Perplexity threads\";\n      MAX_CONVERSATION_BYTES = 2 * 1024 * 1024;\n      MAX_TOTAL_BYTES = 8 * 1024 * 1024;\n      MAX_MESSAGES_PER_CONVERSATION = 5e3;\n      MAX_ARCHIVE_SIZE = 50 * 1024 * 1024;\n      GEMINI_PROMPT_PREFIX = /^(prompted|asked|you asked|said|запрос:?|вы спросили:?|запрос\\s)\\s*/i;\n      GEMINI_RESPONSE_DETAIL = /^(response|answer|ответ|ответ модели|model response)$/i;\n      Api2 = {\n        ARCHIVE_KEY_PREFIX,\n        CONV_SOURCE_KEY_PREFIX,\n        ARCHIVE_RECORD_VERSION,\n        FORMATS,\n        SERVICE_BY_FORMAT,\n        FORMAT_LABEL,\n        SOURCE_ARCHIVE,\n        SOURCE_LIVE,\n        MAX_CONVERSATION_BYTES,\n        MAX_TOTAL_BYTES,\n        MAX_MESSAGES_PER_CONVERSATION,\n        MAX_ARCHIVE_SIZE,\n        archiveStorageKey,\n        convSourceStorageKey,\n        normalizeText,\n        normalizeRole,\n        normalizeMessage,\n        hash6,\n        toMs,\n        detectArchiveFormat,\n        serviceOfFormat,\n        detectFullTextAnomaly,\n        collectFullTextAnomalies,\n        reportFullTextAnomalies,\n        extractConvIdFromUrl,\n        parseGeminiTakeout,\n        parseChatGPTArchive,\n        parseClaudeArchive,\n        parsePerplexityArchive,\n        parseArchive,\n        parseArchiveText,\n        buildArchiveRecord,\n        buildConvSourceRecord,\n        buildLiveSourceRecord,\n        describeSource,\n        sourceBadge,\n        isArchiveRecordFor,\n        recordBytes,\n        planArchiveImport\n      };\n      archive_import_default = Api2;\n    }\n  });\n\n  // entry-options.js\n  var require_entry_options = __commonJS({\n    \"entry-options.js\"(exports, module) {\n      init_platform();\n      init_export_text_builders();\n      init_archive_import();\n      init_perplexity_parser();\n      init_chatgpt_conversation_parser();\n      (function() {\n        \"use strict\";\n        var BINDINGS = [\n          { key: \"data-i18n\", target: \"textContent\" },\n          { key: \"data-i18n-placeholder\", target: \"placeholder\" },\n          { key: \"data-i18n-title\", target: \"title\" },\n          { key: \"data-i18n-aria-label\", target: \"aria-label\" },\n          // M-4.4: alt скриншотов руководства и карточек документации.\n          { key: \"data-i18n-alt\", target: \"alt\" }\n        ];\n        function aiCmI18nAvailable() {\n          return typeof chrome !== \"undefined\" && !!chrome.i18n && typeof chrome.i18n.getMessage === \"function\";\n        }\n        function aiCmI18nMessage3(key) {\n          try {\n            if (aiCmI18nAvailable()) {\n              return chrome.i18n.getMessage(key) || \"\";\n            }\n          } catch (eMessage) {\n            return \"\";\n          }\n          return \"\";\n        }\n        function aiCmI18nApply(root) {\n          var scope = root || (typeof document !== \"undefined\" ? document : null);\n          if (!scope || typeof scope.querySelectorAll !== \"function\") return 0;\n          var applied = 0;\n          for (var i = 0; i < BINDINGS.length; i++) {\n            var binding = BINDINGS[i];\n            var nodes = scope.querySelectorAll(\"[\" + binding.key + \"]\");\n            for (var j = 0; j < nodes.length; j++) {\n              var message = aiCmI18nMessage3(nodes[j].getAttribute(binding.key));\n              if (!message) continue;\n              if (binding.target === \"textContent\") nodes[j].textContent = message;\n              else nodes[j].setAttribute(binding.target, message);\n              applied++;\n            }\n          }\n          return applied;\n        }\n        function aiCmI18nBoot() {\n          if (!aiCmI18nAvailable()) return;\n          aiCmI18nApply(document);\n        }\n        if (typeof document !== \"undefined\") {\n          if (document.readyState === \"loading\") {\n            document.addEventListener(\"DOMContentLoaded\", aiCmI18nBoot);\n          } else {\n            aiCmI18nBoot();\n          }\n        }\n        if (typeof module !== \"undefined\" && module.exports) {\n          module.exports = {\n            aiCmI18nApply,\n            aiCmI18nMessage: aiCmI18nMessage3,\n            aiCmI18nAvailable,\n            bindings: BINDINGS\n          };\n        }\n      })();\n      console.log(\"AI Context Monitor: \\u041D\\u0430\\u0441\\u0442\\u0440\\u043E\\u0439\\u043A\\u0438 \\u0437\\u0430\\u0433\\u0440\\u0443\\u0436\\u0435\\u043D\\u044B\");\n      var siteEl = document.getElementById(\"stat-site\");\n      var modelEl = document.getElementById(\"stat-model\");\n      var tokensEl = document.getElementById(\"stat-tokens\");\n      var limitEl = document.getElementById(\"stat-limit\");\n      var percentEl = document.getElementById(\"stat-percent\");\n      var modelSelect = document.getElementById(\"model-select\");\n      var customLimit = document.getElementById(\"custom-limit\");\n      var showWidget = document.getElementById(\"show-widget\");\n      var apiKeyInput = document.getElementById(\"api-key\");\n      var toggleApiKeyBtn = document.getElementById(\"toggle-api-key\");\n      var exactCountCheckbox = document.getElementById(\"exact-count\");\n      var exactCountWarningEl = document.getElementById(\"exact-count-warning\");\n      var aiCmByokUiDisabled = aiCmIsFirefox();\n      var versionEl = document.querySelector(\".version\");\n      var exportMdBtn = document.getElementById(\"export-md\");\n      var exportJsonBtn = document.getElementById(\"export-json\");\n      var exportPdfBtn = document.getElementById(\"export-pdf\");\n      var exportTxtBtn = document.getElementById(\"export-txt\");\n      var exportHintEl = document.getElementById(\"export-hint\");\n      var staleWarningEl = document.getElementById(\"stale-warning\");\n      var exportDiagBtn = document.getElementById(\"export-diag\");\n      var sourceEl = document.getElementById(\"stat-source\");\n      function percentColor(p) {\n        if (p < 50) return \"#22c55e\";\n        if (p < 80) return \"#eab308\";\n        return \"#ef4444\";\n      }\n      try {\n        manifest = chrome.runtime.getManifest();\n        if (versionEl && manifest.version) versionEl.textContent = \"v\" + manifest.version;\n      } catch (e) {\n        aiCmPopupDiagLine(\"manifest-version\", { err: String(e) });\n      }\n      var manifest;\n      var privacyLink = document.getElementById(\"privacy-link\");\n      privacyLink && privacyLink.addEventListener(\"click\", function(e) {\n        e.preventDefault();\n        try {\n          chrome.tabs.create({ url: chrome.runtime.getURL(\"privacy/privacy.html\") });\n        } catch (ePrivacy) {\n          console.warn(\"[privacy] \\u043D\\u0435 \\u0443\\u0434\\u0430\\u043B\\u043E\\u0441\\u044C \\u043E\\u0442\\u043A\\u0440\\u044B\\u0442\\u044C \\u043F\\u043E\\u043B\\u0438\\u0442\\u0438\\u043A\\u0443 \\u043A\\u043E\\u043D\\u0444\\u0438\\u0434\\u0435\\u043D\\u0446\\u0438\\u0430\\u043B\\u044C\\u043D\\u043E\\u0441\\u0442\\u0438:\", ePrivacy);\n        }\n      });\n      var helpLink = document.getElementById(\"help-link\");\n      helpLink && helpLink.addEventListener(\"click\", function(e) {\n        e.preventDefault();\n        try {\n          chrome.tabs.create({ url: chrome.runtime.getURL(\"docs/index.html\") });\n        } catch (eHelp) {\n          console.warn(\"[help] \\u043D\\u0435 \\u0443\\u0434\\u0430\\u043B\\u043E\\u0441\\u044C \\u043E\\u0442\\u043A\\u0440\\u044B\\u0442\\u044C \\u0440\\u0443\\u043A\\u043E\\u0432\\u043E\\u0434\\u0441\\u0442\\u0432\\u043E:\", eHelp);\n        }\n      });\n      var siteLabels = {\n        \"chatgpt\": \"ChatGPT\",\n        \"gemini\": \"Gemini\",\n        \"aistudio\": \"Google AI Studio\",\n        \"google_search\": \"Google Search AI\",\n        \"deepseek\": \"DeepSeek\",\n        \"claude\": \"Claude\",\n        \"perplexity\": \"Perplexity\"\n      };\n      chrome.storage.sync.get([\"selectedModel\", \"customLimit\", \"showWidget\"], function(data) {\n        if (data.selectedModel) modelSelect.value = data.selectedModel;\n        if (data.customLimit) customLimit.value = data.customLimit;\n        if (data.showWidget !== void 0) showWidget.checked = data.showWidget;\n      });\n      var AI_CM_BYOK_SESSION_KEY = \"aiCmApiKeySession\";\n      var AI_CM_BYOK_LEGACY_KEYS = [\n        \"ai_cm_gemini_api_key\",\n        \"ai_cm_api_key\",\n        \"ai_cm_byok_key\",\n        \"aiCmGeminiApiKey\",\n        \"aiCmApiKey\",\n        \"gemini_api_key\"\n      ];\n      var apiKeyStatusEl = document.getElementById(\"api-key-status\");\n      var removeApiKeyBtn = document.getElementById(\"api-key-remove\");\n      function aiCmFirstLegacyByokKey(data) {\n        for (var iLk = 0; iLk < AI_CM_BYOK_LEGACY_KEYS.length; iLk++) {\n          var vLk = data ? data[AI_CM_BYOK_LEGACY_KEYS[iLk]] : null;\n          if (typeof vLk === \"string\" && vLk) return vLk;\n        }\n        return \"\";\n      }\n      function aiCmPurgeLegacyByokKeys() {\n        try {\n          if (!chrome.storage || !chrome.storage.local || typeof chrome.storage.local.remove !== \"function\") return;\n          chrome.storage.local.remove(AI_CM_BYOK_LEGACY_KEYS);\n        } catch (ePurge) {\n          console.warn(\"[AI CM][catch] aiCmPurgeLegacyByokKeys:\", ePurge);\n        }\n      }\n      function aiCmI18nMessage2(key, fallback, substitutions) {\n        try {\n          if (typeof chrome !== \"undefined\" && chrome.i18n && typeof chrome.i18n.getMessage === \"function\") {\n            var message = substitutions ? chrome.i18n.getMessage(key, substitutions) : chrome.i18n.getMessage(key);\n            if (message) return message;\n          }\n        } catch (eMessage) {\n          aiCmPopupDiagLine(\"aiCmI18nMessage\", { err: String(eMessage) });\n        }\n        return fallback;\n      }\n      function aiCmRenderApiKeyStatus(hasKey) {\n        if (!apiKeyStatusEl) return;\n        apiKeyStatusEl.textContent = hasKey ? aiCmI18nMessage2(\"options_byok_status_set\", \"\\u041A\\u043B\\u044E\\u0447: \\u0437\\u0430\\u0434\\u0430\\u043D\") : aiCmI18nMessage2(\"options_byok_status_unset\", \"\\u041A\\u043B\\u044E\\u0447: \\u043D\\u0435 \\u0437\\u0430\\u0434\\u0430\\u043D\");\n      }\n      function aiCmSaveByokKey(value) {\n        try {\n          if (chrome.storage && chrome.storage.session && typeof chrome.storage.session.set === \"function\") {\n            var patch = {};\n            patch[AI_CM_BYOK_SESSION_KEY] = value;\n            chrome.storage.session.set(patch);\n          }\n        } catch (eSet) {\n          console.warn(\"[AI CM][catch] aiCmSaveByokKey:\", eSet);\n        }\n        aiCmPurgeLegacyByokKeys();\n      }\n      var aiCmByokHasKeyState = null;\n      function aiCmRenderExactCountWarning(show) {\n        if (!exactCountWarningEl) return;\n        exactCountWarningEl.textContent = show ? aiCmI18nMessage2(\n          \"options_exact_count_nokey\",\n          \"\\u041A\\u043B\\u044E\\u0447 API \\u043D\\u0435 \\u043D\\u0430\\u0439\\u0434\\u0435\\u043D. \\u0412\\u0432\\u0435\\u0434\\u0438\\u0442\\u0435 \\u043A\\u043B\\u044E\\u0447 \\u0437\\u0430\\u043D\\u043E\\u0432\\u043E, \\u0447\\u0442\\u043E\\u0431\\u044B \\u0432\\u043A\\u043B\\u044E\\u0447\\u0438\\u0442\\u044C \\u0442\\u043E\\u0447\\u043D\\u044B\\u0439 \\u043F\\u043E\\u0434\\u0441\\u0447\\u0451\\u0442\"\n        ) : \"\";\n      }\n      function aiCmSyncExactCountWithByok(hasKey) {\n        if (hasKey !== true && hasKey !== false) return;\n        aiCmByokHasKeyState = hasKey;\n        if (hasKey || !exactCountCheckbox || !exactCountCheckbox.checked) {\n          aiCmRenderExactCountWarning(false);\n          return;\n        }\n        exactCountCheckbox.checked = false;\n        aiCmRenderExactCountWarning(true);\n        try {\n          chrome.storage.local.set({ ai_cm_exact_token_count: false });\n        } catch (eSync) {\n          console.warn(\"[AI CM][catch] aiCmSyncExactCountWithByok:\", eSync);\n        }\n      }\n      function aiCmLoadByokKey() {\n        try {\n          let onSession = function(data) {\n            if (handled) return;\n            handled = true;\n            var key = data ? data[AI_CM_BYOK_SESSION_KEY] : \"\";\n            if (typeof key === \"string\" && key) {\n              if (apiKeyInput) apiKeyInput.value = key;\n              aiCmRenderApiKeyStatus(true);\n              aiCmSyncExactCountWithByok(true);\n              return;\n            }\n            aiCmRenderApiKeyStatus(false);\n            aiCmSyncExactCountWithByok(false);\n            try {\n              chrome.storage.local.get(AI_CM_BYOK_LEGACY_KEYS, function(dl) {\n                var legacy = aiCmFirstLegacyByokKey(dl);\n                if (!legacy) return;\n                aiCmSaveByokKey(legacy);\n                if (apiKeyInput) apiKeyInput.value = legacy;\n                aiCmRenderApiKeyStatus(true);\n                aiCmSyncExactCountWithByok(true);\n                console.log(\"[AI CM][byok] migrated plaintext\\u2192session\");\n              });\n            } catch (eLeg) {\n              aiCmPopupDiagLine(\"aiCmLoadByokKey\", { err: String(eLeg) });\n            }\n          };\n          if (!chrome.storage || !chrome.storage.session || typeof chrome.storage.session.get !== \"function\") {\n            aiCmRenderApiKeyStatus(false);\n            return;\n          }\n          var handled = false;\n          var maybePromise = chrome.storage.session.get([AI_CM_BYOK_SESSION_KEY], onSession);\n          if (maybePromise && typeof maybePromise.then === \"function\") {\n            maybePromise.then(onSession, function() {\n              if (!handled) {\n                handled = true;\n                aiCmRenderApiKeyStatus(false);\n                aiCmSyncExactCountWithByok(false);\n              }\n            });\n          }\n        } catch (eLoad) {\n          aiCmRenderApiKeyStatus(false);\n        }\n      }\n      chrome.storage.local.get([\"ai_cm_exact_token_count\"], function(data) {\n        if (aiCmByokUiDisabled) {\n          [apiKeyInput, exactCountCheckbox].forEach(function(el) {\n            var section = el && el.closest ? el.closest(\".section\") : null;\n            if (section) {\n              section.hidden = true;\n              section.style.display = \"none\";\n            }\n          });\n          if (data.ai_cm_exact_token_count) chrome.storage.local.set({ ai_cm_exact_token_count: false });\n          return;\n        }\n        if (data.ai_cm_exact_token_count === void 0) return;\n        exactCountCheckbox.checked = !!data.ai_cm_exact_token_count;\n        if (aiCmByokHasKeyState === false) aiCmSyncExactCountWithByok(false);\n      });\n      if (!aiCmByokUiDisabled) aiCmLoadByokKey();\n      modelSelect && modelSelect.addEventListener(\"change\", function() {\n        chrome.storage.sync.set({ selectedModel: modelSelect.value });\n      });\n      var CUSTOM_LIMIT_DEBOUNCE_MS = 500;\n      var customLimitWriteTimer = null;\n      function aiCmCancelCustomLimitWrite() {\n        if (customLimitWriteTimer !== null) {\n          clearTimeout(customLimitWriteTimer);\n          customLimitWriteTimer = null;\n        }\n      }\n      customLimit && customLimit.addEventListener(\"input\", function() {\n        aiCmCancelCustomLimitWrite();\n        customLimitWriteTimer = setTimeout(function() {\n          customLimitWriteTimer = null;\n          var value = customLimit.value ? parseInt(customLimit.value) : null;\n          chrome.storage.sync.set({ customLimit: value });\n        }, CUSTOM_LIMIT_DEBOUNCE_MS);\n      });\n      customLimit && customLimit.addEventListener(\"change\", function() {\n        if (!customLimit.value) {\n          aiCmCancelCustomLimitWrite();\n          customLimit.placeholder = aiCmI18nMessage2(\"options_limit_placeholder\", \"\\u0410\\u0432\\u0442\\u043E\");\n          chrome.storage.sync.set({ customLimit: null });\n        }\n      });\n      showWidget && showWidget.addEventListener(\"change\", function() {\n        chrome.storage.sync.set({ showWidget: showWidget.checked });\n      });\n      var debugLogsCheckbox = document.getElementById(\"debugLogs\");\n      chrome.storage.local.get([\"aiCmDebugLogs\"], function(data) {\n        if (debugLogsCheckbox) debugLogsCheckbox.checked = data.aiCmDebugLogs === true;\n      });\n      debugLogsCheckbox && debugLogsCheckbox.addEventListener(\"change\", function() {\n        chrome.storage.local.set({ aiCmDebugLogs: debugLogsCheckbox.checked });\n      });\n      var includeHiddenCheckbox = document.getElementById(\"aiCmIncludeHiddenInExport\");\n      chrome.storage.local.get([\"aiCmIncludeHiddenInExport\"], function(data) {\n        if (includeHiddenCheckbox) includeHiddenCheckbox.checked = !!(data && data.aiCmIncludeHiddenInExport === true);\n      });\n      includeHiddenCheckbox && includeHiddenCheckbox.addEventListener(\"change\", function() {\n        chrome.storage.local.set({ aiCmIncludeHiddenInExport: includeHiddenCheckbox.checked });\n      });\n      try {\n        chrome.storage.onChanged.addListener(function(changes, areaName) {\n          if (areaName !== \"local\") return;\n          if (changes.aiCmIncludeHiddenInExport && includeHiddenCheckbox) {\n            includeHiddenCheckbox.checked = changes.aiCmIncludeHiddenInExport.newValue === true;\n          }\n        });\n      } catch (eHiddenSync) {\n        aiCmPopupDiagLine(\"hidden-sync\", { err: String(eHiddenSync) });\n      }\n      var proactiveCheckbox = document.getElementById(\"aiCmProactive\");\n      var proactiveNotifyCheckbox = document.getElementById(\"aiCmProactiveNotify\");\n      chrome.storage.local.get([\"aiCmProactive\", \"aiCmProactiveNotify\"], function(data) {\n        if (proactiveCheckbox) proactiveCheckbox.checked = !(data && data.aiCmProactive === false);\n        if (proactiveNotifyCheckbox) proactiveNotifyCheckbox.checked = !!(data && data.aiCmProactiveNotify === true);\n      });\n      proactiveCheckbox && proactiveCheckbox.addEventListener(\"change\", function() {\n        chrome.storage.local.set({ aiCmProactive: proactiveCheckbox.checked });\n      });\n      proactiveNotifyCheckbox && proactiveNotifyCheckbox.addEventListener(\"change\", function() {\n        chrome.storage.local.set({ aiCmProactiveNotify: proactiveNotifyCheckbox.checked });\n      });\n      try {\n        chrome.storage.onChanged.addListener(function(changes, areaName) {\n          if (areaName !== \"local\") return;\n          if (changes.aiCmProactive && proactiveCheckbox) {\n            proactiveCheckbox.checked = changes.aiCmProactive.newValue !== false;\n          }\n          if (changes.aiCmProactiveNotify && proactiveNotifyCheckbox) {\n            proactiveNotifyCheckbox.checked = changes.aiCmProactiveNotify.newValue === true;\n          }\n        });\n      } catch (e) {\n        aiCmPopupDiagLine(\"proactive-changed\", { err: String(e) });\n      }\n      var thrLowInput = document.getElementById(\"aiCmProactiveLow\");\n      var thrMedInput = document.getElementById(\"aiCmProactiveMedium\");\n      var thrHighInput = document.getElementById(\"aiCmProactiveHigh\");\n      var PROACTIVE_THRESHOLDS_DEFAULT = [70, 85, 95];\n      function validProactiveThresholds(arr) {\n        try {\n          if (!Array.isArray(arr) || arr.length < 3) return null;\n          var out = [];\n          for (var i = 0; i < 3; i++) {\n            var n = parseInt(arr[i], 10);\n            if (isNaN(n) || n < 1 || n > 100) return null;\n            out.push(n);\n          }\n          if (!(out[0] < out[1] && out[1] < out[2])) return null;\n          return out;\n        } catch (e) {\n          return null;\n        }\n      }\n      function readProactiveThresholdInputs() {\n        return [\n          thrLowInput ? thrLowInput.value : void 0,\n          thrMedInput ? thrMedInput.value : void 0,\n          thrHighInput ? thrHighInput.value : void 0\n        ];\n      }\n      function fillProactiveThresholdInputs(arr) {\n        if (!arr || arr.length < 3) return;\n        if (thrLowInput) thrLowInput.value = arr[0];\n        if (thrMedInput) thrMedInput.value = arr[1];\n        if (thrHighInput) thrHighInput.value = arr[2];\n      }\n      function applyProactiveThresholdInputs() {\n        try {\n          var raw = readProactiveThresholdInputs();\n          var t = validProactiveThresholds(raw);\n          if (!t) {\n            console.warn(\"[AI CM][thresholds] \\u0431\\u0438\\u0442\\u044B\\u0439 \\u0432\\u0432\\u043E\\u0434 \\u043F\\u043E\\u0440\\u043E\\u0433\\u043E\\u0432 \\u2192 \\u0444\\u043E\\u043B\\u0431\\u044D\\u043A [70,85,95]\", raw);\n            t = PROACTIVE_THRESHOLDS_DEFAULT;\n          }\n          fillProactiveThresholdInputs(t);\n          chrome.storage.local.set({ aiCmProactiveThresholds: t });\n        } catch (eP) {\n          aiCmPopupDiagLine(\"applyProactiveThresholdInputs\", { err: String(eP) });\n        }\n      }\n      try {\n        chrome.storage.local.get([\"aiCmProactiveThresholds\"], function(data) {\n          try {\n            var hasStored = data && data.aiCmProactiveThresholds !== void 0;\n            var t = validProactiveThresholds(hasStored ? data.aiCmProactiveThresholds : null);\n            if (hasStored && !t) {\n              console.warn(\"[AI CM][thresholds] \\u0431\\u0438\\u0442\\u044B\\u0435 \\u0441\\u043E\\u0445\\u0440\\u0430\\u043D\\u0451\\u043D\\u043D\\u044B\\u0435 aiCmProactiveThresholds \\u2192 \\u0434\\u0435\\u0444\\u043E\\u043B\\u0442 [70,85,95]\", data.aiCmProactiveThresholds);\n            }\n            fillProactiveThresholdInputs(t || PROACTIVE_THRESHOLDS_DEFAULT);\n          } catch (eInit) {\n            aiCmPopupDiagLine(\"thresholds-init\", { err: String(eInit) });\n          }\n        });\n      } catch (eLoad) {\n        aiCmPopupDiagLine(\"thresholds-load\", { err: String(eLoad) });\n      }\n      [thrLowInput, thrMedInput, thrHighInput].forEach(function(el) {\n        if (!el) return;\n        el.addEventListener(\"change\", applyProactiveThresholdInputs);\n        el.addEventListener(\"blur\", applyProactiveThresholdInputs);\n      });\n      try {\n        chrome.storage.onChanged.addListener(function(changes, areaName) {\n          if (areaName === \"local\" && changes.aiCmProactiveThresholds) {\n            var t2 = validProactiveThresholds(changes.aiCmProactiveThresholds.newValue);\n            if (!t2) return;\n            if (document.activeElement === thrLowInput || document.activeElement === thrMedInput || document.activeElement === thrHighInput) return;\n            fillProactiveThresholdInputs(t2);\n          }\n        });\n      } catch (e) {\n        aiCmPopupDiagLine(\"thresholds-changed\", { err: String(e) });\n      }\n      apiKeyInput && apiKeyInput.addEventListener(\"input\", function() {\n        aiCmSaveByokKey(apiKeyInput.value);\n        aiCmRenderApiKeyStatus(!!apiKeyInput.value);\n        aiCmSyncExactCountWithByok(!!apiKeyInput.value);\n      });\n      removeApiKeyBtn && removeApiKeyBtn.addEventListener(\"click\", function() {\n        try {\n          if (chrome.storage && chrome.storage.session && typeof chrome.storage.session.remove === \"function\") {\n            chrome.storage.session.remove([AI_CM_BYOK_SESSION_KEY]);\n          }\n        } catch (eRm) {\n          console.warn(\"[AI CM][catch] removeApiKey:\", eRm);\n        }\n        aiCmPurgeLegacyByokKeys();\n        if (apiKeyInput) apiKeyInput.value = \"\";\n        aiCmRenderApiKeyStatus(false);\n        aiCmSyncExactCountWithByok(false);\n      });\n      toggleApiKeyBtn && toggleApiKeyBtn.addEventListener(\"click\", function() {\n        if (apiKeyInput.type === \"password\") {\n          apiKeyInput.type = \"text\";\n          toggleApiKeyBtn.textContent = \"\\u{1F648}\";\n        } else {\n          apiKeyInput.type = \"password\";\n          toggleApiKeyBtn.textContent = \"\\u{1F441}\";\n        }\n        toggleApiKeyBtn.setAttribute(\"aria-pressed\", String(apiKeyInput.type === \"text\"));\n      });\n      exactCountCheckbox && exactCountCheckbox.addEventListener(\"change\", function() {\n        chrome.storage.local.set({ ai_cm_exact_token_count: exactCountCheckbox.checked });\n        if (aiCmByokHasKeyState === false && exactCountCheckbox.checked) {\n          aiCmSyncExactCountWithByok(false);\n        } else {\n          aiCmRenderExactCountWarning(false);\n        }\n      });\n      var autoExportCheckbox = document.getElementById(\"aiCmAutoExport\");\n      var autoExportPctInput = document.getElementById(\"aiCmAutoExportPct\");\n      var autoExportFmtSelect = document.getElementById(\"aiCmAutoExportFmt\");\n      function normalizeAutoExportFmt(v) {\n        return v === \"md\" || v === \"json\" ? v : \"txt\";\n      }\n      function clampAutoExportPct(v) {\n        var n = parseInt(v, 10);\n        if (isNaN(n)) return null;\n        if (n < 1) n = 1;\n        if (n > 100) n = 100;\n        return n;\n      }\n      var AI_CM_AUTO_EXPORT_PCT_DEFAULT = 90;\n      function aiCmAutoExportWriteFull() {\n        try {\n          var pctFull = clampAutoExportPct(autoExportPctInput.value);\n          pctFull = pctFull === null ? AI_CM_AUTO_EXPORT_PCT_DEFAULT : pctFull;\n          autoExportPctInput.value = pctFull;\n          chrome.storage.local.set({\n            aiCmAutoExport: autoExportCheckbox.checked === true,\n            aiCmAutoExportPct: pctFull,\n            aiCmAutoExportFmt: normalizeAutoExportFmt(autoExportFmtSelect.value)\n          });\n        } catch (eFull) {\n          aiCmPopupDiagLine(\"aiCmAutoExportWriteFull\", { err: String(eFull) });\n        }\n      }\n      try {\n        chrome.storage.local.get([\"aiCmAutoExport\", \"aiCmAutoExportPct\", \"aiCmAutoExportFmt\"], function(data) {\n          try {\n            data = data || {};\n            if (autoExportCheckbox) autoExportCheckbox.checked = data.aiCmAutoExport === true;\n            var pctInit = clampAutoExportPct(data.aiCmAutoExportPct);\n            if (autoExportPctInput) autoExportPctInput.value = pctInit === null ? AI_CM_AUTO_EXPORT_PCT_DEFAULT : pctInit;\n            if (autoExportFmtSelect) autoExportFmtSelect.value = normalizeAutoExportFmt(data.aiCmAutoExportFmt);\n            var needsNormalize = typeof data.aiCmAutoExport !== \"boolean\" || pctInit === null || normalizeAutoExportFmt(data.aiCmAutoExportFmt) !== data.aiCmAutoExportFmt;\n            if (needsNormalize) aiCmAutoExportWriteFull();\n          } catch (eInit) {\n            aiCmPopupDiagLine(\"autoexport-init\", { err: String(eInit) });\n          }\n        });\n      } catch (eLoad) {\n        aiCmPopupDiagLine(\"autoexport-load\", { err: String(eLoad) });\n      }\n      autoExportCheckbox && autoExportCheckbox.addEventListener(\"change\", aiCmAutoExportWriteFull);\n      autoExportPctInput && autoExportPctInput.addEventListener(\"change\", aiCmAutoExportWriteFull);\n      autoExportPctInput && autoExportPctInput.addEventListener(\"blur\", aiCmAutoExportWriteFull);\n      autoExportFmtSelect && autoExportFmtSelect.addEventListener(\"change\", aiCmAutoExportWriteFull);\n      try {\n        chrome.storage.onChanged.addListener(function(changes, areaName) {\n          if (areaName === \"local\" && changes.aiCmDebugLogs) {\n            debugLogsCheckbox.checked = changes.aiCmDebugLogs.newValue === true;\n          }\n          if (areaName === \"local\" && changes.aiCmAutoExportPct && autoExportPctInput && document.activeElement !== autoExportPctInput) {\n            var pct = clampAutoExportPct(changes.aiCmAutoExportPct.newValue);\n            autoExportPctInput.value = pct === null ? 90 : pct;\n          }\n        });\n      } catch (e) {\n        aiCmPopupDiagLine(\"autoexport-changed\", { err: String(e) });\n      }\n      document.getElementById(\"reset-limit\") && document.getElementById(\"reset-limit\").addEventListener(\"click\", function() {\n        aiCmCancelCustomLimitWrite();\n        customLimit.value = \"\";\n        customLimit.placeholder = aiCmI18nMessage2(\"options_limit_placeholder\", \"\\u0410\\u0432\\u0442\\u043E\");\n        chrome.storage.sync.set({ customLimit: null });\n      });\n      var chatDialogPathBySite = {\n        \"chatgpt\": /\\/(c|g|share)\\//,\n        \"gemini\": /\\/app\\//,\n        \"claude\": /\\/chat\\//,\n        \"perplexity\": /\\/(search|follow)\\//,\n        \"deepseek\": /\\/a\\//\n      };\n      function detectChatSite(hostname) {\n        if (!hostname) return null;\n        var host = String(hostname).toLowerCase();\n        if (host.indexOf(\"chatgpt.com\") !== -1) return \"chatgpt\";\n        if (host.indexOf(\"gemini.google.com\") !== -1) return \"gemini\";\n        if (host.indexOf(\"claude.ai\") !== -1) return \"claude\";\n        if (host.indexOf(\"perplexity.ai\") !== -1) return \"perplexity\";\n        if (host.indexOf(\"chat.deepseek.com\") !== -1) return \"deepseek\";\n        return null;\n      }\n      function isChatHome(hostname, pathname) {\n        var site = detectChatSite(hostname);\n        if (!site) return false;\n        return chatDialogPathBySite[site].test(String(pathname || \"\"));\n      }\n      function updateStatsFromState(state, tabHost, tabPath, fromCache) {\n        siteEl.textContent = siteLabels[state.site] || state.site || \"\\u2014\";\n        modelEl.textContent = state.model || \"\\u2014\";\n        tokensEl.textContent = typeof state.tokens === \"number\" ? state.tokens.toLocaleString() : \"\\u2014\";\n        limitEl.textContent = typeof state.limit === \"number\" ? state.limit.toLocaleString() : \"\\u2014\";\n        var p = state.percent || 0;\n        percentEl.textContent = p + \"%\";\n        percentEl.style.color = percentColor(p);\n        if (sourceEl) {\n          sourceEl.textContent = fromCache ? aiCmI18nMessage2(\"options_source_cache\", \"\\u043A\\u044D\\u0448 (\\u043F\\u0440\\u043E\\u0448\\u043B\\u0430\\u044F \\u0431\\u0435\\u0441\\u0435\\u0434\\u0430)\") : state.sourceLabel || \"\\u2014\";\n        }\n        updateStaleWarning(state, tabHost, tabPath);\n      }\n      function updateStaleWarning(state, tabHost, tabPath) {\n        if (!staleWarningEl) return;\n        var showStale = !!(state && state.stale === true && isChatHome(tabHost, tabPath));\n        if (showStale) {\n          var siteLabel = siteLabels[state.site] || state.site || aiCmI18nMessage2(\"options_stale_site_fallback\", \"\\u0441\\u0430\\u0439\\u0442\\u043E\\u043C\");\n          staleWarningEl.textContent = aiCmI18nMessage2(\"options_stale_warning\", \"\\u0418\\u043D\\u0442\\u0435\\u0433\\u0440\\u0430\\u0446\\u0438\\u044F \\u0441 \" + siteLabel + \" \\u043C\\u043E\\u0433\\u043B\\u0430 \\u0443\\u0441\\u0442\\u0430\\u0440\\u0435\\u0442\\u044C: \\u0441\\u0430\\u0439\\u0442 \\u043D\\u0435 \\u043E\\u0442\\u0434\\u0430\\u0451\\u0442 \\u0434\\u0430\\u043D\\u043D\\u044B\\u0435 \\u0434\\u0438\\u0430\\u043B\\u043E\\u0433\\u0430. \\u041F\\u0440\\u043E\\u0432\\u0435\\u0440\\u044C\\u0442\\u0435 \\u043E\\u0431\\u043D\\u043E\\u0432\\u043B\\u0435\\u043D\\u0438\\u0435 \\u0440\\u0430\\u0441\\u0448\\u0438\\u0440\\u0435\\u043D\\u0438\\u044F.\", [siteLabel]);\n          staleWarningEl.style.display = \"block\";\n        } else {\n          staleWarningEl.style.display = \"none\";\n          staleWarningEl.textContent = \"\";\n        }\n      }\n      function aiCmPopupDiagLine(tag, fields) {\n        try {\n          if (typeof aiCmDiagLine === \"function\") return aiCmDiagLine(tag, fields);\n          var on = false;\n          try {\n            on = !!(typeof sessionStorage !== \"undefined\" && sessionStorage && sessionStorage.getItem(\"aiCmDebug\") === \"1\");\n          } catch (eSess) {\n            on = false;\n          }\n          if (!on) {\n            try {\n              on = window.__aiCmDebugLogs === true;\n            } catch (eWin) {\n              return false;\n            }\n          }\n          if (!on) return false;\n          var parts = [];\n          var f = fields || {};\n          for (var k in f) {\n            if (!Object.prototype.hasOwnProperty.call(f, k)) continue;\n            var v = f[k];\n            parts.push(k + \"=\" + (v === void 0 || v === null ? \"-\" : String(v)));\n          }\n          console.log(\"[AI CM][diag] \" + tag + \" \" + parts.join(\" \"));\n          return true;\n        } catch (eDiag) {\n          return false;\n        }\n      }\n      function showNoData(message) {\n        try {\n          aiCmPopupDiagLine(\"qwen-badge\", {\n            ts: Date.now(),\n            event: \"showNoData\",\n            reason: String(message || \"-\"),\n            url: String(typeof location !== \"undefined\" && location && location.href || \"\")\n          });\n        } catch (eQnd) {\n          aiCmPopupDiagLine(\"showNoData\", { err: String(eQnd) });\n        }\n        siteEl.textContent = message || aiCmI18nMessage2(\"options_no_data\", \"\\u041D\\u0435\\u0442 \\u0434\\u0430\\u043D\\u043D\\u044B\\u0445\");\n        modelEl.textContent = \"\\u2014\";\n        tokensEl.textContent = \"\\u2014\";\n        limitEl.textContent = \"\\u2014\";\n        percentEl.textContent = \"\\u2014\";\n        percentEl.style.color = \"#8888aa\";\n      }\n      function formatTime(ts) {\n        try {\n          var d = new Date(ts);\n          return (\"0\" + d.getHours()).slice(-2) + \":\" + (\"0\" + d.getMinutes()).slice(-2);\n        } catch (e) {\n          return \"??:??\";\n        }\n      }\n      var cachedState = null;\n      function loadStats() {\n        try {\n          chrome.tabs.query({ active: true, currentWindow: true }, function(tabs) {\n            var tab = tabs && tabs[0];\n            if (!tab || !tab.url) {\n              showNoData(aiCmI18nMessage2(\"options_no_active_tab\", \"\\u041D\\u0435\\u0442 \\u0430\\u043A\\u0442\\u0438\\u0432\\u043D\\u043E\\u0439 \\u0432\\u043A\\u043B\\u0430\\u0434\\u043A\\u0438\"));\n              return;\n            }\n            if (tab.url.indexOf(\"chrome://\") === 0 || tab.url.indexOf(\"chrome-extension://\") === 0) {\n              showNoData(aiCmI18nMessage2(\"options_open_supported_site\", \"\\u041E\\u0442\\u043A\\u0440\\u043E\\u0439\\u0442\\u0435 \\u043F\\u043E\\u0434\\u0434\\u0435\\u0440\\u0436\\u0438\\u0432\\u0430\\u0435\\u043C\\u044B\\u0439 \\u0441\\u0430\\u0439\\u0442\"));\n              return;\n            }\n            var tabHost = \"\";\n            var tabPath = \"\";\n            try {\n              var activeTabUrl = new URL(tab.url);\n              tabHost = activeTabUrl.hostname;\n              tabPath = activeTabUrl.pathname;\n            } catch (e) {\n              aiCmPopupDiagLine(\"loadStats-tab-url\", { err: String(e) });\n            }\n            chrome.storage.local.get([\"aiCmState\", \"aiCmState:\" + tabHost], function(data) {\n              var state = data[\"aiCmState:\" + tabHost] || null;\n              if (!state && data.aiCmState && data.aiCmState.host === tabHost) {\n                state = data.aiCmState;\n              }\n              if (state) {\n                cachedState = state;\n                updateStatsFromState(state, tabHost, tabPath);\n                updateExportButtons();\n              } else if (cachedState && cachedState.host === tabHost) {\n                updateStatsFromState(cachedState, tabHost, tabPath, true);\n                var cachedAt = formatTime(cachedState.updatedAt);\n                siteEl.textContent += aiCmI18nMessage2(\"options_data_from\", \" \\xB7 \\u0434\\u0430\\u043D\\u043D\\u044B\\u0435 \\u043E\\u0442 \" + cachedAt, [cachedAt]);\n              } else {\n                showNoData(aiCmI18nMessage2(\"options_open_supported_site\", \"\\u041E\\u0442\\u043A\\u0440\\u043E\\u0439\\u0442\\u0435 \\u043F\\u043E\\u0434\\u0434\\u0435\\u0440\\u0436\\u0438\\u0432\\u0430\\u0435\\u043C\\u044B\\u0439 \\u0441\\u0430\\u0439\\u0442\"));\n              }\n            });\n          });\n        } catch (e) {\n          showNoData(aiCmI18nMessage2(\"options_reload_page\", \"\\u041E\\u0431\\u043D\\u043E\\u0432\\u0438\\u0442\\u0435 \\u0441\\u0442\\u0440\\u0430\\u043D\\u0438\\u0446\\u0443\"));\n        }\n      }\n      try {\n        chrome.storage.onChanged.addListener(function(changes, areaName) {\n          if (areaName !== \"local\") return;\n          var candidates = [];\n          if (changes.aiCmState && changes.aiCmState.newValue) candidates.push(changes.aiCmState.newValue);\n          for (var key in changes) {\n            if (key.indexOf(\"aiCmState:\") === 0 && changes[key] && changes[key].newValue) {\n              candidates.push(changes[key].newValue);\n            }\n          }\n          if (!candidates.length) {\n            var removedForTab = false;\n            chrome.tabs.query({ active: true, currentWindow: true }, function(tabs) {\n              var tab = tabs && tabs[0];\n              var tabHost = \"\";\n              try {\n                if (tab && tab.url) tabHost = new URL(tab.url).hostname;\n              } catch (e) {\n                aiCmPopupDiagLine(\"stats-changed-removed\", { err: String(e) });\n              }\n              removedForTab = !tabHost && (!!changes.aiCmState || !!changes[\"aiCmState:\" + tabHost]) || !!tabHost && (!!changes[\"aiCmState:\" + tabHost] || !!changes.aiCmState && !!(changes.aiCmState.oldValue && changes.aiCmState.oldValue.host === tabHost));\n              if (!removedForTab) return;\n              cachedState = null;\n              showNoData(aiCmI18nMessage2(\"options_open_supported_site\", \"\\u041E\\u0442\\u043A\\u0440\\u043E\\u0439\\u0442\\u0435 \\u043F\\u043E\\u0434\\u0434\\u0435\\u0440\\u0436\\u0438\\u0432\\u0430\\u0435\\u043C\\u044B\\u0439 \\u0441\\u0430\\u0439\\u0442\"));\n              updateStaleWarning(null, tabHost, \"\");\n              updateExportButtons();\n            });\n            return;\n          }\n          chrome.tabs.query({ active: true, currentWindow: true }, function(tabs) {\n            var tab = tabs && tabs[0];\n            var tabHost = \"\";\n            var tabPath = \"\";\n            try {\n              if (tab && tab.url) {\n                var activeTabUrl = new URL(tab.url);\n                tabHost = activeTabUrl.hostname;\n                tabPath = activeTabUrl.pathname;\n              }\n            } catch (e) {\n              aiCmPopupDiagLine(\"stats-changed-live\", { err: String(e) });\n            }\n            var best = null;\n            for (var i = 0; i < candidates.length; i++) {\n              var s = candidates[i];\n              if (s.host === tabHost && (!best || (s.updatedAt || 0) > (best.updatedAt || 0))) best = s;\n            }\n            if (best) {\n              cachedState = best;\n              updateStatsFromState(best, tabHost, tabPath);\n              updateExportButtons();\n            }\n          });\n        });\n      } catch (e) {\n        aiCmPopupDiagLine(\"stats-changed\", { err: String(e) });\n      }\n      var cachedHistory = null;\n      var currentTabHost = \"\";\n      function getActiveTabHost(cb) {\n        try {\n          chrome.tabs.query({ active: true, currentWindow: true }, function(tabs) {\n            var tab = tabs && tabs[0];\n            var host = \"\";\n            if (tab && tab.url) {\n              try {\n                host = new URL(tab.url).hostname;\n              } catch (e) {\n                host = \"\";\n              }\n            }\n            currentTabHost = host;\n            cb(host);\n          });\n        } catch (e) {\n          cb(\"\");\n        }\n      }\n      function updateExportButtons() {\n        if (!exportMdBtn || !exportJsonBtn || !exportPdfBtn) return;\n        var enabled = !!(cachedHistory && cachedHistory.host === currentTabHost);\n        var netMsgs = cachedState && cachedState.host === currentTabHost && typeof cachedState.netBaseMsgs === \"number\" ? cachedState.netBaseMsgs : 0;\n        if (!enabled && netMsgs > 0) enabled = true;\n        exportMdBtn.disabled = !enabled;\n        exportJsonBtn.disabled = !enabled;\n        exportPdfBtn.disabled = !enabled;\n        if (exportTxtBtn) exportTxtBtn.disabled = !enabled;\n        if (exportHintEl) {\n          if (enabled) {\n            var hintAt = cachedHistory && cachedHistory.host === currentTabHost ? cachedHistory.updatedAt : cachedState ? cachedState.updatedAt : 0;\n            var exportAt = formatTime(hintAt);\n            exportHintEl.textContent = aiCmI18nMessage2(\"options_ready_to_export\", \"\\u0413\\u043E\\u0442\\u043E\\u0432\\u043E \\u043A \\u044D\\u043A\\u0441\\u043F\\u043E\\u0440\\u0442\\u0443 \\xB7 \\u0434\\u0430\\u043D\\u043D\\u044B\\u0435 \\u043E\\u0442 \" + exportAt, [exportAt]);\n          } else {\n            exportHintEl.textContent = aiCmI18nMessage2(\"options_open_supported_site\", \"\\u041E\\u0442\\u043A\\u0440\\u043E\\u0439\\u0442\\u0435 \\u043F\\u043E\\u0434\\u0434\\u0435\\u0440\\u0436\\u0438\\u0432\\u0430\\u0435\\u043C\\u044B\\u0439 \\u0441\\u0430\\u0439\\u0442\");\n          }\n        }\n      }\n      function buildTxtText(hist) {\n        return export_text_builders_default ? export_text_builders_default.buildTxtFromHistory(hist || cachedHistory) : \"\";\n      }\n      function refreshExportState() {\n        getActiveTabHost(function(host) {\n          chrome.storage.local.get([\"aiCmHistory\", \"aiCmHistory:\" + host], function(data) {\n            var hist = data[\"aiCmHistory:\" + host] || null;\n            if (!hist && data.aiCmHistory && data.aiCmHistory.host === host) {\n              hist = data.aiCmHistory;\n            }\n            cachedHistory = hist;\n            updateExportButtons();\n          });\n        });\n      }\n      function pad2(n) {\n        return (n < 10 ? \"0\" : \"\") + n;\n      }\n      function buildFileName(ext, hist) {\n        hist = hist || cachedHistory;\n        var d = /* @__PURE__ */ new Date();\n        var stamp = d.getFullYear() + \"-\" + pad2(d.getMonth() + 1) + \"-\" + pad2(d.getDate()) + \"-\" + pad2(d.getHours()) + \"-\" + pad2(d.getMinutes());\n        var site = hist && hist.site || \"chat\";\n        var model = hist && hist.model || \"model\";\n        var safeSite = String(site).replace(/[^a-zA-Z0-9_-]+/g, \"-\").replace(/^-+|-+$/g, \"\") || \"chat\";\n        var safeModel = String(model).replace(/[^a-zA-Z0-9_.-]+/g, \"-\").replace(/^-+|-+$/g, \"\") || \"model\";\n        var lowConfPrefix = hist && hist.isLowConfidenceBase === true ? \"[LOW CONFIDENCE]_\" : \"\";\n        return lowConfPrefix + \"ai-context-monitor-\" + safeSite + \"-\" + safeModel + \"-\" + stamp + \".\" + ext;\n      }\n      function downloadBlob2(content, fileName, mimeType, trigger) {\n        if (export_text_builders_default && export_text_builders_default.downloadBlob) {\n          export_text_builders_default.downloadBlob(content, fileName, mimeType, trigger || \"options\");\n        }\n      }\n      function getPlatform(hist) {\n        hist = hist || cachedHistory;\n        var site = hist && hist.site;\n        return siteLabels[site] || site || \"AI Chat\";\n      }\n      function buildJsonText(hist) {\n        hist = hist || cachedHistory;\n        var exportedAt = (/* @__PURE__ */ new Date()).toISOString();\n        return JSON.stringify({\n          platform: getPlatform(hist),\n          model: hist && hist.model || \"\",\n          exportedAt,\n          tokens: hist && typeof hist.tokens === \"number\" ? hist.tokens : 0,\n          limit: hist && typeof hist.limit === \"number\" ? hist.limit : 0,\n          percent: hist && typeof hist.percent === \"number\" ? hist.percent : 0,\n          messages: hist && Array.isArray(hist.messages) ? hist.messages : []\n        }, null, 2);\n      }\n      function buildMdText(hist) {\n        return export_text_builders_default ? export_text_builders_default.buildMdFromHistory(hist || cachedHistory, getPlatform(hist)) : \"\";\n      }\n      function getCurrentConvSnapshot(cb) {\n        try {\n          chrome.tabs.query({ active: true, currentWindow: true }, function(tabs) {\n            var tab = tabs && tabs[0];\n            if (!tab || !tab.id) {\n              cb(null);\n              return;\n            }\n            try {\n              chrome.tabs.sendMessage(tab.id, { type: \"aiCmExportCurrent\" }, function(resp) {\n                if (chrome.runtime.lastError || !resp || !resp.data) {\n                  cb(null);\n                  return;\n                }\n                cb(resp.data);\n              });\n            } catch (eS) {\n              cb(null);\n            }\n          });\n        } catch (eQ) {\n          cb(null);\n        }\n      }\n      function pickExportHistory(snap) {\n        if (snap && (snap.convId || Array.isArray(snap.messages) && snap.messages.length > 0)) return snap;\n        return cachedHistory;\n      }\n      exportMdBtn && exportMdBtn.addEventListener(\"click\", function() {\n        if (exportMdBtn.disabled) return;\n        getCurrentConvSnapshot(function(snap) {\n          var hist = pickExportHistory(snap);\n          if (!hist) return;\n          downloadBlob2(buildMdText(hist), buildFileName(\"md\", hist), \"text/markdown\", \"options-md\");\n        });\n      });\n      exportJsonBtn && exportJsonBtn.addEventListener(\"click\", function() {\n        if (exportJsonBtn.disabled) return;\n        getCurrentConvSnapshot(function(snap) {\n          var hist = pickExportHistory(snap);\n          if (!hist) return;\n          downloadBlob2(buildJsonText(hist), buildFileName(\"json\", hist), \"application/json\", \"options-json\");\n        });\n      });\n      exportTxtBtn && exportTxtBtn.addEventListener(\"click\", function() {\n        if (exportTxtBtn.disabled) return;\n        getCurrentConvSnapshot(function(snap) {\n          var hist = pickExportHistory(snap);\n          if (!hist) return;\n          var txt = buildTxtText(hist);\n          if (txt.charAt(0) !== \"\\uFEFF\") txt = \"\\uFEFF\" + txt;\n          downloadBlob2(txt, buildFileName(\"txt\", hist), \"text/plain;charset=utf-8\", \"options-txt\");\n        });\n      });\n      exportPdfBtn && exportPdfBtn.addEventListener(\"click\", function() {\n        if (exportPdfBtn.disabled) return;\n        getActiveTab(function(tab) {\n          if (!tab || !tab.id) return;\n          var url = chrome.runtime.getURL(\"print/print.html\") + \"?tab=\" + tab.id;\n          try {\n            chrome.tabs.create({ url });\n          } catch (e) {\n            console.warn(\"[export-pdf] \\u043D\\u0435 \\u0443\\u0434\\u0430\\u043B\\u043E\\u0441\\u044C \\u043E\\u0442\\u043A\\u0440\\u044B\\u0442\\u044C \\u043F\\u0435\\u0447\\u0430\\u0442\\u043D\\u0443\\u044E \\u0444\\u043E\\u0440\\u043C\\u0443:\", e);\n          }\n        });\n      });\n      function getActiveTab(cb) {\n        try {\n          chrome.tabs.query({ active: true, currentWindow: true }, function(tabs) {\n            cb(tabs && tabs[0] ? tabs[0] : null);\n          });\n        } catch (e) {\n          cb(null);\n        }\n      }\n      function buildDiagnosticsFileName() {\n        return \"ai-context-monitor-diagnostics-\" + Date.now() + \".json\";\n      }\n      exportDiagBtn && exportDiagBtn.addEventListener(\"click\", function() {\n        getActiveTab(function(tab) {\n          if (!tab || !tab.id) {\n            downloadBlob2(JSON.stringify({ error: \"\\u043D\\u0435\\u0442 \\u0430\\u043A\\u0442\\u0438\\u0432\\u043D\\u043E\\u0439 \\u0432\\u043A\\u043B\\u0430\\u0434\\u043A\\u0438\", at: (/* @__PURE__ */ new Date()).toISOString() }, null, 2), buildDiagnosticsFileName(), \"application/json\", \"options-diag\");\n            return;\n          }\n          try {\n            chrome.tabs.sendMessage(tab.id, { type: \"aiCmDiag\" }, function(response) {\n              var payload;\n              if (chrome.runtime.lastError) {\n                payload = {\n                  error: \"content script \\u043D\\u0435 \\u043E\\u0442\\u0432\\u0435\\u0442\\u0438\\u043B: \" + chrome.runtime.lastError.message,\n                  at: (/* @__PURE__ */ new Date()).toISOString()\n                };\n              } else {\n                payload = response && response.diag ? response.diag : { error: \"\\u043F\\u0443\\u0441\\u0442\\u043E\\u0439 \\u043E\\u0442\\u0432\\u0435\\u0442\", response: response || null };\n              }\n              downloadBlob2(JSON.stringify(payload, null, 2), buildDiagnosticsFileName(), \"application/json\", \"options-diag\");\n            });\n          } catch (e) {\n            downloadBlob2(JSON.stringify({ error: \"sendMessage error: \" + e.message, at: (/* @__PURE__ */ new Date()).toISOString() }, null, 2), buildDiagnosticsFileName(), \"application/json\", \"options-diag\");\n          }\n        });\n      });\n      try {\n        chrome.storage.onChanged.addListener(function(changes, areaName) {\n          if (areaName !== \"local\") return;\n          var hist = null;\n          if (changes.aiCmHistory && changes.aiCmHistory.newValue) hist = changes.aiCmHistory.newValue;\n          for (var key in changes) {\n            if (key.indexOf(\"aiCmHistory:\") === 0 && changes[key] && changes[key].newValue) {\n              var v = changes[key].newValue;\n              if (!hist || (v.updatedAt || 0) > (hist.updatedAt || 0)) hist = v;\n            }\n          }\n          if (!hist) return;\n          getActiveTabHost(function() {\n            if (hist.host === currentTabHost) cachedHistory = hist;\n            updateExportButtons();\n          });\n        });\n      } catch (e) {\n        aiCmPopupDiagLine(\"history-changed\", { err: String(e) });\n      }\n      var archiveFileInput = document.getElementById(\"archive-file\");\n      var archiveImportBtn = document.getElementById(\"archive-import\");\n      var archiveRefreshBtn = document.getElementById(\"archive-refresh\");\n      var archiveStatusEl = document.getElementById(\"archive-status\");\n      var archiveListEl = document.getElementById(\"archive-list\");\n      var AI_ARCHIVE_MAX_FILES = 20;\n      function aiCmArchiveApi() {\n        const api = archive_import_default;\n        return api && typeof api.parseArchiveText === \"function\" && typeof api.planArchiveImport === \"function\" ? api : null;\n      }\n      function aiCmSetArchiveStatus(text, isError) {\n        if (!archiveStatusEl) return;\n        archiveStatusEl.textContent = text || \"\";\n        archiveStatusEl.style.color = isError ? \"#ef4444\" : \"\";\n      }\n      function buildArchiveStoragePatch(records, fileName) {\n        const API = aiCmArchiveApi();\n        const patch = {};\n        if (!API || !Array.isArray(records)) return patch;\n        records.forEach(function(rec) {\n          if (!rec || !rec.convId) return;\n          patch[API.archiveStorageKey(rec.convId)] = rec;\n          patch[API.convSourceStorageKey(rec.convId)] = API.buildConvSourceRecord(rec, { fileName });\n        });\n        return patch;\n      }\n      function aiCmImportArchiveFiles(files, onDone) {\n        const API = aiCmArchiveApi();\n        if (!API) {\n          onDone(aiCmI18nMessage2(\"options_archive_module_missing\", \"\\u043C\\u043E\\u0434\\u0443\\u043B\\u044C \\u0438\\u043C\\u043F\\u043E\\u0440\\u0442\\u0430 \\u043D\\u0435 \\u0437\\u0430\\u0433\\u0440\\u0443\\u0436\\u0435\\u043D (utils/archive-import.js)\"));\n          return;\n        }\n        const list = Array.prototype.slice.call(files || []).filter(function(f) {\n          return !!f;\n        }).slice(0, AI_ARCHIVE_MAX_FILES);\n        if (!list.length) {\n          onDone(aiCmI18nMessage2(\"options_archive_no_files\", \"\\u0444\\u0430\\u0439\\u043B\\u044B \\u043D\\u0435 \\u0432\\u044B\\u0431\\u0440\\u0430\\u043D\\u044B\"));\n          return;\n        }\n        const report = {\n          files: 0,\n          conversations: 0,\n          accepted: 0,\n          bytes: 0,\n          skipped: [],\n          errors: [],\n          patch: {}\n        };\n        let idx = 0;\n        function step() {\n          if (idx >= list.length) {\n            onDone(null, report);\n            return;\n          }\n          const file = list[idx++];\n          report.files++;\n          const maxArchiveSize = Number(API.MAX_ARCHIVE_SIZE) || 0;\n          const fileSize = Number(file && file.size) || 0;\n          if (maxArchiveSize > 0 && fileSize > maxArchiveSize) {\n            const limitMb = String(Math.round(maxArchiveSize / (1024 * 1024)));\n            report.errors.push({\n              fileName: file.name,\n              error: \"file-too-large\",\n              size: fileSize,\n              limit: maxArchiveSize,\n              message: aiCmI18nMessage2(\n                \"options_archive_file_too_large\",\n                \"\\u0444\\u0430\\u0439\\u043B \\u0441\\u043B\\u0438\\u0448\\u043A\\u043E\\u043C \\u0431\\u043E\\u043B\\u044C\\u0448\\u043E\\u0439 (\\u0431\\u043E\\u043B\\u044C\\u0448\\u0435 \" + limitMb + \" \\u041C\\u0411) \\u2014 \\u0447\\u0442\\u0435\\u043D\\u0438\\u0435 \\u043E\\u0442\\u043C\\u0435\\u043D\\u0435\\u043D\\u043E\",\n                [limitMb]\n              )\n            });\n            step();\n            return;\n          }\n          let reader;\n          try {\n            reader = new FileReader();\n          } catch (eNew) {\n            report.errors.push({ fileName: file.name, error: \"filereader-unavailable\" });\n            step();\n            return;\n          }\n          reader.onerror = function() {\n            report.errors.push({ fileName: file.name, error: \"read-error\" });\n            step();\n          };\n          reader.onload = function() {\n            try {\n              const parsed = API.parseArchiveText(String(reader.result == null ? \"\" : reader.result), { parsePerplexityThread, orderChatGPTMapping, sanitizeChatGPTText });\n              if (!parsed.ok) {\n                report.errors.push({ fileName: file.name, error: parsed.error });\n                step();\n                return;\n              }\n              report.conversations += parsed.conversations.length;\n              const plan = API.planArchiveImport(parsed.conversations, { fileName: file.name });\n              (plan.skipped || []).forEach(function(s) {\n                report.skipped.push({ fileName: file.name, convId: s.convId, reason: s.reason });\n              });\n              report.accepted += plan.accepted.length;\n              report.bytes += plan.bytes || 0;\n              Object.assign(report.patch, buildArchiveStoragePatch(plan.accepted, file.name));\n            } catch (eParse) {\n              report.errors.push({ fileName: file.name, error: \"parse-exception\" });\n            }\n            step();\n          };\n          try {\n            reader.readAsText(file);\n          } catch (eRead) {\n            report.errors.push({ fileName: file.name, error: \"read-exception\" });\n            step();\n          }\n        }\n        step();\n      }\n      function formatArchiveReport(report) {\n        if (!report) return \"\";\n        const parts = [];\n        var nFiles = String(report.files);\n        var nConvs = String(report.conversations);\n        var nAccepted = String(report.accepted);\n        parts.push(aiCmI18nMessage2(\"options_archive_report_files\", \"\\u0444\\u0430\\u0439\\u043B\\u043E\\u0432: \" + nFiles, [nFiles]));\n        parts.push(aiCmI18nMessage2(\"options_archive_report_conversations\", \"\\u0434\\u0438\\u0430\\u043B\\u043E\\u0433\\u043E\\u0432: \" + nConvs, [nConvs]));\n        parts.push(aiCmI18nMessage2(\"options_archive_report_imported\", \"\\u0438\\u043C\\u043F\\u043E\\u0440\\u0442\\u0438\\u0440\\u043E\\u0432\\u0430\\u043D\\u043E: \" + nAccepted, [nAccepted]));\n        if (report.bytes) {\n          var kb = String(Math.round(report.bytes / 1024));\n          parts.push(aiCmI18nMessage2(\"options_archive_report_kb\", \"\\u2248\" + kb + \" \\u041A\\u0411\", [kb]));\n        }\n        if (report.skipped && report.skipped.length) {\n          const byReason = {};\n          report.skipped.forEach(function(s) {\n            byReason[s.reason] = (byReason[s.reason] || 0) + 1;\n          });\n          var skippedList = Object.keys(byReason).map(function(r) {\n            return r + \"\\xD7\" + byReason[r];\n          }).join(\", \");\n          parts.push(aiCmI18nMessage2(\"options_archive_report_skipped\", \"\\u043F\\u0440\\u043E\\u043F\\u0443\\u0449\\u0435\\u043D\\u043E: \" + skippedList, [skippedList]));\n        }\n        if (report.errors && report.errors.length) {\n          var errorList = report.errors.map(function(e) {\n            return e.fileName + \" (\" + (e.message || e.error) + \")\";\n          }).join(\", \");\n          parts.push(aiCmI18nMessage2(\"options_archive_report_errors\", \"\\u043E\\u0448\\u0438\\u0431\\u043A\\u0438: \" + errorList, [errorList]));\n        }\n        return parts.join(\" \\xB7 \");\n      }\n      function aiCmListArchiveSourceKeys(cb) {\n        try {\n          if (chrome.storage.local.getKeys) {\n            chrome.storage.local.getKeys(function(keys) {\n              cb((keys || []).filter(function(k) {\n                return k.indexOf(\"aiCmArchive:\") === 0;\n              }).map(function(k) {\n                return k.slice(\"aiCmArchive:\".length);\n              }));\n            });\n            return;\n          }\n        } catch (eKeys) {\n          aiCmPopupDiagLine(\"aiCmListArchiveSourceKeys\", { err: String(eKeys) });\n        }\n        try {\n          chrome.storage.local.get(null, function(all) {\n            cb(Object.keys(all || {}).filter(function(k) {\n              return k.indexOf(\"aiCmArchive:\") === 0;\n            }).map(function(k) {\n              return k.slice(\"aiCmArchive:\".length);\n            }));\n          });\n        } catch (eAll) {\n          cb([]);\n        }\n      }\n      function aiCmRenderArchiveList() {\n        if (!archiveListEl) return;\n        const API = aiCmArchiveApi();\n        if (!API) {\n          archiveListEl.textContent = \"\";\n          return;\n        }\n        aiCmListArchiveSourceKeys(function(convIds) {\n          if (!convIds.length) {\n            archiveListEl.textContent = aiCmI18nMessage2(\"options_archive_empty\", \"\\u0410\\u0440\\u0445\\u0438\\u0432\\u044B \\u043D\\u0435 \\u0438\\u043C\\u043F\\u043E\\u0440\\u0442\\u0438\\u0440\\u043E\\u0432\\u0430\\u043D\\u044B.\");\n            return;\n          }\n          const srcKeys = convIds.map(function(cid) {\n            return API.convSourceStorageKey(cid);\n          });\n          chrome.storage.local.get(srcKeys, function(data) {\n            archiveListEl.textContent = \"\";\n            convIds.forEach(function(cid) {\n              const rec = (data || {})[API.convSourceStorageKey(cid)] || null;\n              const row = document.createElement(\"div\");\n              row.className = \"archive-item\";\n              const info = document.createElement(\"span\");\n              info.className = \"archive-info\";\n              const label = rec ? rec.label || API.describeSource(rec) : aiCmI18nMessage2(\"options_archive_fallback\", \"\\u0430\\u0440\\u0445\\u0438\\u0432\");\n              const when = rec && rec.importedAt ? \" \\xB7 \" + formatTime(rec.importedAt) : \"\";\n              const file = rec && rec.fileName ? \" \\xB7 \" + rec.fileName : \"\";\n              info.textContent = cid.slice(0, 8) + aiCmI18nMessage2(\"options_info_separator\", \"\\xA0\\u2014\\xA0\") + label + when + file;\n              row.appendChild(info);\n              const del = document.createElement(\"button\");\n              del.className = \"btn-reset archive-del\";\n              del.type = \"button\";\n              del.textContent = aiCmI18nMessage2(\"options_archive_delete\", \"\\u0423\\u0434\\u0430\\u043B\\u0438\\u0442\\u044C\");\n              del.setAttribute(\"data-conv-id\", cid);\n              del.addEventListener(\"click\", function() {\n                aiCmDeleteArchive(cid);\n              });\n              row.appendChild(del);\n              archiveListEl.appendChild(row);\n            });\n          });\n        });\n      }\n      function aiCmDeleteArchive(convId) {\n        const API = aiCmArchiveApi();\n        if (!API || !convId) return;\n        try {\n          chrome.storage.local.remove([API.archiveStorageKey(convId), API.convSourceStorageKey(convId)], function() {\n            var shortId = String(convId).slice(0, 8);\n            aiCmSetArchiveStatus(aiCmI18nMessage2(\"options_archive_deleted\", \"\\u0430\\u0440\\u0445\\u0438\\u0432 \" + shortId + \" \\u0443\\u0434\\u0430\\u043B\\u0451\\u043D\", [shortId]));\n            aiCmRenderArchiveList();\n          });\n        } catch (eDel) {\n          var delErr = String(eDel && eDel.message || eDel);\n          aiCmSetArchiveStatus(aiCmI18nMessage2(\"options_archive_delete_error\", \"\\u043D\\u0435 \\u0443\\u0434\\u0430\\u043B\\u043E\\u0441\\u044C \\u0443\\u0434\\u0430\\u043B\\u0438\\u0442\\u044C \\u0430\\u0440\\u0445\\u0438\\u0432: \" + delErr, [delErr]), true);\n        }\n      }\n      function aiCmApplyArchiveImport() {\n        const files = archiveFileInput && archiveFileInput.files;\n        aiCmSetArchiveStatus(aiCmI18nMessage2(\"options_archive_reading\", \"\\u0447\\u0442\\u0435\\u043D\\u0438\\u0435 \\u0444\\u0430\\u0439\\u043B\\u043E\\u0432\\u2026\"));\n        aiCmImportArchiveFiles(files, function(err, report) {\n          if (err) {\n            aiCmSetArchiveStatus(err, true);\n            return;\n          }\n          const keys = Object.keys(report.patch);\n          if (!keys.length) {\n            var nothingReport = formatArchiveReport(report);\n            aiCmSetArchiveStatus(aiCmI18nMessage2(\"options_archive_nothing\", \"\\u043D\\u0438\\u0447\\u0435\\u0433\\u043E \\u043D\\u0435 \\u0438\\u043C\\u043F\\u043E\\u0440\\u0442\\u0438\\u0440\\u043E\\u0432\\u0430\\u043D\\u043E \\xB7 \" + nothingReport, [nothingReport]), true);\n            aiCmRenderArchiveList();\n            return;\n          }\n          try {\n            chrome.storage.local.set(report.patch, function() {\n              var doneReport = formatArchiveReport(report);\n              aiCmSetArchiveStatus(aiCmI18nMessage2(\"options_archive_done\", \"\\u0433\\u043E\\u0442\\u043E\\u0432\\u043E \\xB7 \" + doneReport, [doneReport]));\n              aiCmRenderArchiveList();\n            });\n          } catch (eSet) {\n            var setErr = String(eSet && eSet.message || eSet);\n            aiCmSetArchiveStatus(aiCmI18nMessage2(\"options_archive_set_error\", \"\\u043E\\u0448\\u0438\\u0431\\u043A\\u0430 \\u0437\\u0430\\u043F\\u0438\\u0441\\u0438 \\u0432 \\u0445\\u0440\\u0430\\u043D\\u0438\\u043B\\u0438\\u0449\\u0435: \" + setErr, [setErr]), true);\n          }\n        });\n      }\n      archiveImportBtn && archiveImportBtn.addEventListener(\"click\", aiCmApplyArchiveImport);\n      archiveRefreshBtn && archiveRefreshBtn.addEventListener(\"click\", function() {\n        aiCmSetArchiveStatus(\"\");\n        aiCmRenderArchiveList();\n      });\n      try {\n        chrome.storage.onChanged.addListener(function(changes, areaName) {\n          if (areaName !== \"local\") return;\n          for (var k in changes) {\n            if (k.indexOf(\"aiCmArchive:\") === 0) {\n              aiCmRenderArchiveList();\n              return;\n            }\n          }\n        });\n      } catch (eArcCh) {\n        aiCmPopupDiagLine(\"archive-changed\", { err: String(eArcCh) });\n      }\n      document.addEventListener(\"DOMContentLoaded\", function() {\n        loadStats();\n        refreshExportState();\n        aiCmRenderArchiveList();\n      });\n      if (typeof module !== \"undefined\" && module.exports) {\n        module.exports = {\n          isChatHome,\n          buildArchiveStoragePatch,\n          aiCmImportArchiveFiles,\n          formatArchiveReport\n        };\n      }\n    }\n  });\n  require_entry_options();\n})();\n//# sourceMappingURL=options.js.map\n\n</script>\n\n</html>";
   var overlay = null;
 
   function closeOptions() {

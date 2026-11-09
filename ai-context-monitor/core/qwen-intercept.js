@@ -1,5 +1,5 @@
 (() => {
-  // utils/stream-frames.js
+  // utils/stream-frames.ts
   function splitJsonObjects(s) {
     var out = [], depth = 0, start = -1, inStr = false, esc = false;
     var str = String(s == null ? "" : s);
@@ -53,8 +53,9 @@
     function asBytes(v) {
       try {
         if (typeof v === "string") return null;
-        if (v && typeof v.length === "number") return v;
-        if (v && typeof v.byteLength === "number") return new Uint8Array(v);
+        var src = v;
+        if (src && typeof src.length === "number") return src;
+        if (src && typeof src.byteLength === "number") return new Uint8Array(v);
       } catch (eB) {
       }
       return null;
@@ -177,9 +178,9 @@
   function frames(res) {
     return framesNative(res, framesDecodeStream);
   }
-  function num() {
-    for (var i = 0; i < arguments.length; i++) {
-      if (typeof arguments[i] === "number") return arguments[i];
+  function num(...args) {
+    for (var i = 0; i < args.length; i++) {
+      if (typeof args[i] === "number") return args[i];
     }
     return null;
   }
@@ -192,19 +193,20 @@
   }
   function normalizeUsage(u) {
     if (!u || typeof u !== "object") return null;
+    var src = u;
     return {
-      input: num(u.input_tokens, u.prompt_tokens, u.promptTokenCount),
-      output: num(u.output_tokens, u.completion_tokens, u.candidatesTokenCount),
-      total: num(u.total_tokens, u.totalTokenCount),
+      input: num(src.input_tokens, src.prompt_tokens, src.promptTokenCount),
+      output: num(src.output_tokens, src.completion_tokens, src.candidatesTokenCount),
+      total: num(src.total_tokens, src.totalTokenCount),
       reasoning: num(
-        pick(u.output_tokens_details, "reasoning_tokens"),
-        pick(u.completion_tokens_details, "reasoning_tokens"),
-        u.thoughtsTokenCount
+        pick(src.output_tokens_details, "reasoning_tokens"),
+        pick(src.completion_tokens_details, "reasoning_tokens"),
+        src.thoughtsTokenCount
       ),
       cached: num(
-        pick(u.prompt_tokens_details, "cached_tokens"),
-        u.cache_read_input_tokens,
-        u.cachedContentTokenCount
+        pick(src.prompt_tokens_details, "cached_tokens"),
+        src.cache_read_input_tokens,
+        src.cachedContentTokenCount
       )
     };
   }
@@ -228,6 +230,135 @@
       out[k2] = cumulative ? v : (typeof out[k2] === "number" ? out[k2] : 0) + v;
     }
     return out;
+  }
+
+  // utils/debug.ts
+  var DEBUG = false;
+  var __aiCmLogRing = [];
+  var __aiCmLogRingMax = 200;
+  function __aiCmStringifyArg(a) {
+    if (typeof a === "string") return a;
+    try {
+      var s = JSON.stringify(a);
+      if (s === void 0) return String(a);
+      if (s.length > 500) s = s.slice(0, 500) + "\u2026";
+      return s;
+    } catch (e) {
+      return String(a);
+    }
+  }
+  function __aiCmPushLogRing(line) {
+    try {
+      __aiCmLogRing.push(line);
+      if (__aiCmLogRing.length > __aiCmLogRingMax) __aiCmLogRing.shift();
+    } catch (e) {
+    }
+  }
+  function debugLog(level, ...rest) {
+    var args = Array.prototype.slice.call(arguments, 1);
+    try {
+      var line = args.map(__aiCmStringifyArg).join(" ");
+      __aiCmPushLogRing(line);
+    } catch (e) {
+    }
+    if (level === "error" || level === "warn") {
+      (console[level] || console.log).apply(console, args);
+      return;
+    }
+    var enabled = DEBUG;
+    try {
+      if (typeof window !== "undefined" && window.__aiCmDebugLogs === true) enabled = true;
+    } catch (e) {
+    }
+    if (enabled) {
+      (console[level] || console.log).apply(console, args);
+    }
+  }
+  function swallow2(error, tag) {
+    try {
+      if (typeof debugLog !== "function") return;
+      debugLog("error", "[swallow][" + (tag || "unlabeled") + "]", error);
+    } catch (eSwallow) {
+    }
+  }
+  function aiCmDiagOn() {
+    try {
+      if (typeof sessionStorage !== "undefined" && sessionStorage && sessionStorage.getItem("aiCmDebug") === "1") return true;
+    } catch (eSess) {
+    }
+    try {
+      if (typeof window !== "undefined" && window && window.__aiCmDebugLogs === true) return true;
+    } catch (eWin) {
+    }
+    return false;
+  }
+  function aiCmDiagLine2(tag, fields) {
+    if (!aiCmDiagOn()) return false;
+    try {
+      var parts = [];
+      var f = fields || {};
+      for (var k in f) {
+        if (!Object.prototype.hasOwnProperty.call(f, k)) continue;
+        var v = f[k];
+        parts.push(k + "=" + (v === void 0 || v === null ? "(\u043D\u0435\u0442)" : String(v)));
+      }
+      console.log("[AI CM][diag] " + tag + " " + parts.join(" "));
+    } catch (eLine) {
+    }
+    return true;
+  }
+  try {
+    if (typeof window !== "undefined") window.__aiCmSwallow = swallow2;
+  } catch (eSwallowExport) {
+  }
+  function swallowSoft(error, tag) {
+    var label = tag || "unlabeled";
+    var msg = "";
+    try {
+      msg = error && error.message ? String(error.message) : String(error);
+    } catch (eSoftMsg) {
+      msg = "(\u043D\u0435\u0447\u0438\u0442\u0430\u0435\u043C\u0430\u044F \u043E\u0448\u0438\u0431\u043A\u0430)";
+    }
+    try {
+      if (typeof __aiCmPushLogRing === "function") __aiCmPushLogRing("[swallow-soft][" + label + "] " + msg);
+    } catch (eSoftRing) {
+      return void 0;
+    }
+    try {
+      if (typeof aiCmDiagLine2 !== "function") return;
+      aiCmDiagLine2("swallow-soft", { tag: label, err: error });
+    } catch (eSoftDiag) {
+      return void 0;
+    }
+  }
+  try {
+    if (typeof window !== "undefined") window.__aiCmSwallowSoft = swallowSoft;
+  } catch (eSoftExport) {
+    __aiCmPushLogRing("[swallow-soft-export] " + eSoftExport);
+  }
+
+  // utils/intercept-common.ts
+  var ONFREEZE_ERROR_RE = /Only fetch keepalive is allowed during onfreeze/i;
+  function isOnFreezeError(error) {
+    try {
+      var message = error && typeof error.message !== "undefined" ? String(error.message) : String(error);
+      return ONFREEZE_ERROR_RE.test(message);
+    } catch (eText) {
+      return false;
+    }
+  }
+  function fetchGuarded(fetchFn, thisArg, args) {
+    try {
+      var list = Array.prototype.slice.call(args);
+      return Reflect.apply(fetchFn, thisArg, list);
+    } catch (eCall) {
+      if (!isOnFreezeError(eCall)) throw eCall;
+      swallowSoft(eCall, "intercept-common:onfreeze-fetch");
+      var rejected = Promise.reject(eCall);
+      rejected.catch(function() {
+      });
+      return rejected;
+    }
   }
 
   // core/qwen-intercept.js
@@ -1731,7 +1862,7 @@
         }
         var promise;
         try {
-          promise = originalFetch.apply(this, arguments);
+          promise = fetchGuarded(originalFetch, this, arguments);
         } catch (eCall) {
           return Promise.reject(eCall);
         }
@@ -2002,7 +2133,7 @@
       }
     };
     diagLine("installed", { chat: String(currentChatId || "").slice(0, 8) });
-    console.log("[qwen-intercept] \u043F\u0435\u0440\u0435\u0445\u0432\u0430\u0442\u0447\u0438\u043A Qwen \u0443\u0441\u0442\u0430\u043D\u043E\u0432\u043B\u0435\u043D (\u0442\u043E\u043B\u044C\u043A\u043E \u043D\u0430\u0442\u0438\u0432\u043D\u044B\u0435 \u0437\u0430\u043F\u0440\u043E\u0441\u044B \u0441\u0442\u0440\u0430\u043D\u0438\u0446\u044B, SSE \u0447\u0435\u0440\u0435\u0437 utils/stream-frames.js, usage \u043A\u0443\u043C\u0443\u043B\u044F\u0442\u0438\u0432\u043D\u044B\u0439 \u2192 \u043F\u043E\u0441\u043B\u0435\u0434\u043D\u0438\u0439 \u043A\u0430\u0434\u0440, \u0444\u0430\u0437\u044B thinking_summary(REPLACE)/answer(APPEND), \u0444\u043E\u043B\u0431\u044D\u043A \u2014 DOM-\u0430\u0434\u0430\u043F\u0442\u0435\u0440, O-39: JSON-\u0438\u0441\u0442\u043E\u0440\u0438\u044F GET /api/v*N*/chats/{id} \u0447\u0435\u0440\u0435\u0437 resp.clone().json() (fetch) \u0438 XMLHttpRequest loadend (XHR/jQuery); O-53: \u043A\u0443\u0440\u0441\u043E\u0440\u043D\u0430\u044F \u043F\u0430\u0433\u0438\u043D\u0430\u0446\u0438\u044F \u0438\u0441\u0442\u043E\u0440\u0438\u0438 (pagination.oldest_id, limit=10, \u0434\u043E has_more_older=false)");
+    console.log("[qwen-intercept] \u043F\u0435\u0440\u0435\u0445\u0432\u0430\u0442\u0447\u0438\u043A Qwen \u0443\u0441\u0442\u0430\u043D\u043E\u0432\u043B\u0435\u043D (\u0442\u043E\u043B\u044C\u043A\u043E \u043D\u0430\u0442\u0438\u0432\u043D\u044B\u0435 \u0437\u0430\u043F\u0440\u043E\u0441\u044B \u0441\u0442\u0440\u0430\u043D\u0438\u0446\u044B, SSE \u0447\u0435\u0440\u0435\u0437 utils/stream-frames.ts, usage \u043A\u0443\u043C\u0443\u043B\u044F\u0442\u0438\u0432\u043D\u044B\u0439 \u2192 \u043F\u043E\u0441\u043B\u0435\u0434\u043D\u0438\u0439 \u043A\u0430\u0434\u0440, \u0444\u0430\u0437\u044B thinking_summary(REPLACE)/answer(APPEND), \u0444\u043E\u043B\u0431\u044D\u043A \u2014 DOM-\u0430\u0434\u0430\u043F\u0442\u0435\u0440, O-39: JSON-\u0438\u0441\u0442\u043E\u0440\u0438\u044F GET /api/v*N*/chats/{id} \u0447\u0435\u0440\u0435\u0437 resp.clone().json() (fetch) \u0438 XMLHttpRequest loadend (XHR/jQuery); O-53: \u043A\u0443\u0440\u0441\u043E\u0440\u043D\u0430\u044F \u043F\u0430\u0433\u0438\u043D\u0430\u0446\u0438\u044F \u0438\u0441\u0442\u043E\u0440\u0438\u0438 (pagination.oldest_id, limit=10, \u0434\u043E has_more_older=false)");
     function qwenContentText(raw) {
       if (typeof raw === "string") return raw;
       if (Array.isArray(raw)) {

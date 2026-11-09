@@ -1,5 +1,8 @@
 (() => {
+  var __defProp = Object.defineProperty;
+  var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
   var __getOwnPropNames = Object.getOwnPropertyNames;
+  var __hasOwnProp = Object.prototype.hasOwnProperty;
   var __require = /* @__PURE__ */ ((x) => typeof require !== "undefined" ? require : typeof Proxy !== "undefined" ? new Proxy(x, {
     get: (a, b) => (typeof require !== "undefined" ? require : a)[b]
   }) : x)(function(x) {
@@ -21,58 +24,224 @@
       throw mod = 0, e;
     }
   };
+  var __export = (target, all) => {
+    for (var name in all)
+      __defProp(target, name, { get: all[name], enumerable: true });
+  };
+  var __copyProps = (to, from, except, desc) => {
+    if (from && typeof from === "object" || typeof from === "function") {
+      for (let key of __getOwnPropNames(from))
+        if (!__hasOwnProp.call(to, key) && key !== except)
+          __defProp(to, key, { get: () => from[key], enumerable: !(desc = __getOwnPropDesc(from, key)) || desc.enumerable });
+    }
+    return to;
+  };
+  var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: true }), mod);
 
-  // ../utils/buildReferenceText.js
-  function cleanInline(s) {
-    s = s.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, "$1");
-    s = s.replace(/(\*\*|__)/g, "");
-    s = s.replace(/(?<![*\w])\*([^*\n]+)\*(?![\w*])/g, "$1");
-    s = s.replace(/(?<![\w_])\_([^_\n]+)\_(?![\w_])/g, "$1");
-    s = s.replace(/`/g, "");
-    return s;
+  // ../utils/gemini-dom-parser.ts
+  function stripAttachmentTokens(s) {
+    if (typeof s !== "string") return s;
+    return s.replace(ATTACH_TOKEN_RE, " ").replace(/[ \t\f\v]+/g, " ");
   }
-  function cleanLine(line) {
-    var s = String(line == null ? "" : line);
-    s = s.replace(/^#{1,6}\s+/, "");
-    s = s.replace(/^>\s?/, "");
-    s = s.replace(/^[-*+]\s+/, "");
-    return s;
-  }
-  function cleanText(text) {
-    var lines = String(text).split("\n");
-    var out = [];
-    for (var i = 0; i < lines.length; i++) {
-      var line = lines[i];
-      var trimmed = line.trim();
-      if (/^-{3,}$/.test(trimmed)) continue;
-      out.push(cleanInline(cleanLine(line)));
+  function attrString(el, names) {
+    var out = "";
+    for (var i = 0; i < names.length; i++) {
+      try {
+        var v = el.getAttribute ? el.getAttribute(names[i]) : null;
+        if (v) out += " " + v;
+      } catch (e) {
+      }
     }
-    return out.join("\n");
+    return out;
   }
-  function buildReferenceText(messages) {
-    var list = Array.isArray(messages) ? messages : [];
+  function classNameId(el) {
+    try {
+      return String(el.className || "") + " " + String(el.id || "");
+    } catch (e) {
+      return "";
+    }
+  }
+  function isHiddenContainer(el) {
+    var h = classNameId(el).toLowerCase();
+    return h.indexOf("cdk-visually-hidden") !== -1 || h.indexOf("cdk-live-announcer") !== -1;
+  }
+  function isThinkingContainer(el) {
+    if (THINK_RE.test(classNameId(el))) return true;
+    var label = attrString(el, ["aria-label", "title"]);
+    return THINKING_LABEL_RE.test(label);
+  }
+  function thinkingControlLabel(el) {
+    var label = attrString(el, ["aria-label", "title"]);
+    if (el.tagName && String(el.tagName).toLowerCase() === "button") {
+      try {
+        label += " " + (el.textContent || "");
+      } catch (e) {
+      }
+    }
+    return label;
+  }
+  function containsThinkingControl(node) {
+    var found = false;
+    (function scan(n, depth) {
+      if (found || depth > 4) return;
+      if (!n || n.nodeType !== 1) return;
+      if (THINKING_LABEL_RE.test(thinkingControlLabel(n))) {
+        found = true;
+        return;
+      }
+      var ch = n.childNodes;
+      for (var i = 0; i < ch.length; i++) scan(ch[i], depth + 1);
+    })(node, 0);
+    return found;
+  }
+  function containsTable(node) {
+    var el = node;
+    try {
+      return !!el.querySelector && !!el.querySelector("table");
+    } catch (e) {
+      return false;
+    }
+  }
+  function isThinkingPanel(node) {
+    if (isHiddenContainer(node) || isThinkingContainer(node)) return true;
+    if (containsTable(node)) return false;
+    return containsThinkingControl(node);
+  }
+  function cleanCell(el) {
+    var clone;
+    try {
+      clone = el.cloneNode(true);
+    } catch (e) {
+      return "";
+    }
+    try {
+      clone.querySelectorAll("script, style, button, svg").forEach(function(x) {
+        x.remove();
+      });
+    } catch (e) {
+    }
+    try {
+      return stripAttachmentTokens((clone.textContent || "").replace(/\s+/g, " ").trim());
+    } catch (e) {
+      return "";
+    }
+  }
+  function tableToMarkdown(tableEl) {
+    var rows = [];
+    try {
+      rows = tableEl.querySelectorAll("tr");
+    } catch (e) {
+      rows = [];
+    }
+    var lines = [];
+    for (var r = 0; r < rows.length; r++) {
+      var cells = rows[r].querySelectorAll("th, td");
+      var cellTexts = [];
+      for (var c = 0; c < cells.length; c++) {
+        cellTexts.push(cleanCell(cells[c]));
+      }
+      if (cellTexts.length === 0) continue;
+      lines.push("| " + cellTexts.join(" | ") + " |");
+    }
+    return lines.join("\n");
+  }
+  function extractGeminiResponse(root) {
     var parts = [];
-    for (var i = 0; i < list.length; i++) {
-      var msg = list[i] || {};
-      parts.push(cleanText(msg.text == null ? "" : msg.text));
+    var buf = [];
+    function flush() {
+      if (!buf.length) return;
+      var s = buf.join(" ");
+      buf = [];
+      s = s.replace(/\s+/g, " ").trim();
+      if (s) parts.push(s);
     }
-    return parts.join("\n\n");
+    function pushText(str) {
+      if (typeof str !== "string") return;
+      var t = stripAttachmentTokens(str.replace(/\s+/g, " ").trim());
+      if (t) buf.push(t);
+    }
+    function walk(node) {
+      if (!node) return;
+      var type = node.nodeType;
+      if (type === 3) {
+        pushText(node.nodeValue || "");
+        return;
+      }
+      if (type !== 1) return;
+      var el = node;
+      if (isThinkingPanel(el)) {
+        flush();
+        return;
+      }
+      var tag = (el.tagName || "").toUpperCase();
+      if (tag === "TABLE") {
+        flush();
+        var md = tableToMarkdown(el);
+        if (md) parts.push(md);
+        return;
+      }
+      if (BLOCK_TAGS[tag]) flush();
+      var children = node.childNodes;
+      for (var i2 = 0; i2 < children.length; i2++) {
+        walk(children[i2]);
+      }
+      if (BLOCK_TAGS[tag]) flush();
+    }
+    if (root) {
+      var rootChildren = root.childNodes;
+      for (var i = 0; i < rootChildren.length; i++) {
+        walk(rootChildren[i]);
+      }
+    }
+    flush();
+    var text = parts.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+    return { text, count: parts.length, parts };
   }
-  var init_buildReferenceText = __esm({
-    "../utils/buildReferenceText.js"() {
+  var THINK_RE, THINKING_LABEL_RE, ATTACH_TOKEN_RE, BLOCK_TAGS;
+  var init_gemini_dom_parser = __esm({
+    "../utils/gemini-dom-parser.ts"() {
+      THINK_RE = /think|thought/i;
+      THINKING_LABEL_RE = /thinking|\bthought\b|\bдумал\b/i;
+      ATTACH_TOKEN_RE = /\$AXzLiR[A-Za-z0-9+\/=]+/g;
+      BLOCK_TAGS = {
+        "P": 1,
+        "DIV": 1,
+        "SECTION": 1,
+        "ARTICLE": 1,
+        "UL": 1,
+        "OL": 1,
+        "LI": 1,
+        "H1": 1,
+        "H2": 1,
+        "H3": 1,
+        "H4": 1,
+        "H5": 1,
+        "H6": 1,
+        "BLOCKQUOTE": 1,
+        "PRE": 1,
+        "BR": 1,
+        "HR": 1,
+        "HEADER": 1,
+        "FOOTER": 1,
+        "MAIN": 1,
+        "ASIDE": 1,
+        "TR": 1,
+        "THEAD": 1,
+        "TBODY": 1
+      };
     }
   });
 
-  // ../utils/platform.js
+  // ../utils/platform.ts
   function aiCmIsFirefox() {
     try {
-      var api = typeof browser !== "undefined" && browser && browser.runtime ? browser : typeof chrome !== "undefined" && chrome && chrome.runtime ? chrome : null;
-      if (!api) return false;
-      if (api.runtime && typeof api.runtime.getURL === "function") {
-        return String(api.runtime.getURL("")).indexOf("moz-extension://") === 0;
+      var api2 = typeof browser !== "undefined" && browser && browser.runtime ? browser : typeof chrome !== "undefined" && chrome && chrome.runtime ? chrome : null;
+      if (!api2) return false;
+      if (api2.runtime && typeof api2.runtime.getURL === "function") {
+        return String(api2.runtime.getURL("")).indexOf("moz-extension://") === 0;
       }
-      if (typeof api.getURL === "function") {
-        return String(api.getURL("")).indexOf("moz-extension://") === 0;
+      if (typeof api2.getURL === "function") {
+        return String(api2.getURL("")).indexOf("moz-extension://") === 0;
       }
       return false;
     } catch (e) {
@@ -80,11 +249,11 @@
     }
   }
   var init_platform = __esm({
-    "../utils/platform.js"() {
+    "../utils/platform.ts"() {
     }
   });
 
-  // ../utils/debug.js
+  // ../utils/debug.ts
   function __aiCmSetDebugLogs(v) {
     DEBUG = !!v;
     try {
@@ -117,7 +286,7 @@
       return [];
     }
   }
-  function debugLog(level) {
+  function debugLog(level, ...rest) {
     var args = Array.prototype.slice.call(arguments, 1);
     try {
       var line = args.map(__aiCmStringifyArg).join(" ");
@@ -137,14 +306,14 @@
       (console[level] || console.log).apply(console, args);
     }
   }
-  function swallow(error, tag) {
+  function swallow2(error, tag) {
     try {
       if (typeof debugLog !== "function") return;
       debugLog("error", "[swallow][" + (tag || "unlabeled") + "]", error);
     } catch (eSwallow) {
     }
   }
-  function aiCmDiagOn() {
+  function aiCmDiagOn2() {
     try {
       if (typeof sessionStorage !== "undefined" && sessionStorage && sessionStorage.getItem("aiCmDebug") === "1") return true;
     } catch (eSess) {
@@ -214,7 +383,7 @@
     }
   }
   function aiCmDiagLine2(tag, fields) {
-    if (!aiCmDiagOn()) return false;
+    if (!aiCmDiagOn2()) return false;
     try {
       var parts = [];
       var f = fields || {};
@@ -228,8 +397,8 @@
     }
     return true;
   }
-  function aiCmDiagDownload2(trigger, content, fileName, extra) {
-    if (!aiCmDiagOn()) return false;
+  function aiCmDiagDownload(trigger, content, fileName, extra) {
+    if (!aiCmDiagOn2()) return false;
     var e = extra || {};
     var url = "";
     try {
@@ -249,8 +418,8 @@
       src: aiCmDiagStack(1)
     });
   }
-  function aiCmDiagDownloadBlocked2(trigger, content, fileName, reason, extra) {
-    if (!aiCmDiagOn()) return false;
+  function aiCmDiagDownloadBlocked(trigger, content, fileName, reason, extra) {
+    if (!aiCmDiagOn2()) return false;
     var e = extra || {};
     var url = "";
     try {
@@ -301,7 +470,7 @@
       return void 0;
     }
     try {
-      if (typeof aiCmDiagOn !== "function" || !aiCmDiagOn()) return;
+      if (typeof aiCmDiagOn2 !== "function" || !aiCmDiagOn2()) return;
       console.log("[AI CM][warn][" + label + "] " + text, detail);
     } catch (eWarnPrint) {
       return void 0;
@@ -309,12 +478,12 @@
   }
   var DEBUG, __aiCmLogRing, __aiCmLogRingMax;
   var init_debug = __esm({
-    "../utils/debug.js"() {
+    "../utils/debug.ts"() {
       DEBUG = false;
       __aiCmLogRing = [];
       __aiCmLogRingMax = 200;
       try {
-        if (typeof window !== "undefined") window.__aiCmSwallow = swallow;
+        if (typeof window !== "undefined") window.__aiCmSwallow = swallow2;
       } catch (eSwallowExport) {
       }
       try {
@@ -325,1308 +494,14 @@
     }
   });
 
-  // ../utils/google-search-folwr-parser.js
-  var require_google_search_folwr_parser = __commonJS({
-    "../utils/google-search-folwr-parser.js"(exports, module) {
-      (function() {
-        function decodeEntities(s) {
-          if (!s) return "";
-          var out = String(s);
-          out = out.replace(new RegExp("&quot;", "g"), '"');
-          out = out.replace(new RegExp("&amp;", "g"), "&");
-          out = out.replace(new RegExp("&#39;", "g"), "'");
-          out = out.replace(new RegExp("&lt;", "g"), "<");
-          out = out.replace(new RegExp("&gt;", "g"), ">");
-          out = out.replace(new RegExp("&nbsp;", "g"), " ");
-          out = out.replace(/&#(\d+);/g, function(m, d) {
-            try {
-              return String.fromCharCode(parseInt(d, 10));
-            } catch (e) {
-              return m;
-            }
-          });
-          return out;
-        }
-        var FENCE_RE = /(`{3,})[\s\S]*?\1/g;
-        function mapOutsideFences(s, fn) {
-          var str = String(s == null ? "" : s);
-          var out = "";
-          var last = 0;
-          var m;
-          FENCE_RE.lastIndex = 0;
-          while ((m = FENCE_RE.exec(str)) !== null) {
-            out += fn(str.slice(last, m.index)) + m[0];
-            last = m.index + m[0].length;
-          }
-          return out + fn(str.slice(last));
-        }
-        function stripTagsSeg(seg) {
-          return String(seg).replace(/<script[\s\S]*?<\/script>/gi, " ").replace(/<style[\s\S]*?<\/style>/gi, " ").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ");
-        }
-        function stripTags(html) {
-          if (!html) return "";
-          return mapOutsideFences(html, stripTagsSeg).replace(/^\s+/, "").replace(/\s+$/, "");
-        }
-        function sanitizeAssistantSeg(seg) {
-          return String(seg).replace(/<script[\s\S]*?<\/script>/gi, " ").replace(/<style[\s\S]*?<\/style>/gi, " ").replace(/<[^>]+>/g, " ").replace(/[ \t\f\v]+/g, " ").split("\n").map(function(ln) {
-            return ln.trim();
-          }).join("\n").replace(/\n{3,}/g, "\n\n");
-        }
-        function sanitizeAssistant(s) {
-          if (!s) return "";
-          return mapOutsideFences(s, sanitizeAssistantSeg).replace(/^\s+/, "").replace(/\s+$/, "");
-        }
-        function tableCellText(cellEl) {
-          var clone = cellEl.cloneNode(true);
-          clone.querySelectorAll("script, style, button, svg").forEach(function(el) {
-            el.remove();
-          });
-          return stripTags(decodeEntities(clone.innerHTML)).trim();
-        }
-        function tableToMarkdown(tableEl) {
-          var rows = tableEl.querySelectorAll("tr");
-          var lines = [];
-          for (var r = 0; r < rows.length; r++) {
-            var cells = rows[r].querySelectorAll("th, td");
-            var cellTexts = [];
-            for (var c = 0; c < cells.length; c++) {
-              cellTexts.push(tableCellText(cells[c]));
-            }
-            if (cellTexts.length === 0) continue;
-            lines.push("| " + cellTexts.join(" | ") + " |");
-          }
-          return lines.join("\n");
-        }
-        function isQuestionHeading(el) {
-          return el.tagName === "H2" && el.className && String(el.className).indexOf("iMqumd") !== -1;
-        }
-        var CODE_CONTAINER_SEL = 'pre, code, [class*="code-block"], [class*="codeBlock"], [class*="codeblock"]';
-        var CODE_LANG_RE = /^[A-Za-z][A-Za-z0-9+#._-]{0,19}$/;
-        function classOf(el) {
-          try {
-            return String(el && el.className || "");
-          } catch (e) {
-            return "";
-          }
-        }
-        function isCodeLikeNode(el) {
-          if (!el || !el.tagName) return false;
-          var tag = String(el.tagName).toUpperCase();
-          return tag === "PRE" || tag === "CODE" || /code-?block/i.test(classOf(el));
-        }
-        function codeTextOf(el) {
-          if (!el || typeof el.cloneNode !== "function") return "";
-          var clone;
-          try {
-            clone = el.cloneNode(true);
-          } catch (e) {
-            return "";
-          }
-          try {
-            var junk = clone.querySelectorAll("script, style, button, svg");
-            for (var i = 0; i < junk.length; i++) {
-              if (junk[i].parentNode) junk[i].parentNode.removeChild(junk[i]);
-            }
-            var brs = clone.querySelectorAll("br");
-            var doc = clone.ownerDocument || (typeof document !== "undefined" ? document : null);
-            for (var b = 0; b < brs.length; b++) {
-              if (brs[b].parentNode && doc && doc.createTextNode) {
-                brs[b].parentNode.replaceChild(doc.createTextNode("\n"), brs[b]);
-              }
-            }
-          } catch (e2) {
-          }
-          var txt = "";
-          try {
-            txt = String(clone.textContent || "");
-          } catch (e3) {
-            txt = "";
-          }
-          if (txt.indexOf("\n") === -1 && clone.children && clone.children.length > 1) {
-            var allBlock = true;
-            for (var k = 0; k < clone.children.length; k++) {
-              if (!/^(DIV|P|LI|TR|SECTION|ARTICLE|FIGURE|BLOCKQUOTE|H[1-6])$/.test(String(clone.children[k].tagName || "").toUpperCase())) {
-                allBlock = false;
-                break;
-              }
-            }
-            if (allBlock) {
-              var lines = [];
-              for (var k2 = 0; k2 < clone.children.length; k2++) {
-                lines.push(String(clone.children[k2].textContent || ""));
-              }
-              var joined = lines.join("\n");
-              if (joined.replace(/\s+/g, "")) txt = joined;
-            }
-          }
-          return txt.replace(/[ \t]+$/gm, "").replace(/^\n+/, "").replace(/\s+$/, "");
-        }
-        function codeBodyElement(el) {
-          try {
-            var inner = el.querySelectorAll ? el.querySelectorAll("pre, code") : null;
-            if (inner && inner.length) return inner[inner.length - 1];
-          } catch (e) {
-          }
-          return el;
-        }
-        function detectCodeLang(el, langHint) {
-          if (langHint != null && CODE_LANG_RE.test(String(langHint).trim())) return String(langHint).trim();
-          var attrNames = ["code-lang", "data-lang", "data-code-lang"];
-          try {
-            for (var a = 0; a < attrNames.length; a++) {
-              var v = el && el.getAttribute ? el.getAttribute(attrNames[a]) : null;
-              if (v && CODE_LANG_RE.test(String(v).trim())) return String(v).trim();
-            }
-          } catch (e) {
-          }
-          var m = classOf(el).match(/(?:^|[\s_-])(?:language|lang)[-_]([A-Za-z][A-Za-z0-9+#._-]{0,19})/);
-          if (m && CODE_LANG_RE.test(m[1])) return m[1];
-          var cur = el;
-          for (var up = 0; cur && up < 4; up++) {
-            var prev = cur.previousSibling;
-            for (var hops = 0; prev && hops < 3; hops++) {
-              var t = "";
-              try {
-                t = String(prev.textContent || "").trim();
-              } catch (e2) {
-                t = "";
-              }
-              if (t) {
-                if (CODE_LANG_RE.test(t)) return t;
-                break;
-              }
-              prev = prev.previousSibling;
-            }
-            cur = cur.parentNode;
-          }
-          return "";
-        }
-        function isCodeBlockElement(el) {
-          if (!el || !el.tagName) return false;
-          var tag = String(el.tagName).toUpperCase();
-          if (/code-?block/i.test(classOf(el))) return true;
-          if (tag === "PRE") return true;
-          if (tag !== "CODE") return false;
-          if (/(?:^|[\s_-])(?:language|lang)[-_]/.test(classOf(el))) return true;
-          return codeTextOf(el).indexOf("\n") !== -1;
-        }
-        function renderCodeBlock(node, langHint) {
-          if (!node) return "";
-          var body = codeBodyElement(node);
-          var text = codeTextOf(body);
-          if (!text) text = codeTextOf(node);
-          if (!text) return "";
-          var lang = detectCodeLang(node, langHint) || detectCodeLang(body, langHint);
-          var fence = "```";
-          while (text.indexOf(fence) !== -1) fence += "`";
-          return fence + lang + "\n" + text + "\n" + fence;
-        }
-        function answerTextOf(node) {
-          if (!node) return "";
-          if (isCodeBlockElement(node)) return renderCodeBlock(node);
-          if (typeof node.cloneNode !== "function") return "";
-          var clone;
-          try {
-            clone = node.cloneNode(true);
-          } catch (e) {
-            return "";
-          }
-          try {
-            var junk = clone.querySelectorAll("script, style, button, svg");
-            for (var i = 0; i < junk.length; i++) {
-              if (junk[i].parentNode) junk[i].parentNode.removeChild(junk[i]);
-            }
-            var found = clone.querySelectorAll ? clone.querySelectorAll(CODE_CONTAINER_SEL) : [];
-            var outer = [];
-            for (var f = 0; f < found.length; f++) {
-              if (!isCodeBlockElement(found[f])) continue;
-              var nested = false;
-              for (var o = 0; o < outer.length; o++) {
-                if (outer[o].contains && outer[o].contains(found[f])) {
-                  nested = true;
-                  break;
-                }
-              }
-              if (!nested) outer.push(found[f]);
-            }
-            var doc = clone.ownerDocument || (typeof document !== "undefined" ? document : null);
-            for (var c = outer.length - 1; c >= 0; c--) {
-              var fenced = renderCodeBlock(outer[c]);
-              if (!fenced || !outer[c].parentNode || !doc || !doc.createTextNode) continue;
-              outer[c].parentNode.replaceChild(doc.createTextNode("\n" + fenced + "\n"), outer[c]);
-            }
-          } catch (e2) {
-          }
-          var txt = "";
-          try {
-            txt = String(clone.textContent || "");
-          } catch (e3) {
-            txt = "";
-          }
-          return txt.trim();
-        }
-        function answerDomNodes(root) {
-          var doc = root || (typeof document !== "undefined" ? document : null);
-          if (!doc || typeof doc.querySelectorAll !== "function") return [];
-          var nodes = doc.querySelectorAll(".n6owBd.awi2gc, " + CODE_CONTAINER_SEL);
-          var out = [];
-          for (var i = 0; i < nodes.length; i++) {
-            var el = nodes[i];
-            if (isCodeLikeNode(el) && !isCodeBlockElement(el)) continue;
-            var nested = false;
-            for (var j = 0; j < out.length; j++) {
-              if (out[j].contains && out[j].contains(el)) {
-                nested = true;
-                break;
-              }
-            }
-            if (nested) continue;
-            out.push(el);
-          }
-          return out;
-        }
-        var WEB_SEARCH_CHIP_RE = /(?:Самые популярные результаты веб-поиска по этой теме|People also search|Related searches|Похожие запросы|Связанные запросы)/i;
-        var FOREIGN_QUESTION_RE = /^Вы сказали:\s*"/;
-        function nodeText(node) {
-          try {
-            return (node.textContent || "").trim();
-          } catch (e) {
-            return "";
-          }
-        }
-        function isWebSearchChipNode(node) {
-          return WEB_SEARCH_CHIP_RE.test(nodeText(node));
-        }
-        function isForeignQuestionNode(node) {
-          return FOREIGN_QUESTION_RE.test(nodeText(node));
-        }
-        function listItemToMarkdown(liEl) {
-          var clone = liEl.cloneNode(true);
-          clone.querySelectorAll("script, style, button, svg").forEach(function(el) {
-            el.remove();
-          });
-          var label = null;
-          var b = clone.querySelector("strong, b");
-          if (b) {
-            label = (b.textContent || "").replace(/\s+/g, " ").trim();
-            b.remove();
-          }
-          var rest = stripTags(decodeEntities(clone.innerHTML)).trim();
-          if (label) {
-            return "- **" + label + "**" + (rest ? ": " + rest : "");
-          }
-          return rest ? "- " + rest : "";
-        }
-        function listToText(listEl) {
-          var items = listEl.querySelectorAll("li");
-          var lines = [];
-          for (var r = 0; r < items.length; r++) {
-            var t = listItemToMarkdown(items[r]);
-            if (t) lines.push(t);
-          }
-          return lines.join("\n");
-        }
-        function gatherAnswerContentNodes(doc) {
-          var raw = doc.querySelectorAll('.n6owBd.awi2gc, table, [role="heading"], h2, h3, h4, ul, ol, li, [role="list"], [role="listitem"], ' + CODE_CONTAINER_SEL);
-          var out = [];
-          for (var i = 0; i < raw.length; i++) {
-            var el = raw[i];
-            if (isQuestionHeading(el)) continue;
-            if (isCodeLikeNode(el) && !isCodeBlockElement(el)) continue;
-            var nested = false;
-            for (var j = 0; j < out.length; j++) {
-              if (out[j].contains && out[j].contains(el)) {
-                nested = true;
-                break;
-              }
-            }
-            if (nested) continue;
-            out.push(el);
-          }
-          return out;
-        }
-        function assignContentToTurns(turnsArr, contentNodes) {
-          var answers = [];
-          var skipAfterChip = [];
-          for (var ti = 0; ti < turnsArr.length; ti++) {
-            answers[ti] = [];
-            skipAfterChip[ti] = false;
-          }
-          for (var n = 0; n < contentNodes.length; n++) {
-            var node = contentNodes[n];
-            var assigned = -1;
-            for (var t2 = 0; t2 < turnsArr.length; t2++) {
-              if (turnsArr[t2].compareDocumentPosition(node) & Node.DOCUMENT_POSITION_FOLLOWING) {
-                assigned = t2;
-              } else {
-                break;
-              }
-            }
-            if (assigned < 0) continue;
-            if (isForeignQuestionNode(node)) continue;
-            if (isWebSearchChipNode(node)) {
-              skipAfterChip[assigned] = true;
-              continue;
-            }
-            if (skipAfterChip[assigned]) continue;
-            var part = null;
-            if (node.tagName === "TABLE") {
-              var md = tableToMarkdown(node);
-              if (md) part = md;
-            } else if (node.tagName === "UL" || node.tagName === "OL") {
-              var lt = listToText(node);
-              if (lt) part = lt;
-            } else {
-              var ct = answerTextOf(node).trim();
-              if (ct) part = ct;
-            }
-            if (part) answers[assigned].push(part);
-          }
-          return answers;
-        }
-        function readThreadId(doc) {
-          try {
-            var el = doc.querySelector("[data-session-thread-id]");
-            if (el) {
-              var v = el.getAttribute("data-session-thread-id");
-              return v ? v.trim() : "";
-            }
-          } catch (e) {
-          }
-          return "";
-        }
-        function parseGoogleFolwrOpen(htmlText) {
-          var turns = [];
-          var messages = [];
-          if (!htmlText || typeof htmlText !== "string") {
-            return { threadId: "", turns, messages, text: "", count: 0 };
-          }
-          var doc;
-          try {
-            doc = new DOMParser().parseFromString(htmlText, "text/html");
-          } catch (e) {
-            return { threadId: "", turns, messages, text: "", count: 0 };
-          }
-          var threadId = readThreadId(doc);
-          var turnEls = doc.querySelectorAll('[data-scope-id="turn"]');
-          var allAimfl = doc.querySelectorAll('[data-subtree="aimfl"]');
-          var turnsArr = Array.prototype.slice.call(turnEls);
-          var tgQuestions = [];
-          try {
-            var tgRe = /<!--TgQPHd\|[\s\S]*?-->/g;
-            var m;
-            while ((m = tgRe.exec(htmlText)) !== null) {
-              var c = decodeEntities(m[0]);
-              var longRe = /"([^"]{20,})"/g;
-              var lm;
-              var found = null;
-              while ((lm = longRe.exec(c)) !== null) {
-                var cand = lm[1];
-                if (cand.indexOf("\\u0026") !== -1) continue;
-                if (cand.indexOf("OLOoOd") !== -1) continue;
-                if (cand.indexOf("dRog6c") !== -1) continue;
-                if (cand.indexOf("TgQPHd") !== -1) continue;
-                if (!/[а-яёА-ЯЁ]/.test(cand) && cand.indexOf(" ") === -1) continue;
-                found = cand;
-                break;
-              }
-              tgQuestions.push(found);
-            }
-          } catch (e) {
-            swallowSoft(e, "gsa-utils:parseGoogleFolwrOpen-tgqphd");
-          }
-          var contentNodes = gatherAnswerContentNodes(doc);
-          var answers = assignContentToTurns(turnsArr, contentNodes);
-          for (var i = 0; i < turnsArr.length; i++) {
-            var turn = turnsArr[i];
-            var question = null;
-            var h2 = turn.querySelector("h2.iMqumd");
-            if (h2) {
-              var raw = (h2.textContent || "").trim();
-              var qm = raw.match(/^Вы сказали:\s*"([\s\S]*)"$/);
-              question = qm ? qm[1].trim() : raw;
-            }
-            var assistantText = answers[i].length > 0 ? answers[i].join("\n\n") : null;
-            if (!assistantText) {
-              var nestedAimfl = turn.querySelector('[data-subtree="aimfl"]');
-              if (nestedAimfl) {
-                var nat = (nestedAimfl.textContent || "").trim();
-                if (nat) assistantText = nat;
-              }
-            }
-            if (!assistantText && allAimfl[i]) {
-              var at = (allAimfl[i].textContent || "").trim();
-              if (at) assistantText = at;
-            }
-            if (!question && tgQuestions[i]) question = tgQuestions[i];
-            turns.push({
-              id: turn.getAttribute && turn.getAttribute("jsuid") || "idx" + i,
-              userText: question || null,
-              assistantText: assistantText || null
-            });
-          }
-          if (turns.length === 0) {
-            var folifAnswer = null;
-            for (var aa = 0; aa < allAimfl.length; aa++) {
-              var at2 = (allAimfl[aa].textContent || "").trim();
-              if (at2) {
-                folifAnswer = at2;
-                break;
-              }
-            }
-            if (!folifAnswer && contentNodes.length > 0) {
-              var firstNode = contentNodes[0];
-              if (firstNode.tagName === "TABLE") {
-                folifAnswer = tableToMarkdown(firstNode);
-              } else {
-                folifAnswer = answerTextOf(firstNode).trim() || null;
-              }
-            }
-            var folifQuestion = tgQuestions.length > 0 ? tgQuestions[0] : null;
-            if (folifQuestion || folifAnswer) {
-              turns.push({ id: "folif_" + Date.now(), userText: folifQuestion, assistantText: folifAnswer });
-            }
-          }
-          for (var t = 0; t < turns.length; t++) {
-            var t2 = turns[t];
-            if (t2.userText) messages.push({ role: "user", text: stripTags(decodeEntities(t2.userText)) });
-            if (t2.assistantText) messages.push({ role: "assistant", text: sanitizeAssistant(t2.assistantText) });
-          }
-          var text = "";
-          for (var mi = 0; mi < messages.length; mi++) {
-            text += (mi > 0 ? "\n" : "") + messages[mi].text;
-          }
-          return { threadId, turns, messages, text, count: messages.length };
-        }
-        function countTurnContainers(htmlText) {
-          if (!htmlText || typeof htmlText !== "string") return 0;
-          try {
-            var doc = new DOMParser().parseFromString(htmlText, "text/html");
-            return doc.querySelectorAll('[data-scope-id="turn"]').length;
-          } catch (e) {
-            return 0;
-          }
-        }
-        function extractTurnsFromDocument(doc) {
-          if (!doc || typeof doc.querySelectorAll !== "function") return [];
-          var turns = [];
-          try {
-            var turnEls = doc.querySelectorAll('[data-scope-id="turn"]');
-            var allAimfl = doc.querySelectorAll('[data-subtree="aimfl"]');
-            var turnsArr = Array.prototype.slice.call(turnEls);
-            var questions = [];
-            for (var i = 0; i < turnsArr.length; i++) {
-              var h2 = turnsArr[i].querySelector("h2.iMqumd");
-              var q = null;
-              if (h2) {
-                var raw = (h2.textContent || "").trim();
-                var m = raw.match(/^Вы сказали:\s*"([\s\S]*)"$/);
-                q = m ? m[1].trim() : raw;
-              }
-              questions.push(q);
-            }
-            var answers = [];
-            for (var t = 0; t < turnsArr.length; t++) answers[t] = [];
-            var blocks = answerDomNodes(doc);
-            for (var b = 0; b < blocks.length; b++) {
-              var blk = blocks[b];
-              var assigned = -1;
-              for (var t2 = 0; t2 < turnsArr.length; t2++) {
-                if (turnsArr[t2].compareDocumentPosition(blk) & Node.DOCUMENT_POSITION_FOLLOWING) assigned = t2;
-                else break;
-              }
-              if (assigned >= 0 && assigned < turnsArr.length) {
-                var txt = answerTextOf(blk).trim();
-                if (txt) answers[assigned].push(txt);
-              }
-            }
-            for (var k = 0; k < turnsArr.length; k++) {
-              var joined = answers[k].length ? answers[k].join("\n\n") : null;
-              if (!joined && allAimfl[k]) {
-                var at = (allAimfl[k].textContent || "").trim();
-                if (at) joined = at;
-              }
-              turns.push({
-                id: turnsArr[k].getAttribute && turnsArr[k].getAttribute("jsuid") || "idx" + k,
-                userText: questions[k] || null,
-                assistantText: joined || null
-              });
-            }
-          } catch (e) {
-            swallowSoft(e, "gsa-utils:extractTurnsFromDocument");
-          }
-          return turns;
-        }
-        function extractContinuationToken(htmlText) {
-          if (!htmlText || typeof htmlText !== "string") return null;
-          try {
-            var doc = new DOMParser().parseFromString(htmlText, "text/html");
-            var els = doc.querySelectorAll("[data-mstk]");
-            var last = null;
-            for (var i = 0; i < els.length; i++) {
-              var v = els[i].getAttribute("data-mstk");
-              if (v) last = v.trim();
-            }
-            return last;
-          } catch (e) {
-            return null;
-          }
-        }
-        function normalizeTurnKeyPart(s) {
-          return String(s == null ? "" : s).toLowerCase().replace(/\u00a0/g, " ").replace(/[^a-zа-яё0-9]+/g, "");
-        }
-        function isAnswerWrapperTail(tail) {
-          var t = String(tail == null ? "" : tail);
-          var body = t.replace(/^["»”']{0,2}/, "").replace(/^[\s.,:;-]{0,4}/, "");
-          return body.replace(/\s+/g, "").length > 0;
-        }
-        var QUESTION_ASK_RE = /^(?:в\s+)?(?:ответ(?:е)?(?:\s+на\s+вопрос)?|на\s+вопрос|вопрос)\s*:?\s*/i;
-        function wrapperPrefix(text) {
-          var s = String(text == null ? "" : text);
-          var head = s.slice(0, 96);
-          var at = head.indexOf(":");
-          if (at === -1) return null;
-          var after = head.slice(at + 1);
-          var m = /^\s*"/.exec(after);
-          if (!m) return null;
-          return s.slice(0, at + 1 + m[0].length);
-        }
-        function answerWrapperParts(text) {
-          var s = String(text == null ? "" : text);
-          var prefix = wrapperPrefix(s);
-          if (!prefix) return null;
-          var rest = s.slice(prefix.length);
-          var close = rest.indexOf('"');
-          if (close === -1) return null;
-          var tail = rest.slice(close + 1);
-          if (!isAnswerWrapperTail(tail)) return null;
-          var question = rest.slice(0, close).trim();
-          if (!question) return null;
-          var body = tail.replace(/^["»”']{0,2}/, "").replace(/^[\s.,:;-]+/, "");
-          if (!body) return null;
-          return { question, body };
-        }
-        function canonicalAnswerBody(text) {
-          var wrapper = answerWrapperParts(text);
-          if (wrapper) return wrapper.body;
-          var s = String(text == null ? "" : text);
-          try {
-            var q = QUESTION_ASK_RE.exec(s);
-            if (q) {
-              var rest2 = s.slice(q[0].length);
-              var close2 = rest2.indexOf('"?');
-              if (close2 !== -1 && close2 < 200) {
-                var body2 = rest2.slice(close2 + 2).replace(/^[\s.,:;-]+/, "");
-                if (body2) s = body2;
-              }
-            }
-          } catch (e) {
-            return String(text == null ? "" : text);
-          }
-          return s;
-        }
-        function turnIdentityParts(turn) {
-          if (!turn) return { u: "", a: "" };
-          var wrapper = answerWrapperParts(turn.assistantText);
-          var u = normalizeTurnKeyPart(turn.userText);
-          if (!u && wrapper) u = normalizeTurnKeyPart(wrapper.question);
-          var a = normalizeTurnKeyPart(wrapper ? wrapper.body : canonicalAnswerBody(turn.assistantText));
-          return { u, a };
-        }
-        function canonicalTurnKeyOf(turn) {
-          if (!turn) return "";
-          var parts = turnIdentityParts(turn);
-          return parts.u + "||" + parts.a;
-        }
-        function canonicalizeTurnForThread(turn) {
-          if (!turn) return turn;
-          var question = turn.userText == null ? "" : String(turn.userText).trim();
-          if (!question) {
-            var wrapper = answerWrapperParts(turn.assistantText);
-            if (wrapper) question = wrapper.question;
-          }
-          return {
-            id: turn.id,
-            userText: question || null,
-            assistantText: turn.assistantText == null ? null : turn.assistantText
-          };
-        }
-        function isBetterTurn(candidate, current) {
-          if (!current) return true;
-          var la = String(candidate && candidate.assistantText || "").length;
-          var lb = String(current && current.assistantText || "").length;
-          if (la !== lb) return la > lb;
-          return String(candidate && candidate.userText || "").length > String(current && current.userText || "").length;
-        }
-        function turnRecord(t, idFallback) {
-          return {
-            id: t && t.id != null ? t.id : idFallback,
-            userText: t && t.userText || null,
-            assistantText: t && t.assistantText || null
-          };
-        }
-        var PREFIX_MIN_CHARS = 12;
-        var PREFIX_FUZZY_RATIO = 0.8;
-        function bodiesPrefixCompatible(a, b) {
-          var x = String(a == null ? "" : a);
-          var y = String(b == null ? "" : b);
-          if (!x || !y) return false;
-          if (x === y) return true;
-          var n = Math.min(x.length, y.length);
-          if (n < PREFIX_MIN_CHARS) return false;
-          var common = 0;
-          while (common < n && x.charCodeAt(common) === y.charCodeAt(common)) common++;
-          if (common === n) return true;
-          return common / n >= PREFIX_FUZZY_RATIO;
-        }
-        function isFullerTurn(candidate, current) {
-          var la = turnIdentityParts(candidate).a.length;
-          var lb = turnIdentityParts(current).a.length;
-          if (la !== lb) return la > lb;
-          return isBetterTurn(candidate, current);
-        }
-        var PARAGRAPH_PERMUTATION_MIN = 2;
-        function answerBodyParagraphs(turn) {
-          var wrapper = answerWrapperParts(turn && turn.assistantText);
-          var body = wrapper ? wrapper.body : canonicalAnswerBody(turn && turn.assistantText);
-          var lines = String(body == null ? "" : body).split(String.fromCharCode(10));
-          var out = [];
-          var cur = "";
-          for (var i = 0; i < lines.length; i++) {
-            var line = lines[i];
-            if (line.trim() === "") {
-              var p = normalizeTurnKeyPart(cur);
-              if (p) out.push(p);
-              cur = "";
-              continue;
-            }
-            cur = cur ? cur + String.fromCharCode(10) + line : line;
-          }
-          var tail = normalizeTurnKeyPart(cur);
-          if (tail) out.push(tail);
-          return out;
-        }
-        function bodiesParagraphPermutation(aTurn, bTurn) {
-          var pa = answerBodyParagraphs(aTurn);
-          var pb = answerBodyParagraphs(bTurn);
-          if (pa.length < PARAGRAPH_PERMUTATION_MIN || pa.length !== pb.length) return false;
-          pa.sort();
-          pb.sort();
-          for (var i = 0; i < pa.length; i++) {
-            if (pa[i] !== pb[i]) return false;
-          }
-          return true;
-        }
-        function findPrefixCompatibleIndex(turns, turn) {
-          var parts = turnIdentityParts(turn);
-          if (!parts.u || !parts.a) return -1;
-          for (var i = 0; i < turns.length; i++) {
-            var other = turnIdentityParts(turns[i]);
-            if (other.u !== parts.u) continue;
-            if (bodiesPrefixCompatible(other.a, parts.a)) return i;
-            if (other.a.length === parts.a.length && bodiesParagraphPermutation(turns[i], turn)) return i;
-          }
-          return -1;
-        }
-        function reindexTurnKey(byKey, turns, at) {
-          var k;
-          for (k in byKey) {
-            if (byKey[k] === at) delete byKey[k];
-          }
-          var key = canonicalTurnKeyOf(turns[at]);
-          if (key !== "||") byKey[key] = at;
-        }
-        function mergeTurnsById(baseTurns, extraTurns) {
-          baseTurns = Array.isArray(baseTurns) ? baseTurns : [];
-          extraTurns = Array.isArray(extraTurns) ? extraTurns : [];
-          var byId = {};
-          var byKey = {};
-          var out = [];
-          function add(t) {
-            if (!t) return;
-            var id = t.id != null ? String(t.id) : "x" + out.length;
-            var key = canonicalTurnKeyOf(t);
-            var hasId = Object.prototype.hasOwnProperty.call(byId, id);
-            var hasKey = key !== "||" && Object.prototype.hasOwnProperty.call(byKey, key);
-            var at = hasId ? byId[id] : hasKey ? byKey[key] : findPrefixCompatibleIndex(out, t);
-            if (at !== -1) {
-              var richer = hasId || hasKey ? isBetterTurn(t, out[at]) : isFullerTurn(t, out[at]);
-              if (richer) {
-                out[at] = turnRecord(t, out[at].id);
-                reindexTurnKey(byKey, out, at);
-              }
-              return;
-            }
-            byId[id] = out.length;
-            if (key !== "||") byKey[key] = out.length;
-            out.push(turnRecord(t, id));
-          }
-          var i;
-          for (i = 0; i < baseTurns.length; i++) add(baseTurns[i]);
-          for (i = 0; i < extraTurns.length; i++) add(extraTurns[i]);
-          return out;
-        }
-        function mergeTurnsMonotone(baseTurns, extraTurns) {
-          return mergeTurnsById(baseTurns, extraTurns);
-        }
-        function mergeTurnsByKey(baseTurns, extraTurns) {
-          baseTurns = Array.isArray(baseTurns) ? baseTurns : [];
-          extraTurns = Array.isArray(extraTurns) ? extraTurns : [];
-          var byKey = {};
-          var out = [];
-          function add(t) {
-            if (!t) return;
-            var key = canonicalTurnKeyOf(t);
-            if (key === "||") return;
-            var hasKey = Object.prototype.hasOwnProperty.call(byKey, key);
-            var at = hasKey ? byKey[key] : findPrefixCompatibleIndex(out, t);
-            if (at === -1) {
-              byKey[key] = out.length;
-              out.push(turnRecord(t, "x" + out.length));
-              return;
-            }
-            var richer = hasKey ? isBetterTurn(t, out[at]) : isFullerTurn(t, out[at]);
-            if (richer) {
-              out[at] = turnRecord(t, out[at].id);
-              reindexTurnKey(byKey, out, at);
-            }
-          }
-          for (var i = 0; i < baseTurns.length; i++) add(baseTurns[i]);
-          for (var j = 0; j < extraTurns.length; j++) add(extraTurns[j]);
-          return out;
-        }
-        function dedupeTurns(turns) {
-          var list = Array.isArray(turns) ? turns : [];
-          var byKey = {};
-          var out = [];
-          for (var i = 0; i < list.length; i++) {
-            var t = list[i];
-            if (!t) continue;
-            var key = canonicalTurnKeyOf(t);
-            var hasKey = key !== "||" && Object.prototype.hasOwnProperty.call(byKey, key);
-            var at = hasKey ? byKey[key] : findPrefixCompatibleIndex(out, t);
-            if (at === -1) {
-              if (key !== "||") byKey[key] = out.length;
-              out.push(t);
-              continue;
-            }
-            var richer = hasKey ? isBetterTurn(t, out[at]) : isFullerTurn(t, out[at]);
-            if (richer) {
-              out[at] = t;
-              reindexTurnKey(byKey, out, at);
-            }
-          }
-          return out;
-        }
-        function classifyFolwrContinuation(input) {
-          var i = input || {};
-          var ok = i.ok === true;
-          var status = i.status == null ? 0 : i.status;
-          var bodyLength = typeof i.bodyLength === "number" && i.bodyLength >= 0 ? i.bodyLength : 0;
-          var newTurns = typeof i.newTurns === "number" && i.newTurns > 0 ? i.newTurns : 0;
-          var cursor = i.cursor ? String(i.cursor) : null;
-          var sentCursor = i.sentCursor ? String(i.sentCursor) : null;
-          var cursorRepeated = !!(cursor && sentCursor && cursor === sentCursor);
-          var kind;
-          var complete, canContinue;
-          if (!ok) {
-            kind = "http-error";
-            complete = false;
-            canContinue = false;
-          } else if (bodyLength === 0) {
-            kind = "empty-body";
-            complete = true;
-            canContinue = false;
-          } else if (cursorRepeated) {
-            kind = "cursor-repeat";
-            complete = true;
-            canContinue = false;
-          } else if (newTurns > 0) {
-            kind = "new-turns";
-            complete = false;
-            canContinue = true;
-          } else {
-            kind = "no-new-turns";
-            complete = true;
-            canContinue = false;
-          }
-          return {
-            kind,
-            complete,
-            canContinue,
-            status,
-            ok,
-            bodyLength,
-            newTurns,
-            cursor,
-            cursorRepeated,
-            log: "kind=" + kind + " status=" + status + " ok=" + (ok ? 1 : 0) + " len=" + bodyLength + "B \u0445\u043E\u0434\u043E\u0432=+" + newTurns + " \u043A\u0443\u0440\u0441\u043E\u0440=" + (cursor ? "\u0435\u0441\u0442\u044C(" + (cursorRepeated ? "\u043F\u043E\u0432\u0442\u043E\u0440" : "\u043D\u043E\u0432\u044B\u0439") + ")" : "\u043D\u0435\u0442")
-          };
-        }
-        if (typeof window !== "undefined") {
-          window.parseGoogleFolwrOpen = parseGoogleFolwrOpen;
-          window.GoogleFolwrUtils = {
-            countTurnContainers,
-            extractTurnsFromDocument,
-            mergeTurnsByKey,
-            extractContinuationToken,
-            mergeTurnsById,
-            mergeTurnsMonotone,
-            classifyFolwrContinuation,
-            // O-32: каноническая идентичность/форма хода — ОДИН источник правды для сетевого пути,
-            // DOM-добора перехватчика и DOM-пути адаптера (см. блок «O-32» ниже по файлу).
-            canonicalTurnKeyOf,
-            canonicalAnswerBody,
-            canonicalizeTurnForThread,
-            normalizeTurnKeyPart,
-            // O-32 (фикс A/C): префикс-терпимая идентичность хода и дедуп списка перед кэшем.
-            turnIdentityParts,
-            bodiesPrefixCompatible,
-            dedupeTurns,
-            // O-45: общий рендер код-блоков (```lang … ```) и отбор узлов DOM-пути —
-            // переиспользуются адаптером (adapters/google-search-adapter.js) и тестами.
-            renderCodeBlock,
-            answerTextOf,
-            answerDomNodes,
-            isCodeBlockElement
-          };
-        }
-        if (typeof module !== "undefined" && module.exports) {
-          module.exports = {
-            parseGoogleFolwrOpen,
-            countTurnContainers,
-            extractTurnsFromDocument,
-            mergeTurnsByKey,
-            extractContinuationToken,
-            mergeTurnsById,
-            mergeTurnsMonotone,
-            classifyFolwrContinuation,
-            canonicalTurnKeyOf,
-            canonicalAnswerBody,
-            canonicalizeTurnForThread,
-            normalizeTurnKeyPart,
-            turnIdentityParts,
-            bodiesPrefixCompatible,
-            dedupeTurns,
-            renderCodeBlock,
-            answerTextOf,
-            answerDomNodes,
-            isCodeBlockElement
-          };
-        }
-      })();
-    }
-  });
-
-  // ../utils/export-text-builders.js
-  var require_export_text_builders = __commonJS({
-    "../utils/export-text-builders.js"(exports, module) {
-      init_buildReferenceText();
-      (function() {
-        "use strict";
-        function aiCmI18nMessage(key, fallback, substitutions) {
-          try {
-            if (typeof chrome !== "undefined" && chrome.i18n && typeof chrome.i18n.getMessage === "function") {
-              var message = substitutions ? chrome.i18n.getMessage(key, substitutions) : chrome.i18n.getMessage(key);
-              if (message) return message;
-            }
-          } catch (eMessage) {
-          }
-          return fallback;
-        }
-        var REASONING_SECTION_TAG = "[REASONING]";
-        var ANSWER_SECTION_TAG = "[ANSWER]";
-        function reasoningOfMessage(msg) {
-          if (!msg || typeof msg !== "object") return "";
-          var r = msg.reasoning;
-          return typeof r === "string" ? r : "";
-        }
-        function withReasoningSections(text, reasoning) {
-          var t = typeof text === "string" ? text : "";
-          var r = typeof reasoning === "string" ? reasoning : "";
-          if (!r) return t;
-          if (t.indexOf(r) !== -1) return t;
-          return REASONING_SECTION_TAG + "\n" + r + "\n\n" + ANSWER_SECTION_TAG + "\n" + t;
-        }
-        function messageTextWithReasoning(msg) {
-          if (!msg || typeof msg !== "object") return "";
-          return withReasoningSections(msg.text, reasoningOfMessage(msg));
-        }
-        function reasoningOfMessageForExport(msg, useHidden) {
-          var r = reasoningOfMessage(msg);
-          if (r) return r;
-          if (useHidden !== true || !msg || typeof msg !== "object") return "";
-          return typeof msg.hiddenReasoning === "string" ? msg.hiddenReasoning : "";
-        }
-        function markersMessageTextWithReasoning(msg, useHidden) {
-          return withReasoningSections(
-            messageTextForMarkers(msg),
-            reasoningOfMessageForExport(msg, useHidden)
-          );
-        }
-        var TXT_ROLE_MARKER_SITES = ["qwen"];
-        function isTxtRoleMarkerHistory(history) {
-          try {
-            var site = String(history && history.site || "").toLowerCase();
-            return TXT_ROLE_MARKER_SITES.indexOf(site) !== -1;
-          } catch (e) {
-            return false;
-          }
-        }
-        function txtRoleMarker(role) {
-          return role === "user" ? "USER:" : "ASSISTANT:";
-        }
-        function mdRoleMarker(role) {
-          return role === "user" ? "### USER" : "### ASSISTANT";
-        }
-        var CONTAINER_MIN_CONTAINED = 2;
-        var CONTAINER_COVER_MIN = 0.8;
-        function messageTextForMarkers(msg) {
-          if (!msg || typeof msg !== "object") return "";
-          if (typeof msg.text === "string" && msg.text) return msg.text;
-          if (typeof msg.content === "string") return msg.content;
-          return typeof msg.text === "string" ? msg.text : "";
-        }
-        function dropContainerMessages(list) {
-          var src = Array.isArray(list) ? list : [];
-          var texts = [];
-          for (var t = 0; t < src.length; t++) texts.push(messageTextForMarkers(src[t]));
-          var keep = [];
-          for (var c = 0; c < src.length; c++) {
-            var candidate = texts[c];
-            var contained = 0;
-            var covered = 0;
-            var longest = 0;
-            if (candidate) {
-              for (var j = 0; j < texts.length; j++) {
-                var other = texts[j];
-                if (j === c || !other || other.length >= candidate.length) continue;
-                if (candidate.indexOf(other) === -1) continue;
-                contained++;
-                covered += other.length;
-                if (other.length > longest) longest = other.length;
-              }
-            }
-            var isContainer = contained >= CONTAINER_MIN_CONTAINED && covered >= CONTAINER_COVER_MIN * candidate.length && candidate.length >= 2 * longest;
-            if (!isContainer) keep.push(src[c]);
-          }
-          return keep;
-        }
-        function diagTxtRoleStructure(list, totalCount) {
-          if (!diagOn()) return false;
-          try {
-            var kept = Array.isArray(list) ? list.length : -1;
-            var total = typeof totalCount === "number" ? totalCount : kept;
-            var first = Array.isArray(list) && list.length > 0 ? list[0] : null;
-            var text = messageTextForMarkers(first);
-            var kind = "\u043D\u0435\u0442";
-            if (first && typeof first === "object") {
-              if (typeof first.text === "string") kind = "text";
-              else if (typeof first.content === "string") kind = "content";
-            }
-            console.log(DIAG_PREFIX + " txt-roles site=qwen isArray=" + Array.isArray(list) + " msgs=" + total + " kept=" + kept + " dropped-containers=" + (kept >= 0 && total >= kept ? total - kept : 0) + " first.role=" + (first && first.role !== void 0 && first.role !== null ? String(first.role) : "(\u043D\u0435\u0442)") + " first.kind=" + kind + " first.len=" + text.length + " first.head=" + (diagHead(text, 60) || "\u043F\u0443\u0441\u0442\u043E"));
-          } catch (eLogRoles) {
-          }
-          return true;
-        }
-        function renderReferenceText(list) {
-          return buildReferenceText(list);
-        }
-        function renderReferenceTextWithRoleMarkers(list) {
-          var src = Array.isArray(list) ? list : [];
-          var parts = [];
-          for (var i = 0; i < src.length; i++) {
-            var m = src[i] || {};
-            var text = renderReferenceText([{ role: m.role, text: messageTextForMarkers(m) }]);
-            if (text === null) return null;
-            if (!String(text).trim()) continue;
-            parts.push(txtRoleMarker(m.role) + "\n" + text);
-          }
-          return parts.join("\n\n");
-        }
-        function buildTxtFromHistory(history) {
-          var hist = history || {};
-          var site = typeof hist.site === "string" ? hist.site : "";
-          var messages = history && Array.isArray(history.messages) ? history.messages : [];
-          var marked = isTxtRoleMarkerHistory(history);
-          var kept = marked ? dropContainerMessages(messages) : messages;
-          var forTxt = kept.map(function(m) {
-            var text = marked ? markersMessageTextWithReasoning(m, true) : messageTextWithReasoning(m);
-            if (!m || typeof m !== "object" || text === m.text) return m;
-            var copy = {};
-            for (var k in m) {
-              if (Object.prototype.hasOwnProperty.call(m, k)) copy[k] = m[k];
-            }
-            copy.text = text;
-            return copy;
-          });
-          var out;
-          if (marked) {
-            diagTxtRoleStructure(forTxt, messages.length);
-            out = renderReferenceTextWithRoleMarkers(forTxt);
-          } else {
-            out = renderReferenceText(forTxt);
-          }
-          if (site === "gemini" && hist.sourceTier && out) out = hist.sourceTier + "\n\n" + out;
-          return out === null ? "" : out;
-        }
-        function exportTokenSnapshot(history) {
-          var h = history || {};
-          var tokens = typeof h.tokens === "number" ? h.tokens : 0;
-          var limit = typeof h.limit === "number" ? h.limit : 0;
-          var percent = typeof h.percent === "number" ? h.percent : 0;
-          if (limit > 0) {
-            var calc = Math.round(tokens / limit * 1e3) / 10;
-            if (calc !== percent) percent = calc;
-          }
-          return { tokens, limit, percent };
-        }
-        function buildMdFromHistory(history, platform) {
-          var h = history || {};
-          var site = typeof h.site === "string" ? h.site : "";
-          var lines = [];
-          lines.push(aiCmI18nMessage("export_md_title", "# AI Context Monitor \u2014 \u044D\u043A\u0441\u043F\u043E\u0440\u0442 \u0438\u0441\u0442\u043E\u0440\u0438\u0438"));
-          lines.push("");
-          lines.push(aiCmI18nMessage("export_md_platform", "\u041F\u043B\u0430\u0442\u0444\u043E\u0440\u043C\u0430: " + (platform || "AI Chat"), [platform || "AI Chat"]));
-          lines.push(aiCmI18nMessage("export_md_model", "\u041C\u043E\u0434\u0435\u043B\u044C: " + (h.model || "\u2014"), [h.model || "\u2014"]));
-          var exportedAt = (/* @__PURE__ */ new Date()).toISOString();
-          lines.push(aiCmI18nMessage("export_md_date", "\u0414\u0430\u0442\u0430 \u044D\u043A\u0441\u043F\u043E\u0440\u0442\u0430: " + exportedAt, [exportedAt]));
-          var snap = exportTokenSnapshot(h);
-          var tokens = snap.tokens;
-          var limit = snap.limit;
-          var percent = snap.percent;
-          if (tokens === 0 && limit === 0) {
-            lines.push("\u0422\u043E\u043A\u0435\u043D\u044B: \u043D/\u0434 (" + percent + "%)");
-          } else {
-            lines.push(aiCmI18nMessage("export_md_tokens", "\u0422\u043E\u043A\u0435\u043D\u044B: " + tokens + " / " + limit + " (" + percent + "%)", [String(tokens), String(limit), String(percent)]));
-          }
-          lines.push("");
-          if (site === "gemini" && h.sourceTier) {
-            lines.push(h.sourceTier, "");
-          }
-          var mdMarked = isTxtRoleMarkerHistory(h);
-          var messages = Array.isArray(h.messages) ? h.messages : [];
-          if (mdMarked) messages = dropContainerMessages(messages);
-          for (var i = 0; i < messages.length; i++) {
-            var msg = messages[i] || {};
-            if (typeof aiCmDiagLine === "function") {
-              aiCmDiagLine("claude-role-builder", { msgRole: msg.role, mdMarked });
-            }
-            var title = mdMarked ? mdRoleMarker(msg.role) : msg.role === "user" || msg.role === "human" ? aiCmI18nMessage("export_md_role_user", "## \u041F\u043E\u043B\u044C\u0437\u043E\u0432\u0430\u0442\u0435\u043B\u044C") : aiCmI18nMessage("export_md_role_assistant", "## \u0410\u0441\u0441\u0438\u0441\u0442\u0435\u043D\u0442");
-            lines.push(title);
-            lines.push("");
-            lines.push(mdMarked ? markersMessageTextWithReasoning(msg, true) : messageTextWithReasoning(msg));
-            lines.push("");
-          }
-          return lines.join("\n");
-        }
-        function buildJsonFromHistory(history, platform) {
-          var h = history || {};
-          return JSON.stringify({
-            platform: platform || "AI Chat",
-            model: h.model || "",
-            exportedAt: (/* @__PURE__ */ new Date()).toISOString(),
-            tokens: typeof h.tokens === "number" ? h.tokens : 0,
-            limit: typeof h.limit === "number" ? h.limit : 0,
-            percent: typeof h.percent === "number" ? h.percent : 0,
-            // Two-Tier (v89): аддитивное поле метаданных. undefined → JSON.stringify ключ НЕ
-            // добавляет, поэтому у прочих платформ и у Gemini без метки байты прежние.
-            sourceTier: h.sourceTier,
-            messages: Array.isArray(h.messages) ? h.messages : []
-          }, null, 2);
-        }
-        var DIAG_PREFIX = "[AI CM][diag]";
-        function diagOn() {
-          try {
-            if (typeof sessionStorage !== "undefined" && sessionStorage && sessionStorage.getItem("aiCmDebug") === "1") return true;
-          } catch (eSess) {
-          }
-          try {
-            if (typeof window !== "undefined" && window && window.__aiCmDebugLogs === true) return true;
-          } catch (eWin) {
-          }
-          return false;
-        }
-        function diagHead(v, n) {
-          try {
-            var lim = typeof n === "number" && n > 0 ? n : 100;
-            if (v === void 0 || v === null) return "";
-            var s = String(v);
-            if (!s) return "";
-            var flat = s.replace(/\s+/g, " ").trim();
-            if (!flat) return "";
-            return flat.length > lim ? flat.slice(0, lim) + "\u2026" : flat;
-          } catch (eHead) {
-            return "";
-          }
-        }
-        function diagStack() {
-          try {
-            var lines = String(new Error().stack || "").split("\n");
-            var out = [];
-            for (var i = 1; i < lines.length && out.length < 4; i++) {
-              var s = String(lines[i] || "").replace(/\s+/g, " ").trim();
-              if (!s || s.indexOf("diag") !== -1) continue;
-              out.push(s);
-            }
-            return out.join(" <- ");
-          } catch (eStack) {
-            return "";
-          }
-        }
-        function diagDownload(trigger, content, fileName, extra) {
-          try {
-            if (typeof aiCmDiagDownload === "function") return aiCmDiagDownload(trigger, content, fileName, extra);
-          } catch (eGlobal) {
-          }
-          if (!diagOn()) return false;
-          try {
-            var e = extra || {};
-            var url = "";
-            try {
-              url = String(typeof location !== "undefined" && location && location.href || "");
-            } catch (eUrl) {
-            }
-            console.log(DIAG_PREFIX + " download trigger=" + (trigger || "(\u043D\u0435\u0442)") + " file=" + (fileName === void 0 || fileName === null || String(fileName) === "" ? "\u043F\u0443\u0441\u0442\u043E\u0435" : String(fileName)) + " bytes100=" + (diagHead(content, 100) || "\u043F\u0443\u0441\u0442\u043E") + " len=" + (content === void 0 || content === null ? 0 : String(content).length) + " mime=" + (e.mime === void 0 ? "(\u043D\u0435\u0442)" : e.mime) + " url=" + url + " threadId=" + (e.threadId === void 0 || e.threadId === "" ? "(\u043D\u0435\u0442)" : e.threadId) + " site=" + (e.site === void 0 ? "" : e.site) + " reason=" + (e.reason === void 0 ? "" : e.reason) + " src=" + diagStack());
-          } catch (eLog) {
-          }
-          return true;
-        }
-        var XSSI_PREFIX_LEN = 4;
-        function startsWithXssiPrefix(content) {
-          try {
-            if (content === void 0 || content === null) return false;
-            var s = String(content);
-            if (s.length < XSSI_PREFIX_LEN) return false;
-            return s.charCodeAt(0) === 41 && s.charCodeAt(1) === 93 && s.charCodeAt(2) === 125 && s.charCodeAt(3) === 39;
-          } catch (eXssi) {
-            return false;
-          }
-        }
-        function downloadBlockReason(content, fileName) {
-          if (startsWithXssiPrefix(content)) return "xssi-prefix";
-          if (fileName === void 0 || fileName === null || String(fileName).trim() === "") return "empty-name";
-          return null;
-        }
-        function diagDownloadBlocked(trigger, content, fileName, reason, extra) {
-          try {
-            if (typeof aiCmDiagDownloadBlocked === "function") {
-              return aiCmDiagDownloadBlocked(trigger, content, fileName, reason, extra);
-            }
-          } catch (eGlobalBlocked) {
-          }
-          if (!diagOn()) return false;
-          try {
-            var e = extra || {};
-            var url = "";
-            try {
-              url = String(typeof location !== "undefined" && location && location.href || "");
-            } catch (eUrlB) {
-            }
-            console.log(DIAG_PREFIX + " download-blocked reason=" + (reason || "(\u043D\u0435\u0442)") + " trigger=" + (trigger || "(\u043D\u0435\u0442)") + " file=" + (fileName === void 0 || fileName === null || String(fileName) === "" ? "\u043F\u0443\u0441\u0442\u043E\u0435" : String(fileName)) + " bytes100=" + (diagHead(content, 100) || "\u043F\u0443\u0441\u0442\u043E") + " len=" + (content === void 0 || content === null ? 0 : String(content).length) + " mime=" + (e.mime === void 0 ? "(\u043D\u0435\u0442)" : e.mime) + " url=" + url + " threadId=" + (e.threadId === void 0 || e.threadId === "" ? "(\u043D\u0435\u0442)" : e.threadId) + " site=" + (e.site === void 0 ? "" : e.site) + " src=" + diagStack());
-          } catch (eLogBlocked) {
-          }
-          return true;
-        }
-        function downloadBlob(content, fileName, mimeType, trigger, extra) {
-          var ex = extra || {};
-          var blockReason = downloadBlockReason(content, fileName);
-          if (blockReason) {
-            try {
-              diagDownloadBlocked(
-                trigger || "builder-download",
-                content,
-                fileName,
-                blockReason,
-                { mime: mimeType, threadId: ex.threadId, site: ex.site }
-              );
-            } catch (eDiagBlocked) {
-            }
-            return false;
-          }
-          try {
-            diagDownload(
-              trigger || "builder-download",
-              content,
-              fileName,
-              { mime: mimeType, threadId: ex.threadId, site: ex.site, reason: ex.reason }
-            );
-          } catch (eDiag) {
-          }
-          try {
-            var blob = new Blob([content], { type: mimeType });
-            var url = URL.createObjectURL(blob);
-            var a = document.createElement("a");
-            a.href = url;
-            a.download = fileName;
-            document.body.appendChild(a);
-            a.click();
-            a.remove();
-            setTimeout(function() {
-              URL.revokeObjectURL(url);
-            }, 1e3);
-          } catch (e) {
-            console.warn("[export] \u043D\u0435 \u0443\u0434\u0430\u043B\u043E\u0441\u044C \u0441\u043A\u0430\u0447\u0430\u0442\u044C \u0444\u0430\u0439\u043B:", e);
-          }
-          return true;
-        }
-        var Api = {
-          buildTxtFromHistory,
-          buildMdFromHistory,
-          buildJsonFromHistory,
-          downloadBlob,
-          // O-27 (защитный фикс): причина отказа точки скачивания (null — выдача разрешена) и
-          // сама точка отказа наружу — для пинов тестов и переиспользования вызывающим кодом.
-          aiCmDownloadBlockReason: downloadBlockReason,
-          aiCmDiagDownloadBlocked: diagDownloadBlocked,
-          // O-27/O-32: диагностические хелперы наружу (content.js/export-manager.js зовут их
-          // через window.AiCmExportBuilders, если глобальный utils/debug.js не подключён).
-          aiCmDiagOn: diagOn,
-          aiCmDiagHead: diagHead,
-          aiCmDiagDownload: diagDownload,
-          // O-35: рендер reasoning контрактом DeepSeek — чистая функция наружу (пины тестов
-          // и переиспользование; на боевом пути вызывается только двумя сборщиками выше).
-          aiCmMessageTextWithReasoning: messageTextWithReasoning,
-          aiCmWithReasoningSections: withReasoningSections,
-          // O-37 (C): источник размышления для маркерного пути (reasoning, иначе поле захвата
-          // hiddenReasoning) и композиция «текст сообщения + секции» — чистые функции наружу;
-          // на боевом пути их зовут только buildTxtFromHistory/buildMdFromHistory выше.
-          aiCmReasoningOfMessageForExport: reasoningOfMessageForExport,
-          aiCmMarkersMessageTextWithReasoning: markersMessageTextWithReasoning,
-          // O-36 (D2): маркеры ролей txt-экспорта — чистые предикаты наружу (пины тестов;
-          // на боевом пути вызываются только сборщиком buildTxtFromHistory выше).
-          aiCmTxtRoleMarker: txtRoleMarker,
-          aiCmIsTxtRoleMarkerHistory: isTxtRoleMarkerHistory,
-          aiCmTxtRoleMarkerSites: TXT_ROLE_MARKER_SITES,
-          // O-36 (D2.1): маркер роли md (Qwen Studio), текст сообщения для маркерного пути
-          // (с фолбэком на .content) и контейнер-чистка — чистые функции наружу для пинов
-          // и переиспользования; на боевом пути их зовут только два сборщика выше.
-          aiCmMdRoleMarker: mdRoleMarker,
-          aiCmMessageTextForMarkers: messageTextForMarkers,
-          aiCmDropContainerMessages: dropContainerMessages,
-          aiCmDiagTxtRoleStructure: diagTxtRoleStructure,
-          aiCmContainerRules: { minContained: CONTAINER_MIN_CONTAINED, coverMin: CONTAINER_COVER_MIN }
-        };
-        if (typeof module !== "undefined" && module.exports) module.exports = Api;
-        if (typeof window !== "undefined") window.AiCmExportBuilders = Api;
-      })();
-    }
-  });
-
-  // entry-content.js
-  var require_entry_content = __commonJS({
-    "entry-content.js"(exports, module) {
-      init_buildReferenceText();
-      init_platform();
-      init_debug();
-      var CYRILLIC_CHARS_PER_TOKEN = 3.3;
-      var Tokenizer = {
+  // ../utils/tokenizer.ts
+  var CYRILLIC_CHARS_PER_TOKEN, Tokenizer;
+  var init_tokenizer = __esm({
+    "../utils/tokenizer.ts"() {
+      CYRILLIC_CHARS_PER_TOKEN = 3.3;
+      Tokenizer = {
         CYRILLIC_CHARS_PER_TOKEN,
-        /**
-         * Определяет тип символа.
-         * @param {string} char Один символ текста.
-         * @returns {CharType} Класс символа для выбора эвристики.
-         */
+        /** Определяет класс символа для выбора эвристики. */
         _getCharType(char) {
           if (/[а-яёА-ЯЁ]/.test(char)) return "cyrillic";
           if (/[\u4E00-\u9FFF\u3040-\u30FF\uAC00-\uD7AF]/.test(char)) return "cjk";
@@ -1636,11 +511,7 @@
           if (/[.,!?;:()\[\]{}"'«»\-—]/.test(char)) return "punctuation";
           return "other";
         },
-        /**
-         * Приблизительный подсчёт токенов в тексте.
-         * @param {string} text - текст для оценки
-         * @returns {number} - приблизительное количество токенов
-         */
+        /** Приблизительный подсчёт токенов в тексте. */
         countTokens(text) {
           if (!text || text.length === 0) return 0;
           let tokens = 0;
@@ -1700,11 +571,8 @@
         },
         // countTokensFast удалён в v1.1 — дублировал логику countTokens и не вызывался нигде.
         /**
-         * Оценивает токены в диалоге с учётом структуры чата.
-         * Учитывает накладные расходы на форматирование сообщений.
-         * @param {string} dialogText - полный текст диалога
-         * @param {number} [messageCount=1] - количество сообщений
-         * @returns {number} - токены текста плюс накладные расходы на форматирование
+         * Оценивает токены в диалоге с учётом структуры чата:
+         * текст плюс накладные расходы на форматирование сообщений.
          */
         estimateDialogTokens(dialogText, messageCount = 1) {
           const textTokens = this.countTokens(dialogText);
@@ -1712,13 +580,16 @@
           return textTokens + overhead;
         }
       };
-      if (typeof module !== "undefined" && module.exports) {
-        module.exports = Tokenizer;
-      }
-      var ModelConfig = {
-        /** Общий потолок окна: действующий лимит = min(contextLimit, это значение). @type {number} */
+    }
+  });
+
+  // ../utils/model-config.ts
+  var ModelConfig;
+  var init_model_config = __esm({
+    "../utils/model-config.ts"() {
+      ModelConfig = {
+        /** Общий потолок окна: действующий лимит = min(contextLimit, это значение). */
         EFFECTIVE_CAP_DEFAULT: 128e3,
-        /** @type {ModelCatalog} */
         models: {
           // ---- OpenAI: текущая линейка 2026-10 ----
           // Окна взяты с официальной страницы моделей OpenAI (platform.openai.com/docs/models).
@@ -1744,6 +615,26 @@
             provider: "OpenAI",
             contextLimit: 105e4,
             description: "GPT-5.6 Terra \u2014 \u043E\u043A\u043D\u043E 1 050 000 (API)"
+            // Источник: https://platform.openai.com/docs/models (снят 2026-10-04)
+          },
+          // ЖИВАЯ ПРИЁМКА 2026-11-09 (chatgpt.com): сеть отдаёт raw="gpt-6" и
+          // raw="gpt-6-turbo". Без явного ключа resolveModelId не находил совпадения
+          // (ни префикса, ни подстроки) и бейдж падал в siteDefaults ('gpt-5.5').
+          // 'gpt-6-turbo' держим отдельным ключом, чтобы турбо-вариант не схлопывался
+          // префиксом в базовую линейку. Лимит — как у остальных GPT-6 из снимка
+          // 2026-10-04 (своего окна для turbo в документации не заявлено).
+          "gpt-6": {
+            name: "GPT-6",
+            provider: "OpenAI",
+            contextLimit: 105e4,
+            description: "\u041B\u0438\u043D\u0435\u0439\u043A\u0430 GPT-6, \u043E\u043A\u043D\u043E 1 050 000 (API)"
+            // Источник: https://platform.openai.com/docs/models (снят 2026-10-04)
+          },
+          "gpt-6-turbo": {
+            name: "GPT-6 Turbo",
+            provider: "OpenAI",
+            contextLimit: 105e4,
+            description: "GPT-6 Turbo \u2014 \u043E\u043A\u043D\u043E 1 050 000 (API)"
             // Источник: https://platform.openai.com/docs/models (снят 2026-10-04)
           },
           "gpt-6-astra": {
@@ -2418,9 +1309,6 @@
           return "gemini-flash-latest";
         }
       };
-      if (typeof module !== "undefined" && module.exports) {
-        module.exports = ModelConfig;
-      }
       (function() {
         var V = ["1.5", "2.0", "2.5", "3.1", "3.5", "3.6", "3.7"];
         var F = ["Flash", "Pro", "Ultra"];
@@ -2454,6 +1342,3623 @@
           if (r && r.contextLimit !== 1048576) r.contextLimit = 1048576;
         });
       })();
+    }
+  });
+
+  // ../utils/buildReferenceText.ts
+  function cleanInline(s) {
+    s = s.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, "$1");
+    s = s.replace(/(\*\*|__)/g, "");
+    s = s.replace(/(?<![*\w])\*([^*\n]+)\*(?![\w*])/g, "$1");
+    s = s.replace(/(?<![\w_])\_([^_\n]+)\_(?![\w_])/g, "$1");
+    s = s.replace(/`/g, "");
+    return s;
+  }
+  function cleanLine(line) {
+    var s = String(line == null ? "" : line);
+    s = s.replace(/^#{1,6}\s+/, "");
+    s = s.replace(/^>\s?/, "");
+    s = s.replace(/^[-*+]\s+/, "");
+    return s;
+  }
+  function cleanText(text) {
+    var lines = String(text).split("\n");
+    var out = [];
+    for (var i = 0; i < lines.length; i++) {
+      var line = lines[i];
+      var trimmed = line.trim();
+      if (/^-{3,}$/.test(trimmed)) continue;
+      out.push(cleanInline(cleanLine(line)));
+    }
+    return out.join("\n");
+  }
+  function buildReferenceText(messages) {
+    var list = Array.isArray(messages) ? messages : [];
+    var parts = [];
+    for (var i = 0; i < list.length; i++) {
+      var msg = list[i] || {};
+      parts.push(cleanText(msg.text == null ? "" : msg.text));
+    }
+    return parts.join("\n\n");
+  }
+  var init_buildReferenceText = __esm({
+    "../utils/buildReferenceText.ts"() {
+    }
+  });
+
+  // ../utils/export-text-builders.ts
+  function aiCmI18nMessage(key, fallback, substitutions) {
+    try {
+      if (typeof chrome !== "undefined" && chrome.i18n && typeof chrome.i18n.getMessage === "function") {
+        var message = substitutions ? chrome.i18n.getMessage(key, substitutions) : chrome.i18n.getMessage(key);
+        if (message) return message;
+      }
+    } catch (eMessage) {
+    }
+    return fallback;
+  }
+  function reasoningOfMessage(msg) {
+    if (!msg || typeof msg !== "object") return "";
+    var r = msg.reasoning;
+    return typeof r === "string" ? r : "";
+  }
+  function withReasoningSections(text, reasoning) {
+    var t = typeof text === "string" ? text : "";
+    var r = typeof reasoning === "string" ? reasoning : "";
+    if (!r) return t;
+    if (t.indexOf(r) !== -1) return t;
+    return REASONING_SECTION_TAG + "\n" + r + "\n\n" + ANSWER_SECTION_TAG + "\n" + t;
+  }
+  function messageTextWithReasoning(msg) {
+    if (!msg || typeof msg !== "object") return "";
+    return withReasoningSections(msg.text, reasoningOfMessage(msg));
+  }
+  function reasoningOfMessageForExport(msg, useHidden) {
+    var r = reasoningOfMessage(msg);
+    if (r) return r;
+    if (useHidden !== true || !msg || typeof msg !== "object") return "";
+    return typeof msg.hiddenReasoning === "string" ? msg.hiddenReasoning : "";
+  }
+  function markersMessageTextWithReasoning(msg, useHidden) {
+    return withReasoningSections(
+      messageTextForMarkers(msg),
+      reasoningOfMessageForExport(msg, useHidden)
+    );
+  }
+  function isTxtRoleMarkerHistory(history) {
+    try {
+      var site = String(history && history.site || "").toLowerCase();
+      return TXT_ROLE_MARKER_SITES.indexOf(site) !== -1;
+    } catch (e) {
+      return false;
+    }
+  }
+  function txtRoleMarker(role) {
+    return role === "user" ? "USER:" : "ASSISTANT:";
+  }
+  function mdRoleMarker(role) {
+    return role === "user" ? "### USER" : "### ASSISTANT";
+  }
+  function messageTextForMarkers(msg) {
+    if (!msg || typeof msg !== "object") return "";
+    if (typeof msg.text === "string" && msg.text) return msg.text;
+    if (typeof msg.content === "string") return msg.content;
+    return typeof msg.text === "string" ? msg.text : "";
+  }
+  function dropContainerMessages(list) {
+    var src = Array.isArray(list) ? list : [];
+    var texts = [];
+    for (var t = 0; t < src.length; t++) texts.push(messageTextForMarkers(src[t]));
+    var keep = [];
+    for (var c = 0; c < src.length; c++) {
+      var candidate = texts[c];
+      var contained = 0;
+      var covered = 0;
+      var longest = 0;
+      if (candidate) {
+        for (var j = 0; j < texts.length; j++) {
+          var other = texts[j];
+          if (j === c || !other || other.length >= candidate.length) continue;
+          if (candidate.indexOf(other) === -1) continue;
+          contained++;
+          covered += other.length;
+          if (other.length > longest) longest = other.length;
+        }
+      }
+      var isContainer = contained >= CONTAINER_MIN_CONTAINED && covered >= CONTAINER_COVER_MIN * candidate.length && candidate.length >= 2 * longest;
+      if (!isContainer) keep.push(src[c]);
+    }
+    return keep;
+  }
+  function diagTxtRoleStructure(list, totalCount) {
+    if (!diagOn()) return false;
+    try {
+      var kept = Array.isArray(list) ? list.length : -1;
+      var total = typeof totalCount === "number" ? totalCount : kept;
+      var first = Array.isArray(list) && list.length > 0 ? list[0] : null;
+      var text = messageTextForMarkers(first);
+      var kind = "\u043D\u0435\u0442";
+      if (first && typeof first === "object") {
+        if (typeof first.text === "string") kind = "text";
+        else if (typeof first.content === "string") kind = "content";
+      }
+      console.log(DIAG_PREFIX + " txt-roles site=qwen isArray=" + Array.isArray(list) + " msgs=" + total + " kept=" + kept + " dropped-containers=" + (kept >= 0 && total >= kept ? total - kept : 0) + " first.role=" + (first && first.role !== void 0 && first.role !== null ? String(first.role) : "(\u043D\u0435\u0442)") + " first.kind=" + kind + " first.len=" + text.length + " first.head=" + (diagHead(text, 60) || "\u043F\u0443\u0441\u0442\u043E"));
+    } catch (eLogRoles) {
+    }
+    return true;
+  }
+  function renderReferenceText(list) {
+    return buildReferenceText(list);
+  }
+  function renderReferenceTextWithRoleMarkers(list) {
+    var src = Array.isArray(list) ? list : [];
+    var parts = [];
+    for (var i = 0; i < src.length; i++) {
+      var m = src[i] || {};
+      var text = renderReferenceText([{ role: m.role, text: messageTextForMarkers(m) }]);
+      if (text === null) return null;
+      if (!String(text).trim()) continue;
+      parts.push(txtRoleMarker(m.role) + "\n" + text);
+    }
+    return parts.join("\n\n");
+  }
+  function buildTxtFromHistory(history) {
+    var hist = history || {};
+    var site = typeof hist.site === "string" ? hist.site : "";
+    var messages = history && Array.isArray(history.messages) ? history.messages : [];
+    var marked = isTxtRoleMarkerHistory(history);
+    var kept = marked ? dropContainerMessages(messages) : messages;
+    var forTxt = kept.map(function(m) {
+      var text = marked ? markersMessageTextWithReasoning(m, true) : messageTextWithReasoning(m);
+      if (!m || typeof m !== "object" || text === m.text) return m;
+      var copy = {};
+      for (var k in m) {
+        if (Object.prototype.hasOwnProperty.call(m, k)) copy[k] = m[k];
+      }
+      copy.text = text;
+      return copy;
+    });
+    var out;
+    if (marked) {
+      diagTxtRoleStructure(forTxt, messages.length);
+      out = renderReferenceTextWithRoleMarkers(forTxt);
+    } else {
+      out = renderReferenceText(forTxt);
+    }
+    if (site === "gemini" && hist.sourceTier && out) out = hist.sourceTier + "\n\n" + out;
+    return out === null ? "" : out;
+  }
+  function exportTokenSnapshot(history) {
+    var h = history || {};
+    var tokens = typeof h.tokens === "number" ? h.tokens : 0;
+    var limit = typeof h.limit === "number" ? h.limit : 0;
+    var percent = typeof h.percent === "number" ? h.percent : 0;
+    if (limit > 0) {
+      var calc = Math.round(tokens / limit * 1e3) / 10;
+      if (calc !== percent) percent = calc;
+    }
+    return { tokens, limit, percent };
+  }
+  function buildMdFromHistory(history, platform) {
+    var h = history || {};
+    var site = typeof h.site === "string" ? h.site : "";
+    var lines = [];
+    lines.push(aiCmI18nMessage("export_md_title", "# AI Context Monitor \u2014 \u044D\u043A\u0441\u043F\u043E\u0440\u0442 \u0438\u0441\u0442\u043E\u0440\u0438\u0438"));
+    lines.push("");
+    lines.push(aiCmI18nMessage("export_md_platform", "\u041F\u043B\u0430\u0442\u0444\u043E\u0440\u043C\u0430: " + (platform || "AI Chat"), [platform || "AI Chat"]));
+    lines.push(aiCmI18nMessage("export_md_model", "\u041C\u043E\u0434\u0435\u043B\u044C: " + (h.model || "\u2014"), [h.model || "\u2014"]));
+    var exportedAt = (/* @__PURE__ */ new Date()).toISOString();
+    lines.push(aiCmI18nMessage("export_md_date", "\u0414\u0430\u0442\u0430 \u044D\u043A\u0441\u043F\u043E\u0440\u0442\u0430: " + exportedAt, [exportedAt]));
+    var snap = exportTokenSnapshot(h);
+    var tokens = snap.tokens;
+    var limit = snap.limit;
+    var percent = snap.percent;
+    if (tokens === 0 && limit === 0) {
+      lines.push("\u0422\u043E\u043A\u0435\u043D\u044B: \u043D/\u0434 (" + percent + "%)");
+    } else {
+      lines.push(aiCmI18nMessage("export_md_tokens", "\u0422\u043E\u043A\u0435\u043D\u044B: " + tokens + " / " + limit + " (" + percent + "%)", [String(tokens), String(limit), String(percent)]));
+    }
+    lines.push("");
+    if (site === "gemini" && h.sourceTier) {
+      lines.push(h.sourceTier, "");
+    }
+    var mdMarked = isTxtRoleMarkerHistory(h);
+    var messages = Array.isArray(h.messages) ? h.messages : [];
+    if (mdMarked) messages = dropContainerMessages(messages);
+    for (var i = 0; i < messages.length; i++) {
+      var msg = messages[i] || {};
+      if (typeof aiCmDiagLine === "function") {
+        aiCmDiagLine("claude-role-builder", { msgRole: msg.role, mdMarked });
+      }
+      var title = mdMarked ? mdRoleMarker(msg.role) : msg.role === "user" || msg.role === "human" ? aiCmI18nMessage("export_md_role_user", "## \u041F\u043E\u043B\u044C\u0437\u043E\u0432\u0430\u0442\u0435\u043B\u044C") : aiCmI18nMessage("export_md_role_assistant", "## \u0410\u0441\u0441\u0438\u0441\u0442\u0435\u043D\u0442");
+      lines.push(title);
+      lines.push("");
+      lines.push(mdMarked ? markersMessageTextWithReasoning(msg, true) : messageTextWithReasoning(msg));
+      lines.push("");
+    }
+    return lines.join("\n");
+  }
+  function buildJsonFromHistory(history, platform) {
+    var h = history || {};
+    return JSON.stringify({
+      platform: platform || "AI Chat",
+      model: h.model || "",
+      exportedAt: (/* @__PURE__ */ new Date()).toISOString(),
+      tokens: typeof h.tokens === "number" ? h.tokens : 0,
+      limit: typeof h.limit === "number" ? h.limit : 0,
+      percent: typeof h.percent === "number" ? h.percent : 0,
+      // Two-Tier (v89): аддитивное поле метаданных. undefined → JSON.stringify ключ НЕ
+      // добавляет, поэтому у прочих платформ и у Gemini без метки байты прежние.
+      sourceTier: h.sourceTier,
+      messages: Array.isArray(h.messages) ? h.messages : []
+    }, null, 2);
+  }
+  function diagOn() {
+    try {
+      if (typeof sessionStorage !== "undefined" && sessionStorage && sessionStorage.getItem("aiCmDebug") === "1") return true;
+    } catch (eSess) {
+    }
+    try {
+      var gRoot = globalThis;
+      if (gRoot && gRoot.__aiCmDebugLogs === true) return true;
+    } catch (eWin) {
+    }
+    return false;
+  }
+  function diagHead(v, n) {
+    try {
+      var lim = typeof n === "number" && n > 0 ? n : 100;
+      if (v === void 0 || v === null) return "";
+      var s = String(v);
+      if (!s) return "";
+      var flat = s.replace(/\s+/g, " ").trim();
+      if (!flat) return "";
+      return flat.length > lim ? flat.slice(0, lim) + "\u2026" : flat;
+    } catch (eHead) {
+      return "";
+    }
+  }
+  function diagStack() {
+    try {
+      var lines = String(new Error().stack || "").split("\n");
+      var out = [];
+      for (var i = 1; i < lines.length && out.length < 4; i++) {
+        var s = String(lines[i] || "").replace(/\s+/g, " ").trim();
+        if (!s || s.indexOf("diag") !== -1) continue;
+        out.push(s);
+      }
+      return out.join(" <- ");
+    } catch (eStack) {
+      return "";
+    }
+  }
+  function diagDownload(trigger, content, fileName, extra) {
+    try {
+      if (typeof aiCmDiagDownload === "function") return aiCmDiagDownload(trigger, content, fileName, extra);
+    } catch (eGlobal) {
+    }
+    if (!diagOn()) return false;
+    try {
+      var e = extra || {};
+      var url = "";
+      try {
+        url = String(typeof location !== "undefined" && location && location.href || "");
+      } catch (eUrl) {
+      }
+      console.log(DIAG_PREFIX + " download trigger=" + (trigger || "(\u043D\u0435\u0442)") + " file=" + (fileName === void 0 || fileName === null || String(fileName) === "" ? "\u043F\u0443\u0441\u0442\u043E\u0435" : String(fileName)) + " bytes100=" + (diagHead(content, 100) || "\u043F\u0443\u0441\u0442\u043E") + " len=" + (content === void 0 || content === null ? 0 : String(content).length) + " mime=" + (e.mime === void 0 ? "(\u043D\u0435\u0442)" : e.mime) + " url=" + url + " threadId=" + (e.threadId === void 0 || e.threadId === "" ? "(\u043D\u0435\u0442)" : e.threadId) + " site=" + (e.site === void 0 ? "" : e.site) + " reason=" + (e.reason === void 0 ? "" : e.reason) + " src=" + diagStack());
+    } catch (eLog) {
+    }
+    return true;
+  }
+  function startsWithXssiPrefix(content) {
+    try {
+      if (content === void 0 || content === null) return false;
+      var s = String(content);
+      if (s.length < XSSI_PREFIX_LEN) return false;
+      return s.charCodeAt(0) === 41 && s.charCodeAt(1) === 93 && s.charCodeAt(2) === 125 && s.charCodeAt(3) === 39;
+    } catch (eXssi) {
+      return false;
+    }
+  }
+  function downloadBlockReason(content, fileName) {
+    if (startsWithXssiPrefix(content)) return "xssi-prefix";
+    if (fileName === void 0 || fileName === null || String(fileName).trim() === "") return "empty-name";
+    return null;
+  }
+  function diagDownloadBlocked(trigger, content, fileName, reason, extra) {
+    try {
+      if (typeof aiCmDiagDownloadBlocked === "function") {
+        return aiCmDiagDownloadBlocked(trigger, content, fileName, reason, extra);
+      }
+    } catch (eGlobalBlocked) {
+    }
+    if (!diagOn()) return false;
+    try {
+      var e = extra || {};
+      var url = "";
+      try {
+        url = String(typeof location !== "undefined" && location && location.href || "");
+      } catch (eUrlB) {
+      }
+      console.log(DIAG_PREFIX + " download-blocked reason=" + (reason || "(\u043D\u0435\u0442)") + " trigger=" + (trigger || "(\u043D\u0435\u0442)") + " file=" + (fileName === void 0 || fileName === null || String(fileName) === "" ? "\u043F\u0443\u0441\u0442\u043E\u0435" : String(fileName)) + " bytes100=" + (diagHead(content, 100) || "\u043F\u0443\u0441\u0442\u043E") + " len=" + (content === void 0 || content === null ? 0 : String(content).length) + " mime=" + (e.mime === void 0 ? "(\u043D\u0435\u0442)" : e.mime) + " url=" + url + " threadId=" + (e.threadId === void 0 || e.threadId === "" ? "(\u043D\u0435\u0442)" : e.threadId) + " site=" + (e.site === void 0 ? "" : e.site) + " src=" + diagStack());
+    } catch (eLogBlocked) {
+    }
+    return true;
+  }
+  function downloadBlob(content, fileName, mimeType, trigger, extra) {
+    var ex = extra || {};
+    var blockReason = downloadBlockReason(content, fileName);
+    if (blockReason) {
+      try {
+        diagDownloadBlocked(
+          trigger || "builder-download",
+          content,
+          fileName,
+          blockReason,
+          { mime: mimeType, threadId: ex.threadId, site: ex.site }
+        );
+      } catch (eDiagBlocked) {
+      }
+      return false;
+    }
+    try {
+      diagDownload(
+        trigger || "builder-download",
+        content,
+        fileName,
+        { mime: mimeType, threadId: ex.threadId, site: ex.site, reason: ex.reason }
+      );
+    } catch (eDiag) {
+    }
+    try {
+      var blob = new Blob([content], { type: mimeType });
+      var url = URL.createObjectURL(blob);
+      var a = document.createElement("a");
+      a.href = url;
+      a.download = fileName;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(function() {
+        URL.revokeObjectURL(url);
+      }, 1e3);
+    } catch (e) {
+      console.warn("[export] \u043D\u0435 \u0443\u0434\u0430\u043B\u043E\u0441\u044C \u0441\u043A\u0430\u0447\u0430\u0442\u044C \u0444\u0430\u0439\u043B:", e);
+    }
+    return true;
+  }
+  var REASONING_SECTION_TAG, ANSWER_SECTION_TAG, TXT_ROLE_MARKER_SITES, CONTAINER_MIN_CONTAINED, CONTAINER_COVER_MIN, DIAG_PREFIX, XSSI_PREFIX_LEN, Api, export_text_builders_default;
+  var init_export_text_builders = __esm({
+    "../utils/export-text-builders.ts"() {
+      init_buildReferenceText();
+      init_debug();
+      REASONING_SECTION_TAG = "[REASONING]";
+      ANSWER_SECTION_TAG = "[ANSWER]";
+      TXT_ROLE_MARKER_SITES = ["qwen"];
+      CONTAINER_MIN_CONTAINED = 2;
+      CONTAINER_COVER_MIN = 0.8;
+      DIAG_PREFIX = "[AI CM][diag]";
+      XSSI_PREFIX_LEN = 4;
+      Api = {
+        buildTxtFromHistory,
+        buildMdFromHistory,
+        buildJsonFromHistory,
+        downloadBlob,
+        // O-27 (защитный фикс): причина отказа точки скачивания (null — выдача разрешена) и
+        // сама точка отказа наружу — для пинов тестов и переиспользования вызывающим кодом.
+        aiCmDownloadBlockReason: downloadBlockReason,
+        aiCmDiagDownloadBlocked: diagDownloadBlocked,
+        // O-27/O-32: диагностические хелперы наружу (content.js/export-manager.js зовут их
+        // через этот объект; канон строки по-прежнему utils/debug.ts, импортированный выше).
+        aiCmDiagOn: diagOn,
+        aiCmDiagHead: diagHead,
+        aiCmDiagDownload: diagDownload,
+        // O-35: рендер reasoning контрактом DeepSeek — чистая функция наружу (пины тестов
+        // и переиспользование; на боевом пути вызывается только двумя сборщиками выше).
+        aiCmMessageTextWithReasoning: messageTextWithReasoning,
+        aiCmWithReasoningSections: withReasoningSections,
+        // O-37 (C): источник размышления для маркерного пути (reasoning, иначе поле захвата
+        // hiddenReasoning) и композиция «текст сообщения + секции» — чистые функции наружу;
+        // на боевом пути их зовут только buildTxtFromHistory/buildMdFromHistory выше.
+        aiCmReasoningOfMessageForExport: reasoningOfMessageForExport,
+        aiCmMarkersMessageTextWithReasoning: markersMessageTextWithReasoning,
+        // O-36 (D2): маркеры ролей txt-экспорта — чистые предикаты наружу (пины тестов;
+        // на боевом пути вызываются только сборщиком buildTxtFromHistory выше).
+        aiCmTxtRoleMarker: txtRoleMarker,
+        aiCmIsTxtRoleMarkerHistory: isTxtRoleMarkerHistory,
+        aiCmTxtRoleMarkerSites: TXT_ROLE_MARKER_SITES,
+        // O-36 (D2.1): маркер роли md (Qwen Studio), текст сообщения для маркерного пути
+        // (с фолбэком на .content) и контейнер-чистка — чистые функции наружу для пинов
+        // и переиспользования; на боевом пути их зовут только два сборщика выше.
+        aiCmMdRoleMarker: mdRoleMarker,
+        aiCmMessageTextForMarkers: messageTextForMarkers,
+        aiCmDropContainerMessages: dropContainerMessages,
+        aiCmDiagTxtRoleStructure: diagTxtRoleStructure,
+        aiCmContainerRules: { minContained: CONTAINER_MIN_CONTAINED, coverMin: CONTAINER_COVER_MIN }
+      };
+      export_text_builders_default = Api;
+    }
+  });
+
+  // ../utils/export-emit-pipeline.ts
+  var export_emit_pipeline_exports = {};
+  __export(export_emit_pipeline_exports, {
+    Api: () => Api2,
+    BDS_BOM: () => BDS_BOM,
+    BDS_CLOSE_TAG: () => BDS_CLOSE_TAG,
+    BDS_INJECTION_FORMS: () => BDS_INJECTION_FORMS,
+    BDS_OPEN_TAG: () => BDS_OPEN_TAG,
+    BDS_TRUNCATION_MARK: () => BDS_TRUNCATION_MARK,
+    BDS_WRAPPER_ID: () => BDS_WRAPPER_ID,
+    CROSS_RAW_MIN_CHARS: () => CROSS_RAW_MIN_CHARS,
+    CROSS_RAW_MIN_LINES: () => CROSS_RAW_MIN_LINES,
+    FIRED_SESSION_PREFIX: () => FIRED_SESSION_PREFIX,
+    HIDDEN_ANSWER_TAG: () => HIDDEN_ANSWER_TAG,
+    HIDDEN_REASONING_TAG: () => HIDDEN_REASONING_TAG,
+    INTRA_CORE_MIN_LEN: () => INTRA_CORE_MIN_LEN,
+    REASONING_SECTION_PAIR_RE: () => REASONING_SECTION_PAIR_RE,
+    RE_ANY_SPACE: () => RE_ANY_SPACE,
+    RE_CODE_FENCE_LINE: () => RE_CODE_FENCE_LINE,
+    RE_LIST_MARK: () => RE_LIST_MARK,
+    RE_MARKER_RESIDUE_LINE: () => RE_MARKER_RESIDUE_LINE,
+    RE_RAW_HEADING_LINE: () => RE_RAW_HEADING_LINE,
+    RE_TOOL_CALL_BLOCK: () => RE_TOOL_CALL_BLOCK,
+    SECTION_ANSWER_TAG: () => SECTION_ANSWER_TAG,
+    SECTION_REASONING_TAG: () => SECTION_REASONING_TAG,
+    TC_ENVELOPE_FORMS: () => TC_ENVELOPE_FORMS,
+    TC_LFR_CLOSE: () => TC_LFR_CLOSE,
+    TC_LFR_OPEN: () => TC_LFR_OPEN,
+    TC_PROSE_ANCHOR: () => TC_PROSE_ANCHOR,
+    TC_RESULTS_CLOSE: () => TC_RESULTS_CLOSE,
+    TC_RESULTS_OPEN: () => TC_RESULTS_OPEN,
+    TC_TASK_CLOSE: () => TC_TASK_CLOSE,
+    TC_TASK_OPEN: () => TC_TASK_OPEN,
+    TOOL_CALL_TAG_ALT: () => TOOL_CALL_TAG_ALT,
+    TOOL_CALL_TAG_NAMES: () => TOOL_CALL_TAG_NAMES,
+    TOOL_RESULTS_CLOSE: () => TOOL_RESULTS_CLOSE,
+    TOOL_RESULTS_OPEN: () => TOOL_RESULTS_OPEN,
+    TOOL_RESULTS_TAIL: () => TOOL_RESULTS_TAIL,
+    VISIBLE_USER_PROMPT_END: () => VISIBLE_USER_PROMPT_END,
+    VISIBLE_USER_PROMPT_START: () => VISIBLE_USER_PROMPT_START,
+    VISIBLE_USER_PROMPT_VALUE: () => VISIBLE_USER_PROMPT_VALUE,
+    applyReasoningExportFields: () => applyReasoningExportFields,
+    bdsDiagLine: () => bdsDiagLine,
+    bdsDiagSlice: () => bdsDiagSlice,
+    bdsFirstContentLine: () => bdsFirstContentLine,
+    bdsFormOfHeadLine: () => bdsFormOfHeadLine,
+    bdsLastContentLine: () => bdsLastContentLine,
+    bdsWrapperFormId: () => bdsWrapperFormId,
+    betterDeepSeekForms: () => betterDeepSeekForms,
+    blockLinePair: () => blockLinePair,
+    buildAutoExportFileName: () => buildAutoExportFileName,
+    buildExportFileName: () => buildExportFileName,
+    buildGsaExportFileName: () => buildGsaExportFileName,
+    convIdStamp: () => convIdStamp,
+    copyMessageWithText: () => copyMessageWithText,
+    coreOfBlock: () => coreOfBlock,
+    coreOfLine: () => coreOfLine,
+    corePrefixCutIndex: () => corePrefixCutIndex,
+    coreText: () => coreText,
+    countMarker: () => countMarker,
+    crossCopyIsSubstantial: () => crossCopyIsSubstantial,
+    cutLeadingCopy: () => cutLeadingCopy,
+    cutPairHead: () => cutPairHead,
+    cutPairTail: () => cutPairTail,
+    deSpaceAny: () => deSpaceAny,
+    dedupeCrossRawCopies: () => dedupeCrossRawCopies,
+    dedupeIntraMessage: () => dedupeIntraMessage,
+    dedupeMessages: () => dedupeMessages,
+    default: () => export_emit_pipeline_default,
+    diagTag: () => diagTag,
+    disambiguateFileName: () => disambiguateFileName,
+    effectiveAutoExportThreshold: () => effectiveAutoExportThreshold,
+    effectiveReasoningToggle: () => effectiveReasoningToggle,
+    exportPad2: () => exportPad2,
+    extractConvIdFromUrl: () => extractConvIdFromUrl,
+    firedSessionKey: () => firedSessionKey,
+    getAutoExportFired: () => getAutoExportFired,
+    hasHiddenFields: () => hasHiddenFields,
+    hasReasoningInSource: () => hasReasoningInSource,
+    hiddenReasoningOf: () => hiddenReasoningOf,
+    includeHiddenExportBlocks: () => includeHiddenExportBlocks,
+    injectedUserTextSkipReason: () => injectedUserTextSkipReason,
+    intraBlocksSimilar: () => intraBlocksSimilar,
+    isBdsOpenTagLine: () => isBdsOpenTagLine,
+    isEmptyExportText: () => isEmptyExportText,
+    isFileNameTaken: () => isFileNameTaken,
+    isFiredInSession: () => isFiredInSession,
+    isRawMarkdownBlock: () => isRawMarkdownBlock,
+    isToolResultsOnlyText: () => isToolResultsOnlyText,
+    latchKey: () => latchKey,
+    manualExportStamp: () => manualExportStamp,
+    markAutoExportFired: () => markAutoExportFired,
+    normExportFmt: () => normExportFmt,
+    normalizeExportMessages: () => normalizeExportMessages,
+    normalizeIntraBlock: () => normalizeIntraBlock,
+    notCompleteReason: () => notCompleteReason,
+    pickExportSource: () => pickExportSource,
+    prepareExportMessages: () => prepareExportMessages,
+    renderedBeforeRaw: () => renderedBeforeRaw,
+    resetAutoExportFired: () => resetAutoExportFired,
+    resolveAutoExportConvId: () => resolveAutoExportConvId,
+    resolveExportSource: () => resolveExportSource,
+    safeModelSeg: () => safeModelSeg,
+    safeSeg: () => safeSeg,
+    sanitizeBetterDeepSeekText: () => sanitizeBetterDeepSeekText,
+    sanitizeEmitMessages: () => sanitizeEmitMessages,
+    sanitizeInjectedUserText: () => sanitizeInjectedUserText,
+    sanitizeToolContinuationText: () => sanitizeToolContinuationText,
+    sepForSections: () => sepForSections,
+    separateRawBlocks: () => separateRawBlocks,
+    seqEqual: () => seqEqual,
+    seqIsPrefix: () => seqIsPrefix,
+    seqIsSuffix: () => seqIsSuffix,
+    sessionFiredPatch: () => sessionFiredPatch,
+    shouldSkipAutoExport: () => shouldSkipAutoExport,
+    shouldSkipBaseCompleteTrigger: () => shouldSkipBaseCompleteTrigger,
+    shouldSkipGsaPageGuard: () => shouldSkipGsaPageGuard,
+    sourceTierOf: () => sourceTierOf,
+    splitRawSections: () => splitRawSections,
+    splitReasoningSections: () => splitReasoningSections,
+    stripHiddenFields: () => stripHiddenFields,
+    stripMarkerResidue: () => stripMarkerResidue,
+    stripReasoningSections: () => stripReasoningSections,
+    stripToolCallBlocks: () => stripToolCallBlocks,
+    tcIsWholeMessagePair: () => tcIsWholeMessagePair,
+    tcPairAfter: () => tcPairAfter,
+    tcProseAnchorLine: () => tcProseAnchorLine,
+    toolContinuationForms: () => toolContinuationForms,
+    trimEdgeEmpty: () => trimEdgeEmpty,
+    trimPairEdges: () => trimPairEdges,
+    unionTurnsById: () => unionTurnsById,
+    withoutHiddenFields: () => withoutHiddenFields
+  });
+  function safeSeg(s) {
+    return String(s == null ? "" : s).replace(/[^a-zA-Z0-9_-]+/g, "-").replace(/^-+|-+$/g, "");
+  }
+  function extractConvIdFromUrl(pathname) {
+    try {
+      var p = String(pathname || "");
+      var mPr = p.match(/\/prompts\/(?!new(?:_chat)?(?:\/|$)|apikey(?:\/|$))([A-Za-z0-9_-]+)/);
+      if (mPr) return mPr[1];
+      var mApp = p.match(/\/app\/(?!prompts(?:\/|$)|new(?:\/|$)|apikey(?:\/|$))([A-Za-z0-9_-]+)/);
+      if (mApp) return mApp[1];
+      var mDs = p.match(/\/a\/chat\/s\/([A-Za-z0-9_-]+)/);
+      if (mDs) return mDs[1];
+      var parts = p.split("/");
+      var chatIdx = parts.indexOf("chat");
+      if (chatIdx !== -1 && chatIdx + 1 < parts.length && parts[chatIdx + 1]) return parts[chatIdx + 1];
+      var mC = p.match(/\/c\/([A-Za-z0-9_-]+)/);
+      if (mC) return mC[1];
+      var mPss = p.match(/\/session\/([0-9a-f-]{8,})/);
+      if (mPss) return mPss[1];
+      var mPs = p.match(/\/search\/([A-Za-z0-9_-]{8,})/);
+      if (mPs) return mPs[1];
+      var mP = p.match(/\/thread\/([A-Za-z0-9_-]+)/);
+      if (mP) return mP[1];
+      return "";
+    } catch (e) {
+      return "";
+    }
+  }
+  function normExportFmt(fmt) {
+    return fmt === "md" ? "md" : fmt === "json" ? "json" : "txt";
+  }
+  function exportPad2(n) {
+    return (n < 10 ? "0" : "") + n;
+  }
+  function convIdStamp(d) {
+    return d.getFullYear() + "-" + exportPad2(d.getMonth() + 1) + "-" + exportPad2(d.getDate()) + "_" + exportPad2(d.getHours()) + "-" + exportPad2(d.getMinutes());
+  }
+  function manualExportStamp(d) {
+    return d.getFullYear() + "-" + exportPad2(d.getMonth() + 1) + "-" + exportPad2(d.getDate()) + "-" + exportPad2(d.getHours()) + "-" + exportPad2(d.getMinutes());
+  }
+  function safeModelSeg(model) {
+    return String(model == null ? "" : model).replace(/[^a-zA-Z0-9_.-]+/g, "-").replace(/^-+|-+$/g, "") || "model";
+  }
+  function isFileNameTaken(taken, name) {
+    try {
+      if (!taken || !name) return false;
+      if (typeof Set !== "undefined" && taken instanceof Set) return taken.has(name);
+      if (Array.isArray(taken)) return taken.indexOf(name) !== -1;
+      if (typeof taken === "object") return Object.prototype.hasOwnProperty.call(taken, name);
+      return false;
+    } catch (e) {
+      return false;
+    }
+  }
+  function disambiguateFileName(name, taken) {
+    var base = String(name == null ? "" : name);
+    try {
+      if (!isFileNameTaken(taken, base)) return base;
+      var m = base.match(/^(.*)\.([A-Za-z0-9]+)$/);
+      var stem = m ? m[1] : base;
+      var ext = m ? "." + m[2] : "";
+      for (var i = 2; i <= 999; i++) {
+        var cand = stem + "-" + i + ext;
+        if (!isFileNameTaken(taken, cand)) return cand;
+      }
+      return stem + "-" + Date.now() + ext;
+    } catch (e) {
+      return base;
+    }
+  }
+  function buildAutoExportFileName(spec) {
+    var s = spec || {};
+    var lowConfPrefix = s.isLowConfidence === true ? "[LOW CONFIDENCE]_" : "";
+    var d = /* @__PURE__ */ new Date();
+    var base;
+    if (s.mask === "manual") {
+      var siteSeg = safeSeg(s.site) || "google_search";
+      base = "ai-context-monitor-" + siteSeg + "-" + safeModelSeg(s.model) + "-" + manualExportStamp(d);
+    } else {
+      var cidSeg = safeSeg(String(s.convId || "").slice(0, 8)) || "noconv";
+      var svcSeg = safeSeg(s.service) || "chat";
+      var suffix = "";
+      if (s.reason === "pre-trim") suffix = "-pretrim";
+      else if (s.reason === "base-complete") suffix = "-base-complete";
+      base = svcSeg + "-" + cidSeg + "-" + convIdStamp(d) + suffix;
+    }
+    return disambiguateFileName(lowConfPrefix + base + "." + normExportFmt(s.fmt), s.taken);
+  }
+  function buildExportFileName(service, convId, reason, isLowConfidence, fmt) {
+    return buildAutoExportFileName({
+      mask: "convId",
+      service,
+      convId,
+      reason,
+      isLowConfidence,
+      fmt,
+      taken: arguments.length > 5 ? arguments[5] : null
+    });
+  }
+  function buildGsaExportFileName(site, model, isLowConfidence, fmt) {
+    return buildAutoExportFileName({
+      mask: "manual",
+      site,
+      model,
+      isLowConfidence,
+      fmt,
+      taken: arguments.length > 4 ? arguments[4] : null
+    });
+  }
+  function resolveAutoExportConvId(site, urlConvId, threadId) {
+    var cid = String(urlConvId == null ? "" : urlConvId);
+    if (cid) return cid;
+    if (String(site == null ? "" : site) === "google_search") {
+      return String(threadId == null ? "" : threadId);
+    }
+    return "";
+  }
+  function notCompleteReason(state) {
+    var s = state || {};
+    if (s.site === "google_search" && s.probeRunning === true) return "probe-running";
+    return "not-complete";
+  }
+  function pickExportSource(hasBaseSeen, hasNetworkTexts) {
+    return hasBaseSeen === true ? "network" : "adapter";
+  }
+  function resolveExportSource(state) {
+    var s = state || {};
+    if (s.isGemini !== true) return { action: "local", reason: "non-gemini" };
+    if (s.bridge !== true) return { action: "local", reason: "no-bridge" };
+    var arch = typeof s.archiveCount === "number" && s.archiveCount > 0 ? s.archiveCount : 0;
+    if (arch <= 0) return { action: "local", reason: "no-archive" };
+    var live = typeof s.liveCount === "number" ? s.liveCount : null;
+    if (live === 0) return { action: "block", reason: "archive-only-base" };
+    var base = typeof s.baseCount === "number" ? s.baseCount : 0;
+    var local = typeof s.localCount === "number" ? s.localCount : 0;
+    if (live !== null && live > 0 && base > local) return { action: "union", reason: "stale-local-source" };
+    return { action: "local", reason: "in-sync" };
+  }
+  function sourceTierOf(state) {
+    var s = state || {};
+    var arch = typeof s.archiveCount === "number" && s.archiveCount > 0 ? s.archiveCount : 0;
+    var live = typeof s.liveCount === "number" && s.liveCount > 0 ? s.liveCount : 0;
+    if (arch > 0 && live > 0) return "[MERGED: ARCHIVE+LIVE]";
+    if (arch > 0) return "[ARCHIVE]";
+    return "[BEST-EFFORT: LIVE CAPTURE]";
+  }
+  function shouldSkipGsaPageGuard(state) {
+    var s = state || {};
+    if (s.site !== "google_search") return { skip: false, reason: null };
+    if (s.chatPageMarker === false) return { skip: true, reason: "not-chat-page" };
+    if (typeof s.msgCount === "number" && s.msgCount < 1) return { skip: true, reason: "no-messages" };
+    if (typeof s.baseTextLen === "number" && s.baseTextLen < 1) return { skip: true, reason: "empty-base" };
+    return { skip: false, reason: null };
+  }
+  function shouldSkipAutoExport(state) {
+    var s = state || {};
+    if (s.enabled !== true) return { skip: true, reason: "not-enabled", resetFired: false };
+    if (typeof s.percentage !== "number" || !(s.percentage >= 0)) return { skip: true, reason: "no-pct", resetFired: false };
+    var gsaPage = shouldSkipGsaPageGuard(s);
+    if (gsaPage.skip) return { skip: true, reason: gsaPage.reason, resetFired: false };
+    var threshold = typeof s.threshold === "number" && s.threshold >= 1 && s.threshold <= 100 ? s.threshold : 90;
+    var domBaseTrusted = s.domBaseTrusted === true;
+    var networkCompleteLatch = s.gsaNetworkCompleteLatch === true;
+    var completeOk = s.baseComplete === true || networkCompleteLatch;
+    var baseReady = completeOk || domBaseTrusted;
+    var basePending = s.isGemini !== true && s.baseSeen !== true && !domBaseTrusted && !networkCompleteLatch;
+    if (!baseReady && !basePending) return { skip: true, reason: "not-complete", resetFired: false };
+    if (s.historyIncomplete === true) return { skip: true, reason: "not-complete", resetFired: false };
+    if (s.isGemini === true && typeof s.archiveCount === "number" && s.archiveCount > 0 && typeof s.baseCount === "number" && s.baseCount <= s.archiveCount) {
+      return { skip: true, reason: "archive-pending-live", resetFired: false };
+    }
+    if (s.isGemini === true && s.loaderRunning) return { skip: true, reason: "loader-running", resetFired: false };
+    if (s.percentage < threshold - 10) {
+      if (s.isGemini === true || s.baseSeen === true) return { skip: true, reason: "below-threshold-hysteresis", resetFired: true };
+      return { skip: true, reason: "below-threshold-unreliable", resetFired: false };
+    }
+    if (s.percentage < threshold) return { skip: true, reason: "below-threshold", resetFired: false };
+    if (!baseReady && basePending) return { skip: true, reason: "base-pending", resetFired: false };
+    if (s.fired) return { skip: true, reason: "already-fired", resetFired: false };
+    return { skip: false, reason: null, resetFired: false };
+  }
+  function shouldSkipBaseCompleteTrigger(state) {
+    var s = state || {};
+    var threshold = typeof s.threshold === "number" && s.threshold >= 1 && s.threshold <= 100 ? s.threshold : 90;
+    if (typeof s.percentage !== "number" || !(s.percentage >= 0)) {
+      return { skip: true, reason: "no-pct", threshold };
+    }
+    if (s.percentage < threshold) {
+      return { skip: true, reason: "below-threshold-base-complete", threshold };
+    }
+    return { skip: false, reason: null, threshold };
+  }
+  function effectiveAutoExportThreshold(globalPct, perSitePct) {
+    function clampPerSite(v) {
+      var n = parseInt(v, 10);
+      if (isNaN(n)) return null;
+      if (n < 1) return 1;
+      if (n > 100) return 100;
+      return n;
+    }
+    if (perSitePct !== void 0 && perSitePct !== null && String(perSitePct).trim() !== "") {
+      var per = clampPerSite(perSitePct);
+      if (per != null) return per;
+    }
+    var g = typeof globalPct === "number" && globalPct >= 1 && globalPct <= 100 ? globalPct : null;
+    return g == null ? 90 : g;
+  }
+  function latchKey(service, convId) {
+    return safeSeg(service) + "|" + String(convId || "");
+  }
+  function markAutoExportFired(store, service, convId) {
+    try {
+      store[latchKey(service, convId)] = 1;
+    } catch (e) {
+    }
+  }
+  function getAutoExportFired(store, service, convId) {
+    try {
+      return store[latchKey(service, convId)] === 1;
+    } catch (e) {
+      return false;
+    }
+  }
+  function resetAutoExportFired(store, service, convId) {
+    try {
+      delete store[latchKey(service, convId)];
+    } catch (e) {
+    }
+  }
+  function firedSessionKey(service, convId) {
+    return FIRED_SESSION_PREFIX + latchKey(service, convId);
+  }
+  function isFiredInSession(sessionMap, service, convId) {
+    try {
+      return !!sessionMap && sessionMap[firedSessionKey(service, convId)] === 1;
+    } catch (e) {
+      return false;
+    }
+  }
+  function sessionFiredPatch(service, convId) {
+    var patch = {};
+    try {
+      patch[firedSessionKey(service, convId)] = 1;
+    } catch (e) {
+    }
+    return patch;
+  }
+  function normalizeExportMessages(raw) {
+    var out = [];
+    try {
+      if (!Array.isArray(raw)) return out;
+      for (var i = 0; i < raw.length; i++) {
+        var m = raw[i] || {};
+        var text = typeof m.text === "string" ? m.text : typeof m.content === "string" ? m.content : "";
+        if (!text) continue;
+        var norm = { role: m.role === "user" || m.role === "human" ? "user" : "assistant", text };
+        if (typeof aiCmDiagLine === "function") {
+          aiCmDiagLine("claude-role-normalize", { inputRole: m.role, outputRole: norm.role });
+        }
+        if (typeof m.hiddenReasoning === "string" && m.hiddenReasoning) norm.hiddenReasoning = m.hiddenReasoning;
+        out.push(norm);
+      }
+    } catch (e) {
+      swallow(e, "export-utils:normalizeExportMessages");
+    }
+    return out;
+  }
+  function deSpaceAny(s) {
+    return String(s == null ? "" : s).replace(RE_ANY_SPACE, " ");
+  }
+  function coreOfLine(line) {
+    try {
+      var s = deSpaceAny(line);
+      if (RE_CODE_FENCE_LINE.test(s)) return "";
+      var prev;
+      do {
+        prev = s;
+        s = s.replace(/^[ \t]+/, "");
+        if (/^>[ \t]?/.test(s)) s = s.replace(/^>[ \t]?/, "");
+        else if (RE_LIST_MARK.test(s)) s = s.replace(RE_LIST_MARK, "");
+        else if (RE_RAW_HEADING_LINE.test(s)) s = s.replace(/^#{1,}[ \t]*/, "");
+      } while (s !== prev);
+      return s.replace(/[*_`~#>]+/g, " ").replace(/\s+/g, " ").trim();
+    } catch (e) {
+      return "";
+    }
+  }
+  function coreText(text) {
+    try {
+      var lines = deSpaceAny(text).split("\n");
+      var kept = [];
+      for (var i = 0; i < lines.length; i++) {
+        var c = coreOfLine(lines[i]);
+        if (c) kept.push(c);
+      }
+      return kept.join(" ");
+    } catch (e) {
+      return "";
+    }
+  }
+  function stripMarkerResidue(text) {
+    try {
+      var s = String(text == null ? "" : text);
+      if (s.indexOf("#") === -1) return s;
+      var lines = s.split("\n");
+      var kept = [];
+      var dropped = false;
+      for (var i = 0; i < lines.length; i++) {
+        if (RE_MARKER_RESIDUE_LINE.test(lines[i])) {
+          dropped = true;
+          continue;
+        }
+        kept.push(lines[i]);
+      }
+      return dropped ? kept.join("\n") : s;
+    } catch (e) {
+      return String(text == null ? "" : text);
+    }
+  }
+  function dedupeMessages(messages) {
+    var out = [];
+    var seen = {};
+    var removed = 0;
+    try {
+      if (!Array.isArray(messages)) return { messages: out, removed: 0 };
+      for (var i = 0; i < messages.length; i++) {
+        var m = messages[i] || {};
+        var role = m.role === "user" ? "user" : "assistant";
+        var text = typeof m.text === "string" ? m.text : "";
+        var key = role + "\0" + coreText(text);
+        if (Object.prototype.hasOwnProperty.call(seen, key)) {
+          removed++;
+          continue;
+        }
+        seen[key] = true;
+        var keep = { role, text };
+        if (m.id != null) keep.id = m.id;
+        out.push(keep);
+      }
+    } catch (e) {
+      swallow(e, "export-utils:dedupeMessages");
+    }
+    return { messages: out, removed };
+  }
+  function isRawMarkdownBlock(block) {
+    try {
+      var lines = String(block == null ? "" : block).split("\n");
+      for (var i = 0; i < lines.length; i++) {
+        if (RE_RAW_HEADING_LINE.test(lines[i])) return true;
+      }
+      return false;
+    } catch (e) {
+      return false;
+    }
+  }
+  function separateRawBlocks(text) {
+    return String(text).replace(/([^#\n])[ \t]*(#{1,6})(?=[ \t])/g, function(all, prev, hashes) {
+      if (hashes.length < 2 && !/[.!?;:»")\]]$/.test(prev)) return all;
+      return prev + "\n\n" + hashes;
+    });
+  }
+  function splitRawSections(block) {
+    try {
+      var lines = String(block == null ? "" : block).split("\n");
+      var out = [];
+      var cur = null;
+      for (var i = 0; i < lines.length; i++) {
+        if (RE_RAW_HEADING_LINE.test(lines[i])) {
+          if (cur) out.push(cur.join("\n"));
+          cur = [lines[i]];
+        } else if (cur) {
+          cur.push(lines[i]);
+        } else {
+          cur = [lines[i]];
+        }
+      }
+      if (cur) out.push(cur.join("\n"));
+      return out.length ? out : [String(block == null ? "" : block)];
+    } catch (e) {
+      return [String(block == null ? "" : block)];
+    }
+  }
+  function sepForSections(block) {
+    return /\n{2,}/.test(String(block == null ? "" : block)) ? "\n\n" : "\n";
+  }
+  function cutLeadingCopy(section, folded) {
+    var lines = String(section).split("\n");
+    if (lines.length < 2) return { text: String(section), trimmed: false };
+    var head = lines[0];
+    var body = lines.slice(1).join("\n");
+    var bodyNorm = normalizeIntraBlock(body);
+    var copyNorm = normalizeIntraBlock(folded);
+    if (!bodyNorm || !copyNorm) return { text: String(section), trimmed: false };
+    if (bodyNorm === copyNorm) return null;
+    if (bodyNorm.indexOf(copyNorm) === 0) {
+      var tail = bodyNorm.slice(copyNorm.length).replace(/^\s+/, "");
+      if (!tail) return null;
+      var lastWord = copyNorm.split(" ").pop();
+      var at = body.lastIndexOf(lastWord);
+      if (at < 0) return null;
+      var rest = body.slice(at + lastWord.length).replace(/^\s+/, "");
+      if (!rest) return null;
+      return { text: head + "\n" + rest, trimmed: true };
+    }
+    var cutIdx = corePrefixCutIndex(body, coreText(folded));
+    if (cutIdx < 0) return { text: String(section), trimmed: false };
+    var restCore = body.slice(cutIdx).replace(/^\s+/, "");
+    if (!restCore) return null;
+    return { text: head + "\n" + restCore, trimmed: true };
+  }
+  function corePrefixCutIndex(body, copyCore) {
+    try {
+      if (!copyCore) return -1;
+      if (coreText(body).indexOf(copyCore) !== 0) return -1;
+      var re = /(\S+)/g;
+      var m;
+      while ((m = re.exec(body)) !== null) {
+        var end = m.index + m[0].length;
+        var probe = coreText(body.slice(0, end));
+        if (probe === copyCore) return end;
+        if (probe.length > copyCore.length) return -1;
+      }
+      return -1;
+    } catch (e) {
+      return -1;
+    }
+  }
+  function renderedBeforeRaw(blocks, i, raw) {
+    for (var b = i - 1; b >= 0; b--) {
+      if (b === i || raw[b]) continue;
+      if (!coreText(blocks[b])) continue;
+      return String(blocks[b]);
+    }
+    return null;
+  }
+  function normalizeIntraBlock(block) {
+    return String(block == null ? "" : block).replace(/\s+/g, " ").trim();
+  }
+  function intraBlocksSimilar(a, b) {
+    var x = coreText(a);
+    var y = coreText(b);
+    if (!x || !y) return false;
+    if (x === y) return true;
+    var minLen = x.length < y.length ? x.length : y.length;
+    if (minLen < INTRA_CORE_MIN_LEN) return false;
+    return x.length >= y.length ? x.indexOf(y) !== -1 : y.indexOf(x) !== -1;
+  }
+  function dedupeIntraMessage(message) {
+    var text = message && typeof message.text === "string" ? message.text : "";
+    var removedBlocks = 0;
+    try {
+      let coreDup = function(core, selfIdx, minLen) {
+        if (!core) return false;
+        if (seenCore[core]) return true;
+        if (core.length < minLen) return false;
+        for (var q = 0; q < blocks.length; q++) {
+          if (q === selfIdx || drop[q] || raw[q] || !norm[q]) continue;
+          if (intraBlocksSimilar(core, blocks[q])) return true;
+        }
+        return false;
+      };
+      if (!text) return { text, removedBlocks: 0 };
+      var seam = separateRawBlocks(text);
+      var blocks = seam.split(/\n{2,}/);
+      if (blocks.length < 2) return { text, removedBlocks: 0 };
+      var norm = [];
+      var raw = [];
+      var i;
+      for (i = 0; i < blocks.length; i++) {
+        norm.push(coreText(blocks[i]));
+        raw.push(isRawMarkdownBlock(blocks[i]));
+      }
+      var drop = {};
+      var seen = /* @__PURE__ */ Object.create(null);
+      for (i = 0; i < blocks.length; i++) {
+        if (!norm[i]) continue;
+        if (seen[norm[i]]) {
+          drop[i] = true;
+          removedBlocks++;
+          continue;
+        }
+        seen[norm[i]] = true;
+      }
+      var seenCore = /* @__PURE__ */ Object.create(null);
+      var cores = [];
+      for (i = 0; i < blocks.length; i++) {
+        cores.push(coreOfBlock(blocks[i]));
+        if (drop[i] || raw[i] || !norm[i]) continue;
+        if (cores[i]) seenCore[cores[i]] = true;
+      }
+      for (i = 0; i < blocks.length; i++) {
+        if (drop[i] || !raw[i]) continue;
+        if (coreDup(cores[i], i, INTRA_CORE_MIN_LEN)) {
+          drop[i] = true;
+          removedBlocks++;
+          continue;
+        }
+        var secs = splitRawSections(blocks[i]);
+        var folded = renderedBeforeRaw(blocks, i, raw);
+        if (folded === null) continue;
+        var cutSecs = 0;
+        var keptSecs = [];
+        for (var s = 0; s < secs.length; s++) {
+          if (coreDup(coreOfBlock(secs[s]), i, 0)) {
+            cutSecs++;
+            continue;
+          }
+          var cut = cutLeadingCopy(secs[s], folded);
+          if (cut === null) {
+            cutSecs++;
+            continue;
+          }
+          if (cut.trimmed) cutSecs++;
+          keptSecs.push(cut.text);
+        }
+        if (cutSecs === 0) continue;
+        removedBlocks += cutSecs;
+        if (keptSecs.length === 0) {
+          drop[i] = true;
+          continue;
+        }
+        blocks[i] = keptSecs.join(sepForSections(blocks[i])).replace(/^\n+/, "");
+        norm[i] = coreText(blocks[i]);
+        cores[i] = coreOfBlock(blocks[i]);
+        raw[i] = isRawMarkdownBlock(blocks[i]);
+      }
+      for (i = 0; i < blocks.length; i++) {
+        if (drop[i] || !raw[i]) continue;
+        var coreRaw = cores[i];
+        if (coreRaw.length < INTRA_CORE_MIN_LEN) continue;
+        for (var j = i + 1; j < blocks.length; j++) {
+          if (drop[j] || raw[j]) continue;
+          if (intraBlocksSimilar(coreRaw, blocks[j])) {
+            drop[i] = true;
+            removedBlocks++;
+            break;
+          }
+        }
+      }
+      if (removedBlocks === 0) return { text, removedBlocks: 0 };
+      var kept = [];
+      for (i = 0; i < blocks.length; i++) {
+        if (!drop[i]) kept.push(blocks[i]);
+      }
+      return { text: kept.join("\n\n"), removedBlocks };
+    } catch (e) {
+      swallow(e, "export-utils:dedupeIntraMessage");
+    }
+    return { text, removedBlocks: 0 };
+  }
+  function coreOfBlock(block) {
+    try {
+      var lines = String(block == null ? "" : block).split("\n");
+      var kept = [];
+      for (var i = 0; i < lines.length; i++) {
+        if (RE_RAW_HEADING_LINE.test(lines[i])) continue;
+        kept.push(lines[i]);
+      }
+      return coreText(kept.join("\n"));
+    } catch (e) {
+      return coreText(block);
+    }
+  }
+  function blockLinePair(block) {
+    var raw = deSpaceAny(block).split("\n");
+    var core = [];
+    for (var i = 0; i < raw.length; i++) core.push(coreOfLine(raw[i]));
+    return trimPairEdges(raw, core);
+  }
+  function trimPairEdges(raw, core) {
+    var a = 0, b = raw.length;
+    while (a < b && !core[a]) a++;
+    while (b > a && !core[b - 1]) b--;
+    return { raw: raw.slice(a, b), core: core.slice(a, b) };
+  }
+  function cutPairHead(pair, n) {
+    return trimPairEdges(pair.raw.slice(n), pair.core.slice(n));
+  }
+  function cutPairTail(pair, n) {
+    var k = pair.raw.length - n;
+    return trimPairEdges(pair.raw.slice(0, k), pair.core.slice(0, k));
+  }
+  function trimEdgeEmpty(lines) {
+    var a = lines.slice();
+    while (a.length && !a[0]) a.shift();
+    while (a.length && !a[a.length - 1]) a.pop();
+    return a;
+  }
+  function seqEqual(a, b) {
+    if (a.length !== b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      if (a[i] !== b[i]) return false;
+    }
+    return true;
+  }
+  function seqIsPrefix(shortArr, longArr) {
+    if (!shortArr.length || shortArr.length >= longArr.length) return false;
+    for (var i = 0; i < shortArr.length; i++) {
+      if (shortArr[i] !== longArr[i]) return false;
+    }
+    return true;
+  }
+  function seqIsSuffix(shortArr, longArr) {
+    if (!shortArr.length || shortArr.length >= longArr.length) return false;
+    var off = longArr.length - shortArr.length;
+    for (var i = 0; i < shortArr.length; i++) {
+      if (shortArr[i] !== longArr[off + i]) return false;
+    }
+    return true;
+  }
+  function crossCopyIsSubstantial(lines) {
+    var ls = trimEdgeEmpty(lines);
+    var nonEmpty = 0;
+    var chars = 0;
+    for (var i = 0; i < ls.length; i++) {
+      if (!ls[i]) continue;
+      nonEmpty++;
+      chars += ls[i].length;
+    }
+    return nonEmpty >= CROSS_RAW_MIN_LINES && chars >= CROSS_RAW_MIN_CHARS;
+  }
+  function dedupeCrossRawCopies(messages) {
+    var out = [];
+    var removed = 0;
+    var refs = [];
+    try {
+      var src = Array.isArray(messages) ? messages : [];
+      for (var i = 0; i < src.length; i++) {
+        var m = src[i] || {};
+        var text = typeof m.text === "string" ? m.text : "";
+        if (!text) {
+          out.push(m);
+          continue;
+        }
+        var blocks = separateRawBlocks(text).split(/\n{2,}/);
+        var keptBlocks = [];
+        var touched = false;
+        for (var b = 0; b < blocks.length; b++) {
+          if (!isRawMarkdownBlock(blocks[b])) {
+            keptBlocks.push(blocks[b]);
+            continue;
+          }
+          var pair = blockLinePair(blocks[b]);
+          var origJoin = pair.raw.join("\n");
+          var dropped = false;
+          var changed = true;
+          while (changed && !dropped) {
+            changed = false;
+            for (var r = 0; r < refs.length; r++) {
+              var ref = refs[r];
+              if (seqEqual(ref, pair.core)) {
+                if (!crossCopyIsSubstantial(ref)) continue;
+                dropped = true;
+                removed++;
+                break;
+              }
+              if (seqIsSuffix(ref, pair.core) && crossCopyIsSubstantial(ref)) {
+                pair = cutPairTail(pair, ref.length);
+                changed = true;
+                break;
+              }
+              if (seqIsPrefix(ref, pair.core) && crossCopyIsSubstantial(ref)) {
+                pair = cutPairHead(pair, ref.length);
+                changed = true;
+                break;
+              }
+            }
+            if (!dropped && !pair.raw.length) {
+              dropped = true;
+              removed++;
+            }
+          }
+          if (dropped || !pair.raw.length) {
+            touched = true;
+            continue;
+          }
+          var rebuilt = pair.raw.join("\n");
+          if (rebuilt !== origJoin) touched = true;
+          keptBlocks.push(rebuilt);
+          if (isRawMarkdownBlock(rebuilt)) refs.push(pair.core);
+        }
+        var keep = { role: m.role === "user" ? "user" : "assistant", text: touched ? keptBlocks.join("\n\n") : text };
+        if (m.id != null) keep.id = m.id;
+        out.push(keep);
+      }
+    } catch (e) {
+      return { messages: Array.isArray(messages) ? messages : [], removed: 0 };
+    }
+    return { messages: out, removed };
+  }
+  function prepareExportMessages(raw, onMessageDedupe) {
+    var intraRemoved = 0;
+    var out = [];
+    try {
+      var src = Array.isArray(raw) ? raw : [];
+      for (var i = 0; i < src.length; i++) {
+        var m = src[i] || {};
+        var role = m.role === "user" ? "user" : "assistant";
+        var text = typeof m.text === "string" ? m.text : "";
+        var res = dedupeIntraMessage({ role, text });
+        var next = { role, text: res.text };
+        if (m.id != null) next.id = m.id;
+        out.push(next);
+        if (res.removedBlocks > 0) {
+          intraRemoved += res.removedBlocks;
+          if (typeof onMessageDedupe === "function") {
+            try {
+              onMessageDedupe(role, res.removedBlocks);
+            } catch (eCb) {
+            }
+          }
+        }
+      }
+    } catch (e) {
+      out = Array.isArray(raw) ? raw : [];
+      intraRemoved = 0;
+    }
+    var inter = dedupeMessages(out);
+    var cross = dedupeCrossRawCopies(inter.messages);
+    var cleaned = [];
+    for (var k = 0; k < cross.messages.length; k++) {
+      var mk = cross.messages[k] || {};
+      var clean = {
+        role: mk.role === "user" ? "user" : "assistant",
+        text: stripMarkerResidue(typeof mk.text === "string" ? mk.text : "")
+      };
+      if (mk.id != null) clean.id = mk.id;
+      cleaned.push(clean);
+    }
+    return {
+      messages: cleaned,
+      intraRemoved,
+      removed: inter.removed + cross.removed,
+      crossRemoved: cross.removed
+    };
+  }
+  function countMarker(text, marker) {
+    var n = 0;
+    var at = text.indexOf(marker);
+    while (at !== -1) {
+      n++;
+      at = text.indexOf(marker, at + marker.length);
+    }
+    return n;
+  }
+  function injectedUserTextSkipReason(text) {
+    var s = typeof text === "string" ? text : String(text == null ? "" : text);
+    var starts = countMarker(s, VISIBLE_USER_PROMPT_START);
+    var ends = countMarker(s, VISIBLE_USER_PROMPT_END);
+    if (starts === 0 && ends === 0) {
+      return s.indexOf(VISIBLE_USER_PROMPT_VALUE) !== -1 ? "value-only" : "no-markers";
+    }
+    if (starts === 1 && ends === 1) {
+      return s.indexOf(VISIBLE_USER_PROMPT_END) < s.indexOf(VISIBLE_USER_PROMPT_START) ? "unpaired-markers" : null;
+    }
+    if (starts > 1 || ends > 1) return "multiple-pairs";
+    return "unpaired-markers";
+  }
+  function sanitizeInjectedUserText(text) {
+    var s = typeof text === "string" ? text : String(text == null ? "" : text);
+    if (injectedUserTextSkipReason(s) !== null) return s;
+    var from = s.indexOf(VISIBLE_USER_PROMPT_START) + VISIBLE_USER_PROMPT_START.length;
+    var to = s.indexOf(VISIBLE_USER_PROMPT_END, from);
+    return s.slice(from, to).trim();
+  }
+  function bdsDiagLine(tag, fields) {
+    try {
+      if (typeof aiCmDiagLine !== "function") return false;
+      return aiCmDiagLine(tag, fields) !== false;
+    } catch (eDiag) {
+      return false;
+    }
+  }
+  function bdsDiagSlice(text, from, n) {
+    try {
+      var s = typeof text === "string" ? text : String(text == null ? "" : text);
+      return JSON.stringify(from === 0 ? s.slice(0, n) : s.slice(Math.max(0, s.length - n)));
+    } catch (eSlice) {
+      return '""';
+    }
+  }
+  function isBdsOpenTagLine(line, at) {
+    if (line === BDS_OPEN_TAG) return true;
+    return at === 0 && line === BDS_BOM + BDS_OPEN_TAG;
+  }
+  function bdsFormOfHeadLine(line) {
+    var s = typeof line === "string" ? line : "";
+    for (var i = 0; i < BDS_INJECTION_FORMS.length; i++) {
+      var f = BDS_INJECTION_FORMS[i];
+      if (f.match === "prefix") {
+        if (s.slice(0, f.head.length) === f.head) return f;
+      } else if (s === f.head) return f;
+    }
+    return null;
+  }
+  function bdsFirstContentLine(lines) {
+    for (var i = 0; i < lines.length; i++) {
+      if (String(lines[i]).trim() !== "") return i;
+    }
+    return -1;
+  }
+  function bdsLastContentLine(lines) {
+    for (var i = lines.length - 1; i >= 0; i--) {
+      if (String(lines[i]).trim() !== "") return i;
+    }
+    return -1;
+  }
+  function sanitizeBetterDeepSeekText(text) {
+    var s = typeof text === "string" ? text : String(text == null ? "" : text);
+    if (s.indexOf(BDS_OPEN_TAG) === -1) return { text: s, removed: 0, forms: [] };
+    var lines = s.split("\n");
+    var drop = {};
+    var forms = [];
+    var diagRows = typeof aiCmDiagLine === "function" ? [] : null;
+    var firstLine = bdsFirstContentLine(lines);
+    var lastLine = bdsLastContentLine(lines);
+    for (var k = 0; k < lines.length; k++) {
+      if (!isBdsOpenTagLine(lines[k], k)) continue;
+      var form = k + 1 < lines.length ? bdsFormOfHeadLine(lines[k + 1]) : null;
+      if (form) {
+        var end = -1;
+        for (var j = k + 2; j < lines.length; j++) {
+          if (isBdsOpenTagLine(lines[j], j)) break;
+          if (lines[j] === BDS_CLOSE_TAG || lines[j] === BDS_TRUNCATION_MARK) {
+            end = j;
+            break;
+          }
+        }
+        if (end === -1) {
+          if (diagRows) diagRows.push({ k, first: firstLine, pair: -1, last: lastLine, form: form.id, skip: "no-boundary" });
+          continue;
+        }
+        if (diagRows) diagRows.push({ k, first: firstLine, pair: end, last: lastLine, form: form.id, skip: "(\u043D\u0435\u0442)" });
+        for (var d = k; d <= end; d++) drop[d] = true;
+        forms.push(form.id);
+        k = end;
+        continue;
+      }
+      var pair = -1;
+      for (var p = k + 1; p < lines.length; p++) {
+        if (isBdsOpenTagLine(lines[p], p)) break;
+        if (lines[p] === BDS_CLOSE_TAG) {
+          pair = p;
+          break;
+        }
+      }
+      if (pair === -1) {
+        if (diagRows) diagRows.push({ k, first: firstLine, pair: -1, last: lastLine, form: "(\u043D\u0435\u0442)", skip: "unpaired-tag" });
+        continue;
+      }
+      if (diagRows) diagRows.push({ k, first: firstLine, pair, last: lastLine, form: BDS_WRAPPER_ID, skip: "(\u043D\u0435\u0442)" });
+      drop[k] = true;
+      drop[pair] = true;
+      forms.push(BDS_WRAPPER_ID);
+      k = pair;
+    }
+    var removedTotal = forms.length;
+    if (diagRows) {
+      for (var r = 0; r < diagRows.length; r++) {
+        bdsDiagLine("o40-bds-line", {
+          k: diagRows[r].k,
+          firstLine: diagRows[r].first,
+          pair: diagRows[r].pair,
+          lastLine: diagRows[r].last,
+          form: diagRows[r].form,
+          skip: diagRows[r].skip,
+          removed: removedTotal
+        });
+      }
+    }
+    if (!forms.length) return { text: s, removed: 0, forms: [] };
+    var kept = [];
+    for (var m = 0; m < lines.length; m++) {
+      if (!drop[m]) kept.push(lines[m]);
+    }
+    return { text: kept.join("\n"), removed: forms.length, forms };
+  }
+  function tcPairAfter(lines, from, open, close) {
+    for (var i = Math.max(0, from); i < lines.length; i++) {
+      if (lines[i] !== open) continue;
+      for (var j = i + 1; j < lines.length; j++) {
+        if (lines[j] === close) return { open: i, close: j };
+      }
+      return null;
+    }
+    return null;
+  }
+  function tcIsWholeMessagePair(lines, pair) {
+    var i;
+    for (i = 0; i < pair.open; i++) {
+      if (String(lines[i]).trim() !== "") return false;
+    }
+    for (i = pair.close + 1; i < lines.length; i++) {
+      if (String(lines[i]).trim() !== "") return false;
+    }
+    return true;
+  }
+  function tcProseAnchorLine(lines) {
+    for (var i = 0; i < lines.length; i++) {
+      if (String(lines[i]).slice(0, TC_PROSE_ANCHOR.length) === TC_PROSE_ANCHOR) return i;
+    }
+    return -1;
+  }
+  function sanitizeToolContinuationText(text) {
+    var s = typeof text === "string" ? text : String(text == null ? "" : text);
+    if (s.indexOf(TC_LFR_OPEN) === -1 && s.indexOf(TC_TASK_OPEN) === -1 && s.indexOf(TC_RESULTS_OPEN) === -1 && s.indexOf(TC_PROSE_ANCHOR) === -1) {
+      return { text: s, removed: 0, forms: [] };
+    }
+    var lines = s.split("\n");
+    var drop = {};
+    var forms = [];
+    var anchor = tcProseAnchorLine(lines);
+    if (anchor !== -1) {
+      var runEnd = anchor;
+      for (var p = anchor + 1; p < lines.length; p++) {
+        if (String(lines[p]).trim() === "") break;
+        runEnd = p;
+      }
+      var spanEnd = runEnd;
+      var afterRun = runEnd + 1;
+      var task = tcPairAfter(lines, afterRun, TC_TASK_OPEN, TC_TASK_CLOSE);
+      if (task) {
+        spanEnd = task.close;
+        afterRun = task.close + 1;
+      }
+      var results = tcPairAfter(lines, afterRun, TC_RESULTS_OPEN, TC_RESULTS_CLOSE);
+      if (results) {
+        spanEnd = results.close;
+      }
+      for (var d = anchor; d <= spanEnd; d++) drop[d] = true;
+      forms.push("tc-prose-continuation");
+      if (task) forms.push("tc-original-task");
+      if (results) forms.push("tc-tool-results");
+    }
+    for (var k = 0; k < lines.length; k++) {
+      if (drop[k] || lines[k] !== TC_LFR_OPEN) continue;
+      var lfr = tcPairAfter(lines, k, TC_LFR_OPEN, TC_LFR_CLOSE);
+      if (!lfr) continue;
+      if (!tcIsWholeMessagePair(lines, lfr)) {
+        k = lfr.close;
+        continue;
+      }
+      for (var d2 = lfr.open; d2 <= lfr.close; d2++) drop[d2] = true;
+      forms.push("tc-local-file-read");
+      k = lfr.close;
+    }
+    if (!forms.length) return { text: s, removed: 0, forms: [] };
+    var kept = [];
+    for (var m = 0; m < lines.length; m++) {
+      if (!drop[m]) kept.push(lines[m]);
+    }
+    return { text: kept.join("\n"), removed: forms.length, forms };
+  }
+  function stripReasoningSections(text) {
+    var s = typeof text === "string" ? text : String(text == null ? "" : text);
+    if (s.indexOf(SECTION_REASONING_TAG) === -1 || s.indexOf(SECTION_ANSWER_TAG) === -1) return s;
+    var out = "";
+    var i = 0;
+    var changed = false;
+    while (i < s.length) {
+      var a = s.indexOf(SECTION_ANSWER_TAG, i);
+      if (a === -1) {
+        out += s.slice(i);
+        break;
+      }
+      var r = a > 0 ? s.lastIndexOf(SECTION_REASONING_TAG, a - 1) : -1;
+      if (r === -1 || r < i) {
+        out += s.slice(i, a + SECTION_ANSWER_TAG.length);
+        i = a + SECTION_ANSWER_TAG.length;
+        continue;
+      }
+      out += s.slice(i, r);
+      i = a + SECTION_ANSWER_TAG.length;
+      if (s.charAt(i) === "\r" && s.charAt(i + 1) === "\n") i += 2;
+      else if (s.charAt(i) === "\n") i += 1;
+      changed = true;
+    }
+    return changed ? out : s;
+  }
+  function diagTag(tag, fields) {
+    try {
+      if (typeof aiCmDiagLine !== "function") return false;
+      return aiCmDiagLine(tag, fields) !== false;
+    } catch (eDiag) {
+      return false;
+    }
+  }
+  function splitReasoningSections(text) {
+    var s = typeof text === "string" ? text : String(text == null ? "" : text);
+    var m = REASONING_SECTION_PAIR_RE.exec(s);
+    if (m) return { reasoning: m[1].replace(/\s+$/, ""), answer: m[2] };
+    var r = s.indexOf(SECTION_REASONING_TAG);
+    var a = s.indexOf(SECTION_ANSWER_TAG);
+    if (r !== -1 && a !== -1) {
+      diagTag("reasoning-marker-in-prose", { len: s.length, r, a });
+    }
+    return { reasoning: "", answer: s };
+  }
+  function applyReasoningExportFields(messages, enabled) {
+    var changed = 0;
+    try {
+      if (enabled !== true || !Array.isArray(messages)) return { changed: 0 };
+      for (var i = 0; i < messages.length; i++) {
+        var m = messages[i];
+        if (!m || typeof m !== "object") continue;
+        var text = typeof m.text === "string" ? m.text : "";
+        var reasoning = typeof m.reasoning === "string" ? m.reasoning : "";
+        var captured = typeof m.hiddenReasoning === "string" ? m.hiddenReasoning : "";
+        if (!reasoning) reasoning = captured;
+        if (!reasoning && text && m.role !== "user") {
+          var pair = splitReasoningSections(text);
+          if (pair && pair.reasoning) {
+            reasoning = pair.reasoning;
+            text = pair.answer;
+          }
+        }
+        if (!reasoning) continue;
+        if (!captured && text === m.text) continue;
+        var next = {};
+        for (var k in m) {
+          if (Object.prototype.hasOwnProperty.call(m, k)) next[k] = m[k];
+        }
+        next.text = text;
+        next.reasoning = reasoning;
+        if (next.hiddenReasoning) delete next.hiddenReasoning;
+        messages[i] = next;
+        changed++;
+      }
+    } catch (eApply) {
+      return { changed };
+    }
+    return { changed };
+  }
+  function isToolResultsOnlyText(text) {
+    try {
+      var s = typeof text === "string" ? text : String(text == null ? "" : text);
+      var t = s.trim();
+      if (t.indexOf(TOOL_RESULTS_OPEN) !== 0) return false;
+      var close = t.indexOf(TOOL_RESULTS_CLOSE);
+      if (close === -1) return false;
+      var rest = t.slice(close + TOOL_RESULTS_CLOSE.length).trim();
+      if (rest === TOOL_RESULTS_TAIL) rest = "";
+      return rest === "";
+    } catch (e) {
+      return false;
+    }
+  }
+  function stripToolCallBlocks(text) {
+    var s = typeof text === "string" ? text : String(text == null ? "" : text);
+    if (s.indexOf("<") === -1) return s;
+    RE_TOOL_CALL_BLOCK.lastIndex = 0;
+    var out = s.replace(RE_TOOL_CALL_BLOCK, "");
+    if (out === s) return s;
+    return out.replace(/\s+$/, "");
+  }
+  function isEmptyExportText(text) {
+    try {
+      return String(text == null ? "" : text).trim() === "";
+    } catch (e) {
+      return false;
+    }
+  }
+  function isReasoningOnlyAssistantTurn(message) {
+    try {
+      if (!message || typeof message !== "object") return false;
+      if (message.role !== "assistant") return false;
+      var reasoning = typeof message.reasoning === "string" ? message.reasoning : "";
+      return reasoning.trim() !== "";
+    } catch (e) {
+      return false;
+    }
+  }
+  function copyMessageWithText(message, text) {
+    var keep = {};
+    for (var k in message) {
+      if (Object.prototype.hasOwnProperty.call(message, k)) keep[k] = message[k];
+    }
+    keep.text = text;
+    return keep;
+  }
+  function sanitizeEmitMessages(messages) {
+    var out = [];
+    var sanitized = 0;
+    var skipped = [];
+    var dropped = 0;
+    var bdsRemoved = 0;
+    var bdsForms = [];
+    var tcRemoved = 0;
+    var tcForms = [];
+    try {
+      var src = Array.isArray(messages) ? messages : [];
+      for (var i = 0; i < src.length; i++) {
+        var m = stripHiddenFields(src[i]);
+        if (!m || typeof m !== "object") {
+          bdsDiagLine("o40-emit-msg", { i, len: 0, head: bdsDiagSlice("", 0, 40), tail: bdsDiagSlice("", 1, 40), called: 0, removed: 0 });
+          out.push(m);
+          continue;
+        }
+        var raw = typeof m.text === "string" ? m.text : "";
+        if (typeof aiCmDiagOn === "function" && aiCmDiagOn() && m.role === "user" && isToolResultsOnlyText(raw)) {
+          bdsDiagLine("o40-emit-msg", { i, len: raw.length, head: bdsDiagSlice(raw, 0, 40), tail: bdsDiagSlice(raw, 1, 40), called: 0, removed: 0 });
+        }
+        if (m.role === "user" && isToolResultsOnlyText(raw)) {
+          dropped++;
+          continue;
+        }
+        var bare = stripReasoningSections(raw);
+        if (bare !== raw) m = copyMessageWithText(m, bare);
+        var bdsIn = typeof m.text === "string" ? m.text : "";
+        var bds = sanitizeBetterDeepSeekText(bdsIn);
+        bdsDiagLine("o40-emit-msg", { i, len: bdsIn.length, head: bdsDiagSlice(bdsIn, 0, 40), tail: bdsDiagSlice(bdsIn, 1, 40), called: 1, removed: bds.removed });
+        if (bds.removed > 0) {
+          m = copyMessageWithText(m, bds.text);
+          bdsRemoved += bds.removed;
+          for (var bf = 0; bf < bds.forms.length; bf++) bdsForms.push(bds.forms[bf]);
+        }
+        var tc = sanitizeToolContinuationText(typeof m.text === "string" ? m.text : "");
+        if (tc.removed > 0) {
+          m = copyMessageWithText(m, tc.text);
+          tcRemoved += tc.removed;
+          for (var tf = 0; tf < tc.forms.length; tf++) tcForms.push(tc.forms[tf]);
+        }
+        if (m.role !== "user") {
+          var cut = stripToolCallBlocks(typeof m.text === "string" ? m.text : "");
+          if (cut !== m.text) m = copyMessageWithText(m, cut);
+        } else {
+          var text = typeof m.text === "string" ? m.text : "";
+          var reason = injectedUserTextSkipReason(text);
+          if (reason !== null) {
+            skipped.push(reason);
+          } else {
+            m = copyMessageWithText(m, sanitizeInjectedUserText(text));
+            sanitized++;
+          }
+        }
+        if (isEmptyExportText(typeof m.text === "string" ? m.text : "") && !isReasoningOnlyAssistantTurn(m)) {
+          dropped++;
+          continue;
+        }
+        out.push(m);
+      }
+    } catch (e) {
+      return {
+        messages: Array.isArray(messages) ? messages : [],
+        sanitized: 0,
+        skipped: [],
+        dropped: 0,
+        bdsRemoved: 0,
+        bdsForms: [],
+        tcRemoved: 0,
+        tcForms: []
+      };
+    }
+    return {
+      messages: out,
+      sanitized,
+      skipped,
+      dropped,
+      bdsRemoved,
+      bdsForms,
+      tcRemoved,
+      tcForms
+    };
+  }
+  function hasHiddenFields(message) {
+    try {
+      if (!message || typeof message !== "object") return false;
+      return Object.prototype.hasOwnProperty.call(message, "hiddenReasoning") || Object.prototype.hasOwnProperty.call(message, "hiddenInjection");
+    } catch (e) {
+      return false;
+    }
+  }
+  function hiddenReasoningOf(message) {
+    try {
+      var r = message && typeof message.hiddenReasoning === "string" ? message.hiddenReasoning : "";
+      return r.trim();
+    } catch (e) {
+      return "";
+    }
+  }
+  function withoutHiddenFields(message) {
+    var keep = {};
+    for (var k in message) {
+      if (!Object.prototype.hasOwnProperty.call(message, k)) continue;
+      if (k === "hiddenReasoning" || k === "hiddenInjection") continue;
+      keep[k] = message[k];
+    }
+    return keep;
+  }
+  function stripHiddenFields(message) {
+    if (!message || typeof message !== "object") return message;
+    return hasHiddenFields(message) ? withoutHiddenFields(message) : message;
+  }
+  function hasReasoningInSource(messages) {
+    var src = Array.isArray(messages) ? messages : [];
+    for (var i = 0; i < src.length; i++) {
+      var m = src[i];
+      if (!m || typeof m !== "object") continue;
+      var reasoning = typeof m.reasoning === "string" ? m.reasoning : "";
+      if (reasoning.trim() !== "") return true;
+      var text = typeof m.text === "string" ? m.text : "";
+      if (text.indexOf(SECTION_REASONING_TAG) !== -1) return true;
+    }
+    return false;
+  }
+  function effectiveReasoningToggle(userToggle, sourceHasReasoning, site) {
+    if (userToggle === true) return true;
+    if (site === "qwen" || site === "deepseek") return false;
+    return sourceHasReasoning === true;
+  }
+  function includeHiddenExportBlocks(messages) {
+    var src = Array.isArray(messages) ? messages : [];
+    var out = [];
+    for (var i = 0; i < src.length; i++) {
+      var m = src[i];
+      if (!m || typeof m !== "object" || !hasHiddenFields(m)) {
+        out.push(m);
+        continue;
+      }
+      var keep = withoutHiddenFields(m);
+      var reasoning = hiddenReasoningOf(m);
+      var text = typeof keep.text === "string" ? keep.text : "";
+      if (reasoning && text.indexOf(reasoning) === -1) {
+        keep.text = HIDDEN_REASONING_TAG + "\n" + reasoning + "\n\n" + HIDDEN_ANSWER_TAG + "\n" + text;
+      }
+      out.push(keep);
+    }
+    return out;
+  }
+  function unionTurnsById(existing, incoming) {
+    var seen = {};
+    var out = [];
+    var i, t;
+    for (i = 0; existing && i < existing.length; i++) {
+      t = existing[i];
+      if (!t || t.id == null || seen[t.id]) continue;
+      seen[t.id] = true;
+      out.push(t);
+    }
+    for (i = 0; incoming && i < incoming.length; i++) {
+      t = incoming[i];
+      if (!t || t.id == null || seen[t.id]) continue;
+      seen[t.id] = true;
+      out.push(t);
+    }
+    return out;
+  }
+  var FIRED_SESSION_PREFIX, RE_RAW_HEADING_LINE, RE_MARKER_RESIDUE_LINE, RE_CODE_FENCE_LINE, RE_LIST_MARK, RE_ANY_SPACE, INTRA_CORE_MIN_LEN, CROSS_RAW_MIN_LINES, CROSS_RAW_MIN_CHARS, VISIBLE_USER_PROMPT_START, VISIBLE_USER_PROMPT_END, VISIBLE_USER_PROMPT_VALUE, BDS_OPEN_TAG, BDS_CLOSE_TAG, BDS_TRUNCATION_MARK, BDS_BOM, BDS_INJECTION_FORMS, BDS_WRAPPER_ID, TC_LFR_OPEN, TC_LFR_CLOSE, TC_TASK_OPEN, TC_TASK_CLOSE, TC_RESULTS_OPEN, TC_RESULTS_CLOSE, TC_PROSE_ANCHOR, TC_ENVELOPE_FORMS, SECTION_REASONING_TAG, SECTION_ANSWER_TAG, REASONING_SECTION_PAIR_RE, TOOL_RESULTS_OPEN, TOOL_RESULTS_CLOSE, TOOL_RESULTS_TAIL, TOOL_CALL_TAG_NAMES, TOOL_CALL_TAG_ALT, RE_TOOL_CALL_BLOCK, HIDDEN_REASONING_TAG, HIDDEN_ANSWER_TAG, betterDeepSeekForms, bdsWrapperFormId, toolContinuationForms, Api2, export_emit_pipeline_default;
+  var init_export_emit_pipeline = __esm({
+    "../utils/export-emit-pipeline.ts"() {
+      "use strict";
+      FIRED_SESSION_PREFIX = "aiCmFired:";
+      RE_RAW_HEADING_LINE = /^[\s>*+\-\d.)\]]*#{1,}(?=\s|$)/;
+      RE_MARKER_RESIDUE_LINE = /^[\s>*+\-\d.)\]]*#{1,}[\s]*$/;
+      RE_CODE_FENCE_LINE = /^[\s>*+\-\d.)\]]*(`{3,}|~{3,})/;
+      RE_LIST_MARK = /^(?:[-*+]|\d+[.)])[ \t]+/;
+      RE_ANY_SPACE = /[\u00a0\u1680\u2000-\u200a\u202f\u205f\u3000\ufeff]/g;
+      INTRA_CORE_MIN_LEN = 20;
+      CROSS_RAW_MIN_LINES = 2;
+      CROSS_RAW_MIN_CHARS = 80;
+      VISIBLE_USER_PROMPT_START = "<!-- deepseek-pp-visible-user-prompt:start -->";
+      VISIBLE_USER_PROMPT_END = "<!-- deepseek-pp-visible-user-prompt:end -->";
+      VISIBLE_USER_PROMPT_VALUE = "<!-- deepseek-pp-visible-user-prompt:value=";
+      BDS_OPEN_TAG = "<BetterDeepSeek>";
+      BDS_CLOSE_TAG = "</BetterDeepSeek>";
+      BDS_TRUNCATION_MARK = "...[truncated]";
+      BDS_BOM = "\uFEFF";
+      BDS_INJECTION_FORMS = [
+        {
+          id: "bds-deep-code-prompt",
+          match: "exact",
+          head: "[DEEP_CODE_MODE_ACTIVE]",
+          basis: "artifact 1-257 (message), 999-1191 / 1223-1415 (span in <original_task>)"
+        },
+        {
+          id: "bds-tool-system-prompt",
+          match: "exact",
+          head: "You are Better DeepSeek. You have access to specialized tools.",
+          basis: "artifact 259-947 (message)"
+        },
+        {
+          id: "bds-system-datetime",
+          match: "prefix",
+          head: "User's System Date & Time: ",
+          basis: "artifact 980-982 (message; line 981)"
+        }
+      ];
+      BDS_WRAPPER_ID = "bds-prompt-wrapper";
+      TC_LFR_OPEN = "<local_file_read>";
+      TC_LFR_CLOSE = "</local_file_read>";
+      TC_TASK_OPEN = "<original_task>";
+      TC_TASK_CLOSE = "</original_task>";
+      TC_RESULTS_OPEN = "<tool_results>";
+      TC_RESULTS_CLOSE = "</tool_results>";
+      TC_PROSE_ANCHOR = "These are the tool results just executed for the tool-continuation task.";
+      TC_ENVELOPE_FORMS = [
+        {
+          id: "tc-local-file-read",
+          rule: "pair",
+          open: TC_LFR_OPEN,
+          close: TC_LFR_CLOSE,
+          boundary: "\u043E\u0442 \u0441\u0442\u0440\u043E\u043A\u0438 \u043E\u0442\u043A\u0440\u044B\u0432\u0430\u044E\u0449\u0435\u0433\u043E \u0442\u0435\u0433\u0430 \u0434\u043E \u0441\u0442\u0440\u043E\u043A\u0438 \u0437\u0430\u043A\u0440\u044B\u0432\u0430\u044E\u0449\u0435\u0433\u043E; \u0441\u043D\u0438\u043C\u0430\u0435\u0442\u0441\u044F, \u043A\u043E\u0433\u0434\u0430 \u043F\u0430\u0440\u0430 \u2014 \u0446\u0435\u043B\u043E\u0435 \u0441\u043E\u043E\u0431\u0449\u0435\u043D\u0438\u0435 (\u0441\u043F\u0430\u043D \u0432\u043D\u0443\u0442\u0440\u0438 \u0441\u043E\u043E\u0431\u0449\u0435\u043D\u0438\u044F \u2014 \u0431\u0430\u0439\u0442\u043E\u0432\u043E: \u0438\u0437\u043C\u0435\u0440\u0435\u043D\u0438\u044F \u0441\u043F\u0430\u043D\u0430 \u0432 \u0430\u0440\u0442\u0435\u0444\u0430\u043A\u0442\u0435 \u043D\u0435\u0442)",
+          scope: "tool-request",
+          basis: "artifact 10-19 msg 1/3/9/11/13 lines 1-3 (whole message, role=assistant)"
+        },
+        {
+          id: "tc-prose-continuation",
+          rule: "run",
+          openPrefix: TC_PROSE_ANCHOR,
+          boundary: "\u043E\u0442 \u0441\u0442\u0440\u043E\u043A\u0438-\u044F\u043A\u043E\u0440\u044F \u0434\u043E \u043F\u043E\u0441\u043B\u0435\u0434\u043D\u0435\u0439 \u043D\u0435\u043F\u0443\u0441\u0442\u043E\u0439 \u0441\u0442\u0440\u043E\u043A\u0438 \u043F\u0440\u043E\u0437\u044B (\u043F\u0435\u0440\u0435\u0434 \u043F\u0443\u0441\u0442\u043E\u0439 \u0441\u0442\u0440\u043E\u043A\u043E\u0439)",
+          scope: "envelope",
+          basis: "artifact 10-19 msg 2/4/7/8/10/12/14 lines 1-9"
+        },
+        {
+          id: "tc-original-task",
+          rule: "pair",
+          open: TC_TASK_OPEN,
+          close: TC_TASK_CLOSE,
+          boundary: "\u043E\u0442 <original_task> \u0434\u043E </original_task>; \u043F\u0443\u0441\u0442\u0430\u044F \u043F\u0430\u0440\u0430 11-12 \u2014 \u0442\u0430 \u0436\u0435 \u0433\u0440\u0430\u043D\u0438\u0446\u0430",
+          scope: "envelope",
+          basis: "artifact 10-19 msg 2/4 lines 11-12 (empty), msg 7/8/10/12/14 lines 11-17"
+        },
+        {
+          id: "tc-tool-results",
+          rule: "pair",
+          open: TC_RESULTS_OPEN,
+          close: TC_RESULTS_CLOSE,
+          boundary: "\u043E\u0442 <tool_results> \u0434\u043E </tool_results>; \u0432 \u0430\u0440\u0442\u0435\u0444\u0430\u043A\u0442\u0435 \u0437\u0430\u043A\u0440\u044B\u0432\u0430\u044E\u0449\u0438\u0439 \u0442\u0435\u0433 \u2014 \u043F\u043E\u0441\u043B\u0435\u0434\u043D\u044F\u044F \u0441\u0442\u0440\u043E\u043A\u0430 \u0441\u043E\u043E\u0431\u0449\u0435\u043D\u0438\u044F (7/7)",
+          scope: "envelope",
+          basis: "artifact 10-19 msg 2/4 lines 14-26 / 14-35, msg 7/8/10/12/14 lines 19-66"
+        }
+      ];
+      SECTION_REASONING_TAG = "[REASONING]";
+      SECTION_ANSWER_TAG = "[ANSWER]";
+      REASONING_SECTION_PAIR_RE = /^\s*\[REASONING\]\r?\n([\s\S]*?)\r?\n\r?\n\[ANSWER\]\r?\n([\s\S]*)$/;
+      TOOL_RESULTS_OPEN = "[TOOL_RESULTS]";
+      TOOL_RESULTS_CLOSE = "[/TOOL_RESULTS]";
+      TOOL_RESULTS_TAIL = "Continue answering based on the tool results above.";
+      TOOL_CALL_TAG_NAMES = [
+        "browser_navigate",
+        "browser_go_back",
+        "browser_go_forward",
+        "browser_refresh",
+        "browser_list_tabs",
+        "browser_select_tab",
+        "browser_close_tab",
+        "browser_snapshot",
+        "browser_click",
+        "browser_hover",
+        "browser_fill",
+        "browser_fill_form",
+        "browser_key",
+        "browser_type",
+        "browser_attach_file",
+        "browser_wait_for",
+        "browser_handle_dialog",
+        "browser_evaluate_script",
+        "memory_save",
+        "memory_update",
+        "memory_delete",
+        "web_search",
+        "web_fetch"
+      ];
+      TOOL_CALL_TAG_ALT = "(?:" + TOOL_CALL_TAG_NAMES.join("|") + "|shell_\\w+|python_\\w+|skill_\\w+)";
+      RE_TOOL_CALL_BLOCK = new RegExp(
+        "<(" + TOOL_CALL_TAG_ALT + ")(?:\\s[^>]*)?>[\\s\\S]*?<\\/\\1\\s*>\\s*",
+        "g"
+      );
+      HIDDEN_REASONING_TAG = SECTION_REASONING_TAG;
+      HIDDEN_ANSWER_TAG = SECTION_ANSWER_TAG;
+      betterDeepSeekForms = BDS_INJECTION_FORMS;
+      bdsWrapperFormId = BDS_WRAPPER_ID;
+      toolContinuationForms = TC_ENVELOPE_FORMS;
+      Api2 = {
+        buildAutoExportFileName,
+        disambiguateFileName,
+        isFileNameTaken,
+        buildExportFileName,
+        buildGsaExportFileName,
+        resolveAutoExportConvId,
+        notCompleteReason,
+        shouldSkipGsaPageGuard,
+        shouldSkipAutoExport,
+        shouldSkipBaseCompleteTrigger,
+        effectiveAutoExportThreshold,
+        pickExportSource,
+        resolveExportSource,
+        // Two-Tier (v89): метка достоверности источника файла — чистая функция наружу
+        // (её зовёт core/export-manager.js:aiCmGetSourceTier).
+        sourceTierOf,
+        markAutoExportFired,
+        getAutoExportFired,
+        resetAutoExportFired,
+        firedSessionKey,
+        isFiredInSession,
+        sessionFiredPatch,
+        extractConvIdFromUrl,
+        normalizeExportMessages,
+        coreText,
+        stripMarkerResidue,
+        dedupeMessages,
+        dedupeIntraMessage,
+        dedupeCrossRawCopies,
+        separateRawBlocks,
+        prepareExportMessages,
+        sanitizeInjectedUserText,
+        injectedUserTextSkipReason,
+        sanitizeEmitMessages,
+        // O-40: инъекции соседнего расширения Better DeepSeek — чистые функции и таблица
+        // измеренных форм наружу (пины D/R нового тест-файла читают формы из таблицы).
+        sanitizeBetterDeepSeekText,
+        betterDeepSeekForms: BDS_INJECTION_FORMS,
+        bdsWrapperFormId: BDS_WRAPPER_ID,
+        // O-42: агентный конверт Better DeepSeek (tool-continuation) — чистая функция и таблица
+        // измеренных дескрипторов конверта наружу (пины D/R нового тест-файла читают таблицу).
+        sanitizeToolContinuationText,
+        toolContinuationForms: TC_ENVELOPE_FORMS,
+        // O-7 (OFF): урезание секций reasoning на выходе экспорта — чистая функция наружу.
+        stripReasoningSections,
+        // O-37 (C): обратное преобразование пары [REASONING]/[ANSWER] в отдельные поля
+        // (reasoning/answer) — чистая функция наружу (переиспользуется точкой сбора экспорта).
+        splitReasoningSections,
+        // O-37 (C): нормализация размышления на выходе точки сбора экспорта (по месту, по флагу
+        // сайта) — чистая функция наружу; на боевом пути её зовёт core/export-manager.js.
+        applyReasoningExportFields,
+        // O-7 (OFF, S3/S4): служебный тул-мусор DeepSeek++ — чистые функции наружу.
+        isToolResultsOnlyText,
+        stripToolCallBlocks,
+        // O-7: hidden-блоки DeepSeek (сырой режим экспорта) — чистые функции наружу.
+        includeHiddenExportBlocks,
+        stripHiddenFields,
+        hiddenReasoningOf,
+        // D-O41: авто-ON тумблера при наличии reasoning в источнике — чистые функции наружу
+        // (пины S/D нового тест-файла; на боевом пути их зовёт core/export-manager.js).
+        hasReasoningInSource,
+        effectiveReasoningToggle,
+        unionTurnsById,
+        latchKey
+      };
+      export_emit_pipeline_default = Api2;
+    }
+  });
+
+  // ../utils/gemini-batchexecute-parser.ts
+  function logSegmentParseFail(e, where) {
+    try {
+      console.log("[AI CM][batchexecute] segment parse fail " + where + ": " + (e && e.message || e));
+    } catch (e2) {
+    }
+  }
+  function stripAttachmentTokens2(s) {
+    if (typeof s !== "string") return s;
+    return s.replace(ATTACH_TOKEN_RE2, " ").replace(/[ \t\f\v]+/g, " ");
+  }
+  function sanitizeGeminiText(s) {
+    if (typeof s !== "string") return s;
+    return s.replace(/\$AXzLiR[A-Za-z0-9+\/=\s]+/g, " ").replace(/File attachment was not previously registered/g, "").replace(/\[cite:\s*\d+\]/g, "");
+  }
+  function isIdLike(s) {
+    return typeof s === "string" && /^(c_|r_|rc_|fbb[0-9a-f]|[0-9a-f]{16})/.test(s);
+  }
+  function isFileLike(s) {
+    return typeof s === "string" && /\.(pdf|png|jpe?g|gif|docx?|txt|webp|csv|xlsx?)(\b|$)/i.test(s);
+  }
+  function isUrlLike(s) {
+    return typeof s === "string" && /^https?:\/\//i.test(s);
+  }
+  function isTokenLike(s) {
+    return typeof s === "string" && /^\$?AVuib/.test(s);
+  }
+  function isMimeLike(s) {
+    return typeof s === "string" && /^(image|application|video|audio)\//i.test(s);
+  }
+  function isJunk(s) {
+    if (typeof s !== "string") return true;
+    var t = s.trim();
+    if (t.length === 0) return true;
+    if (UI_BLACKLIST[t]) return true;
+    return isIdLike(t) || isFileLike(t) || isUrlLike(t) || isTokenLike(t) || isMimeLike(t);
+  }
+  function isUserQuestionJunk(s) {
+    if (typeof s !== "string") return true;
+    var t = s.trim();
+    if (!t) return true;
+    if (UI_BLACKLIST[t]) return true;
+    return isIdLike(t) || isUrlLike(t) || isTokenLike(t) || isMimeLike(t);
+  }
+  function hasCyrillic(s) {
+    for (var i = 0; i < s.length; i++) {
+      var c = s.charCodeAt(i);
+      if (c >= 1024 && c <= 1279) return true;
+    }
+    return false;
+  }
+  function isThinkingStart(s) {
+    if (typeof s !== "string") return false;
+    var t = s.trim();
+    if (!t) return false;
+    if (hasCyrillic(t)) return false;
+    if (THINKING_TITLE_RE.test(t)) return true;
+    if (THINKING_BODY_RE.test(t)) return true;
+    if (THINKING_BODY_EXTRA_RE.test(t)) return true;
+    if (THINKING_GERUND_RE.test(t)) return true;
+    return false;
+  }
+  function isResponseSegment(s) {
+    if (typeof s !== "string") return false;
+    var t = s.trim();
+    if (!t) return false;
+    if (hasCyrillic(t)) return true;
+    if (/```/.test(t)) return true;
+    if (/^\s*\|.+\|\s*$/m.test(t)) return true;
+    return false;
+  }
+  function collectTurnText(node, out, state) {
+    state = state || { inThinking: false };
+    if (typeof node === "string") {
+      var s = sanitizeGeminiText(node);
+      var t = s.trim();
+      if (!t) return;
+      if (FILE_ATTACHMENT_RE.test(t)) return;
+      if (isJunk(t)) return;
+      if (state.inThinking) {
+        if (!isResponseSegment(t)) return;
+        state.inThinking = false;
+        out.push(s);
+        return;
+      }
+      if (isThinkingStart(t)) {
+        state.inThinking = true;
+        return;
+      }
+      out.push(s);
+      return;
+    }
+    if (!Array.isArray(node)) return;
+    for (var k = 0; k < node.length; k++) collectTurnText(node[k], out, state);
+  }
+  function extractUserQuestion(turn) {
+    var q = "";
+    try {
+      q = turn[2][0][0];
+    } catch (e) {
+      q = "";
+    }
+    if (typeof q === "string") {
+      var s = sanitizeGeminiText(q).trim();
+      if (s && !isUserQuestionJunk(s) && !isThinkingStart(s)) return s;
+    }
+    return "";
+  }
+  function extractModelName(node) {
+    var found = null;
+    (function walk(n) {
+      if (found) return;
+      if (typeof n === "string") {
+        if (n.length < 60 && n.indexOf("\n") < 0 && MODEL_NAME_RE.test(n)) {
+          found = n.trim();
+          return;
+        }
+      } else if (Array.isArray(n)) {
+        for (var i = 0; i < n.length; i++) {
+          walk(n[i]);
+          if (found) return;
+        }
+      }
+    })(node);
+    return found || "";
+  }
+  function extractTurnId(node) {
+    var found = null;
+    (function walk(n) {
+      if (found) return;
+      if (typeof n === "string" && /^r_[0-9a-f]+$/.test(n)) {
+        found = n;
+        return;
+      } else if (Array.isArray(n)) {
+        for (var i = 0; i < n.length; i++) {
+          walk(n[i]);
+          if (found) return;
+        }
+      }
+    })(node);
+    return found;
+  }
+  function extractTurnR1(t) {
+    try {
+      if (Array.isArray(t) && Array.isArray(t[1]) && typeof t[1][1] === "string") return t[1][1];
+    } catch (e) {
+    }
+    return null;
+  }
+  function extractTurnTs(t) {
+    try {
+      if (Array.isArray(t) && Array.isArray(t[4]) && typeof t[4][0] === "number" && t[4][0] > 1e9) return t[4][0];
+    } catch (e) {
+    }
+    return 0;
+  }
+  function fileRefFromNode(n) {
+    try {
+      if (!Array.isArray(n)) return null;
+      var name = typeof n[2] === "string" ? n[2].trim() : "";
+      if (!name) return null;
+      var mime = typeof n[11] === "string" ? n[11] : "";
+      var type = typeof n[1] === "number" ? n[1] : 0;
+      var token = typeof n[5] === "string" ? n[5] : "";
+      var img = typeof n[3] === "string" ? n[3] : "";
+      var tail = n ? n[15] : null;
+      var size = Array.isArray(tail) && typeof tail[2] === "number" && isFinite(tail[2]) && tail[2] > 0 ? tail[2] : 0;
+      var dl = "";
+      var urls = [];
+      (function walk(v) {
+        if (typeof v === "string") {
+          if (v) urls.push(v);
+          if (!dl && v.indexOf("contribution.usercontent.google.com/download") !== -1) dl = v;
+        } else if (Array.isArray(v)) {
+          for (var i = 0; i < v.length; i++) walk(v[i]);
+        }
+      })(n[7]);
+      return {
+        name,
+        mime,
+        type,
+        token,
+        size,
+        img,
+        dl,
+        urls,
+        isImage: type === 1 || /^image\//i.test(mime)
+      };
+    } catch (e) {
+      return null;
+    }
+  }
+  function collectTurnFiles(turn) {
+    var out = [];
+    try {
+      var arr = turn[2][0][4][0][4];
+      if (!Array.isArray(arr)) return out;
+      for (var i = 0; i < arr.length; i++) {
+        var ref = fileRefFromNode(arr[i]);
+        if (ref) {
+          ref.pos = i;
+          out.push(ref);
+        }
+      }
+    } catch (e) {
+    }
+    return out;
+  }
+  function fileOwnerTs(ts) {
+    return typeof ts === "number" && isFinite(ts) && ts > 0 ? ts : 0;
+  }
+  function fileOwnerOrder(order) {
+    return typeof order === "number" && isFinite(order) && order >= 0 ? order : -1;
+  }
+  function filePoolForConv(convId, create) {
+    var cid = typeof convId === "string" ? convId : "";
+    var pool = filePoolsByConv[cid];
+    if (!pool && create) {
+      pool = { turns: {}, seq: 0 };
+      filePoolsByConv[cid] = pool;
+    }
+    return pool || null;
+  }
+  function fileRefPoolName(ref) {
+    return ref && typeof ref.name === "string" ? ref.name : "";
+  }
+  function poolSharedPrefixLen(a, b) {
+    var n = Math.min(a.length, b.length);
+    var k = 0;
+    while (k < n && fileRefPoolName(a[k]) === fileRefPoolName(b[k])) k++;
+    return k;
+  }
+  function isTurnBefore(a, b) {
+    var aTs = fileOwnerTs(a.ts);
+    var bTs = fileOwnerTs(b.ts);
+    if (aTs > 0 && bTs > 0 && aTs !== bTs) return aTs < bTs;
+    if (aTs > 0 && bTs === 0) return true;
+    if (aTs === 0 && bTs > 0) return false;
+    var aRefs = Array.isArray(a.refs) ? a.refs : null;
+    var bRefs = Array.isArray(b.refs) ? b.refs : null;
+    if (aRefs && bRefs && aRefs.length !== bRefs.length) {
+      var nest = poolSharedPrefixLen(aRefs, bRefs);
+      if (nest === Math.min(aRefs.length, bRefs.length)) return aRefs.length < bRefs.length;
+    }
+    var aTid = typeof a.turnId === "string" ? a.turnId : "";
+    var bTid = typeof b.turnId === "string" ? b.turnId : "";
+    if (aTid && bTid && aTid !== bTid) return aTid < bTid;
+    var aOrd = fileOwnerOrder(a.order);
+    var bOrd = fileOwnerOrder(b.order);
+    if (aOrd >= 0 && bOrd >= 0 && aOrd !== bOrd) return aOrd < bOrd;
+    return a.seq < b.seq;
+  }
+  function fileRefIdentityKey(ref) {
+    var name = ref && typeof ref.name === "string" ? ref.name : "";
+    var size = ref && typeof ref.size === "number" && isFinite(ref.size) ? ref.size : 0;
+    return name + "|" + size;
+  }
+  function registerTurnFileOwner(turn, convId, turnId, ts, order) {
+    var own = typeof turnId === "string" ? turnId : "";
+    if (!own) return 0;
+    var all = collectTurnFiles(turn);
+    var pool = filePoolForConv(convId, true);
+    if (!all.length) {
+      if (pool && pool.turns[own]) delete pool.turns[own];
+      return 0;
+    }
+    var nTs = fileOwnerTs(ts);
+    var nOrd = fileOwnerOrder(order);
+    var prev = pool.turns[own];
+    if (prev) {
+      prev.refs = all;
+      if (nTs > 0) prev.ts = nTs;
+      if (nOrd >= 0) prev.order = nOrd;
+      return all.length;
+    }
+    pool.seq++;
+    pool.turns[own] = { turnId: own, ts: nTs, order: nOrd, seq: pool.seq, refs: all };
+    return all.length;
+  }
+  function previousPoolTurn(pool, rec, all) {
+    var ids = Object.keys(pool.turns);
+    var chrono = null;
+    var i;
+    for (i = 0; i < ids.length; i++) {
+      if (ids[i] === rec.turnId) continue;
+      var cand = pool.turns[ids[i]];
+      if (!cand || !Array.isArray(cand.refs)) continue;
+      if (!isTurnBefore(cand, rec)) continue;
+      if (!chrono || isTurnBefore(chrono, cand)) chrono = cand;
+    }
+    var donor = null;
+    for (i = 0; i < ids.length; i++) {
+      if (ids[i] === rec.turnId) continue;
+      var reg = pool.turns[ids[i]];
+      if (!reg || !Array.isArray(reg.refs)) continue;
+      var len = reg.refs.length;
+      if (!len || len >= all.length) continue;
+      if (poolSharedPrefixLen(reg.refs, all) !== len) continue;
+      if (!donor || len > donor.refs.length) donor = reg;
+    }
+    if (donor && (!chrono || donor.refs.length > chrono.refs.length)) return donor;
+    return chrono;
+  }
+  function poolDelta(prevRefs, all) {
+    var k = poolSharedPrefixLen(prevRefs, all);
+    if (k === prevRefs.length || k === all.length) return all.slice(k);
+    var spent = {};
+    var i;
+    for (i = 0; i < prevRefs.length; i++) {
+      var pk = fileRefIdentityKey(prevRefs[i]);
+      spent[pk] = (spent[pk] || 0) + 1;
+    }
+    var out = [];
+    for (i = 0; i < all.length; i++) {
+      var ck = fileRefIdentityKey(all[i]);
+      if (spent[ck] > 0) {
+        spent[ck]--;
+        continue;
+      }
+      out.push(all[i]);
+    }
+    return out;
+  }
+  function assignPoolOwners(turns) {
+    var list = Array.isArray(turns) ? turns : [];
+    var out = [];
+    var prevPool = [];
+    for (var i = 0; i < list.length; i++) {
+      var item = list[i];
+      if (!item) continue;
+      var pool = Array.isArray(item.refs) ? item.refs : [];
+      var own = [];
+      if (pool.length) {
+        own = prevPool.length ? poolDelta(prevPool, pool) : pool.slice(0);
+        prevPool = pool;
+      }
+      out.push({ id: item.id, own });
+    }
+    return out;
+  }
+  function collectTurnFilesForOwner(turn, convId, ownerId, ts, order) {
+    var all = collectTurnFiles(turn);
+    var own = typeof ownerId === "string" ? ownerId : "";
+    if (!own) return all;
+    if (!all.length) return [];
+    var pool = filePoolForConv(convId, true);
+    var rec = pool.turns[own];
+    if (!rec) {
+      pool.seq++;
+      rec = { turnId: own, ts: fileOwnerTs(ts), order: fileOwnerOrder(order), seq: pool.seq, refs: all };
+      pool.turns[own] = rec;
+    }
+    rec.refs = all;
+    if (fileOwnerTs(ts) > 0) rec.ts = fileOwnerTs(ts);
+    if (fileOwnerOrder(order) >= 0) rec.order = fileOwnerOrder(order);
+    var prev = previousPoolTurn(pool, rec, all);
+    if (!prev) return all;
+    return poolDelta(prev.refs, all);
+  }
+  function __resetFileOwners(convId) {
+    if (convId === void 0 || convId === null || convId === "") {
+      filePoolsByConv = {};
+      return;
+    }
+    delete filePoolsByConv[typeof convId === "string" ? convId : String(convId)];
+  }
+  function isThinkingAssistant(s) {
+    if (typeof s !== "string") return false;
+    var t = s.trim();
+    if (!t) return false;
+    if (hasCyrillic(t)) return false;
+    return THINKING_ASSISTANT_RE.test(t);
+  }
+  function firstCyrillicIndex(s) {
+    for (var i = 0; i < s.length; i++) {
+      var c = s.charCodeAt(i);
+      if (c >= 1024 && c <= 1279) return i;
+    }
+    return -1;
+  }
+  function stripLeadingThinking(s) {
+    if (typeof s !== "string") return s;
+    var t = s.trim();
+    if (!LEADING_THINKING_RE.test(t)) return s;
+    var idx = firstCyrillicIndex(t);
+    if (idx < 0) return "";
+    return t.slice(idx);
+  }
+  function hasMarkdownMarkup(t) {
+    if (typeof t !== "string") return false;
+    if (/\*\*[^*\n]+\*\*/.test(t)) return true;
+    if (/^\s*#{1,6}\s/m.test(t)) return true;
+    if (/^\s*\|.+\|\s*$/m.test(t)) return true;
+    if (/```/.test(t)) return true;
+    if (/^\s*[-*+]\s/m.test(t)) return true;
+    if (/^\s*>\s/m.test(t)) return true;
+    if (/\[[^\]]+\]\([^)]+\)/.test(t)) return true;
+    if (/^\s*(---+|\*\*\*+|___+)\s*$/m.test(t)) return true;
+    return false;
+  }
+  function pickCanonicalAnswer(parts) {
+    if (!parts || !parts.length) return "";
+    for (var i = 0; i < parts.length; i++) {
+      if (hasMarkdownMarkup(parts[i])) return parts[i];
+    }
+    return parts[0];
+  }
+  function extractCanonicalAnswer(turn) {
+    var cands = [];
+    var isFallback = false;
+    try {
+      var box = Array.isArray(turn[3]) && Array.isArray(turn[3][0]) && Array.isArray(turn[3][0][0]) ? turn[3][0][0][1] : null;
+      if (Array.isArray(box)) {
+        for (var i = 0; i < box.length; i++) cands.push(box[i]);
+      } else if (typeof box === "string") {
+        cands.push(box);
+      }
+    } catch (e) {
+    }
+    if (!cands.length) {
+      isFallback = true;
+      try {
+        collectTurnText(turn[3], cands);
+      } catch (e) {
+        swallowSoft2(e, "gemini-utils:extractCanonicalAnswer-fallback");
+      }
+    }
+    var cleaned = [];
+    for (i = 0; i < cands.length; i++) {
+      if (typeof cands[i] !== "string") continue;
+      var s = sanitizeGeminiText(cands[i]).trim();
+      if (s) cleaned.push(s);
+    }
+    return { text: pickCanonicalAnswer(cleaned), isFallback };
+  }
+  function collectDrStrings(node, out, minLen, depth) {
+    try {
+      if (typeof node === "string") {
+        if (node.length >= minLen) out.push(node);
+        return;
+      }
+      if (Array.isArray(node) && depth < 40) {
+        for (var i = 0; i < node.length; i++) collectDrStrings(node[i], out, minLen, depth + 1);
+      }
+    } catch (e) {
+      swallowSoft2(e, "gemini-utils:collectDrStrings");
+    }
+  }
+  function ctText(s) {
+    return sanitizeGeminiText(s).trim();
+  }
+  function extractDrTexts(realTurns) {
+    var res = { planText: "", reportText: "" };
+    try {
+      if (!Array.isArray(realTurns)) return res;
+      var cands = [];
+      for (var i = 0; i < realTurns.length; i++) collectDrStrings(realTurns[i], cands, DR_REPORT_MIN_LEN, 0);
+      var best = "";
+      for (var j = 0; j < cands.length; j++) {
+        var s = cands[j];
+        if (isUrlLike(s) || isJunk(s)) continue;
+        if (!best || s.length > best.length) best = s;
+      }
+      if (best) res.reportText = ctText(best);
+      var pc = [];
+      for (var k = 0; k < realTurns.length; k++) collectDrStrings(realTurns[k], pc, DR_PLAN_MIN_LEN, 0);
+      var pbest = "";
+      for (var q = 0; q < pc.length; q++) {
+        var ps = pc[q];
+        if (isUrlLike(ps) || isJunk(ps)) continue;
+        if (res.reportText && ps === res.reportText) continue;
+        if (ps.indexOf("deep_research_confirmation_content") !== -1) continue;
+        if (ps.indexOf("immersive_entry_chip") !== -1) continue;
+        if (res.reportText && ps.length >= res.reportText.length) continue;
+        if (!pbest || ps.length > pbest.length) pbest = ps;
+      }
+      if (pbest) res.planText = ctText(pbest);
+    } catch (e) {
+      swallowSoft2(e, "gemini-utils:extractDrTexts");
+    }
+    return res;
+  }
+  function __setDrTexts(d) {
+    try {
+      lastDrTexts = d || { planText: "", reportText: "" };
+    } catch (e) {
+    }
+  }
+  function injectDrLinks(text, dr) {
+    try {
+      if (typeof text !== "string") return text;
+      var t = text;
+      if (dr && dr.reportText && t.indexOf("immersive_entry_chip/0") !== -1) {
+        t = t.replace(/https?:\/\/googleusercontent\.com\/immersive_entry_chip\/0/gi, dr.reportText);
+      }
+      if (dr && dr.planText && t.indexOf("deep_research_confirmation_content/0") !== -1) {
+        t = t.replace(/https?:\/\/googleusercontent\.com\/deep_research_confirmation_content\/0/gi, dr.planText);
+      }
+      return t;
+    } catch (e) {
+      return text;
+    }
+  }
+  function splitTurnMessages(turn) {
+    var question = extractUserQuestion(turn);
+    var canon = extractCanonicalAnswer(turn);
+    var answer = canon.text.replace(/\n{3,}/g, "\n\n").trim();
+    var msgs = [];
+    if (question) msgs.push({ role: "user", text: question });
+    if (answer) {
+      var drAn = injectDrLinks(answer, lastDrTexts);
+      if (canon.isFallback) {
+        if (isThinkingAssistant(drAn)) {
+        } else {
+          var kept = stripLeadingThinking(drAn);
+          if (kept) msgs.push({ role: "assistant", text: kept });
+        }
+      } else {
+        msgs.push({ role: "assistant", text: drAn });
+      }
+    }
+    return msgs;
+  }
+  function handleOuter(outer, out) {
+    try {
+      if (!Array.isArray(outer) || !Array.isArray(outer[0])) return;
+      if (outer[0][1] !== "hNvQHb") return;
+      var inner = outer[0][2];
+      if (typeof inner !== "string") return;
+      var turns = JSON.parse(inner);
+      if (!Array.isArray(turns)) return;
+      var realTurns = Array.isArray(turns[0]) && Array.isArray(turns[0][0]) ? turns[0] : turns;
+      try {
+        lastDrTexts = extractDrTexts(realTurns);
+      } catch (eD13) {
+      }
+      var rawCount = realTurns.length;
+      for (var i = rawCount - 1; i >= 0; i--) {
+        var t = realTurns[i];
+        if (!Array.isArray(t)) continue;
+        var modelName = extractModelName(t);
+        var turnId = extractTurnId(t) || "idx" + i;
+        var turnTs = extractTurnTs(t);
+        var r1 = extractTurnR1(t);
+        var msgs = splitTurnMessages(t);
+        for (var m = 0; m < msgs.length; m++) {
+          var role = msgs[m].role === "user" ? "user" : "assistant";
+          out.push({
+            role,
+            content: msgs[m].text,
+            model: modelName || "",
+            id: turnId + "_" + role,
+            ts: turnTs,
+            r1
+          });
+        }
+      }
+    } catch (e) {
+      logSegmentParseFail(e, "handleOuter");
+    }
+  }
+  function parseByBytes(raw, out) {
+    var bytes;
+    try {
+      bytes = new TextEncoder().encode(raw);
+    } catch (e) {
+      return;
+    }
+    var pos = 0;
+    if (bytes.length >= 4 && bytes[0] === 41 && bytes[1] === 93 && bytes[2] === 125 && bytes[3] === 39) pos = 4;
+    var dec = new TextDecoder("utf-8");
+    var guard = 0;
+    while (pos < bytes.length && guard++ < 200) {
+      while (pos < bytes.length && (bytes[pos] < 48 || bytes[pos] > 57)) pos++;
+      if (pos >= bytes.length) break;
+      var n = 0;
+      while (pos < bytes.length && bytes[pos] >= 48 && bytes[pos] <= 57) {
+        n = n * 10 + (bytes[pos] - 48);
+        pos++;
+      }
+      if (n <= 0) {
+        pos++;
+        continue;
+      }
+      if (pos < bytes.length && bytes[pos] === 10) pos++;
+      var end = pos + n;
+      if (end > bytes.length) end = bytes.length;
+      var payloadStr = dec.decode(bytes.subarray(pos, end));
+      pos = end;
+      if (pos < bytes.length && bytes[pos] === 10) pos++;
+      if (payloadStr.indexOf("hNvQHb") !== -1) {
+        try {
+          handleOuter(JSON.parse(payloadStr), out);
+        } catch (e) {
+          logSegmentParseFail(e, "parseByBytes");
+        }
+      }
+    }
+  }
+  function parseByLines(raw, out) {
+    var lines = raw.split("\n");
+    for (var i = 0; i < lines.length; i++) {
+      var ln = lines[i];
+      if (!ln || ln === ")]}'") continue;
+      var c0 = ln.charAt(0);
+      if (c0 !== "[" && c0 !== "{") continue;
+      if (ln.indexOf("hNvQHb") === -1) continue;
+      try {
+        handleOuter(JSON.parse(ln), out);
+      } catch (e) {
+        logSegmentParseFail(e, "parseByLines");
+      }
+    }
+  }
+  function parseGeminiHistory(raw) {
+    var parsed = [];
+    parseByBytes(raw, parsed);
+    if (!parsed.length) parseByLines(raw, parsed);
+    var model = "";
+    for (var i = 0; i < parsed.length; i++) {
+      if (parsed[i].model) {
+        model = parsed[i].model;
+        break;
+      }
+    }
+    var totalChars = 0;
+    var messages = [];
+    var texts = [];
+    for (var j = 0; j < parsed.length; j++) {
+      var txt = parsed[j].content || "";
+      totalChars += txt.length;
+      messages.push({ role: parsed[j].role, text: txt, model: parsed[j].model || "", id: parsed[j].id, ts: parsed[j].ts || 0, r1: parsed[j].r1 || null });
+      texts.push(txt);
+    }
+    return {
+      messages,
+      model: model || "Gemini 2.5 Pro",
+      tokens: Math.ceil(totalChars / 4),
+      text: texts.join("\n"),
+      count: messages.length
+    };
+  }
+  var PARSER_VERSION, ATTACH_TOKEN_RE2, UI_BLACKLIST, THINKING_TITLE_RE, THINKING_BODY_RE, THINKING_BODY_EXTRA_RE, THINKING_GERUND_RE, FILE_ATTACHMENT_RE, MODEL_NAME_RE, filePoolsByConv, THINKING_ASSISTANT_RE, LEADING_THINKING_RE, DR_REPORT_MIN_LEN, DR_PLAN_MIN_LEN, lastDrTexts, api;
+  var init_gemini_batchexecute_parser = __esm({
+    "../utils/gemini-batchexecute-parser.ts"() {
+      init_debug();
+      PARSER_VERSION = "g3";
+      ATTACH_TOKEN_RE2 = /\$AXzLiR[A-Za-z0-9+\/=]+/g;
+      UI_BLACKLIST = {
+        "DE": 1,
+        "ru": 1,
+        "mk": 1,
+        "generic": 1,
+        "personal_context": 1,
+        "google": 1,
+        "\u0418\u0449\u0443 \u0432 \u0438\u043D\u0442\u0435\u0440\u043D\u0435\u0442\u0435": 1,
+        "\u041F\u0435\u0440\u0441\u043E\u043D\u0430\u043B\u044C\u043D\u044B\u0439 \u043A\u043E\u043D\u0442\u0435\u043A\u0441\u0442": 1,
+        "Google Search": 1,
+        "true": 1,
+        "false": 1
+      };
+      THINKING_TITLE_RE = /^\s*\*\*[^*\n]{1,120}\*\*/;
+      THINKING_BODY_RE = /^(I'm now|I've been|I am going|I'm currently|I'm focusing|I'm working|I will now|I've fleshed|I've got|I need to|I'm going to|I've shifted|My focus is|I've settled|I've outlined|I've started|I'm aiming|My approach is|I'm leaning|I'm choosing|I'm prioritizing)\b/i;
+      THINKING_BODY_EXTRA_RE = /^(I'm (?:currently|now|also|still) (?:focused|zeroing|analyzing|integrating|identifying|assessing|refining|evaluating|structuring|addressing|considering|formulating|prioritizing|parsing)|I've (?:been|now) (?:analyzing|noted|shifted|outlined|fleshed)|My (?:focus|goal) is|Specifically, I've)\b/i;
+      THINKING_GERUND_RE = /^(Assessing|Defining|Refining|Outlining|Constructing|Uncovering|Tracing|Confirming|Reassuring|Clarifying|Deepening|Integrating|Evaluating|Formulating|Focusing|Prioritizing|Solidifying|Exploring|Analyzing|Reviewing|Validating|Synthesizing|Considering|Identifying|Structuring|Addressing|Reconstructing)\b/;
+      FILE_ATTACHMENT_RE = /File attachment was not previously registered/;
+      MODEL_NAME_RE = /^\s*(?:Gemini\s*[\d.]?|\d+(?:\.\d+)?\s+(?:Flash|Pro|Ultra|Gemini))/i;
+      filePoolsByConv = {};
+      THINKING_ASSISTANT_RE = /^([A-Z][a-z]+ing\b|I'm\b|I've\b|My (?:focus|goal)\b|sr |Ev )/;
+      LEADING_THINKING_RE = /^\s*\*?\*?([A-Z][a-z]+ing\b|I'm|I've|My (focus|goal)|sr |Ev )/;
+      DR_REPORT_MIN_LEN = 1e3;
+      DR_PLAN_MIN_LEN = 60;
+      lastDrTexts = { planText: "", reportText: "" };
+      api = {
+        PARSER_VERSION,
+        stripAttachmentTokens: stripAttachmentTokens2,
+        sanitizeGeminiText,
+        collectTurnText,
+        isThinkingAssistant,
+        firstCyrillicIndex,
+        stripLeadingThinking,
+        splitTurnMessages,
+        extractDrTexts,
+        injectDrLinks,
+        __setDrTexts,
+        fileRefFromNode,
+        fileRefIdentityKey,
+        collectTurnFiles,
+        registerTurnFileOwner,
+        collectTurnFilesForOwner,
+        assignPoolOwners,
+        __resetFileOwners,
+        parseGeminiHistory
+      };
+      if (typeof window !== "undefined") {
+        window.GeminiBatchexecuteParser = api;
+      }
+    }
+  });
+
+  // ../utils/google-search-folwr-parser.ts
+  var google_search_folwr_parser_exports = {};
+  __export(google_search_folwr_parser_exports, {
+    answerDomNodes: () => answerDomNodes,
+    answerTextOf: () => answerTextOf,
+    bodiesPrefixCompatible: () => bodiesPrefixCompatible,
+    canonicalAnswerBody: () => canonicalAnswerBody,
+    canonicalTurnKeyOf: () => canonicalTurnKeyOf,
+    canonicalizeTurnForThread: () => canonicalizeTurnForThread,
+    classifyFolwrContinuation: () => classifyFolwrContinuation,
+    countTurnContainers: () => countTurnContainers,
+    dedupeTurns: () => dedupeTurns,
+    extractContinuationToken: () => extractContinuationToken,
+    extractTurnsFromDocument: () => extractTurnsFromDocument,
+    isCodeBlockElement: () => isCodeBlockElement,
+    mergeTurnsById: () => mergeTurnsById,
+    mergeTurnsByKey: () => mergeTurnsByKey,
+    mergeTurnsMonotone: () => mergeTurnsMonotone,
+    normalizeTurnKeyPart: () => normalizeTurnKeyPart,
+    parseGoogleFolwrOpen: () => parseGoogleFolwrOpen,
+    renderCodeBlock: () => renderCodeBlock,
+    turnIdentityParts: () => turnIdentityParts
+  });
+  function decodeEntities(s) {
+    if (!s) return "";
+    var out = String(s);
+    out = out.replace(new RegExp("&quot;", "g"), '"');
+    out = out.replace(new RegExp("&amp;", "g"), "&");
+    out = out.replace(new RegExp("&#39;", "g"), "'");
+    out = out.replace(new RegExp("&lt;", "g"), "<");
+    out = out.replace(new RegExp("&gt;", "g"), ">");
+    out = out.replace(new RegExp("&nbsp;", "g"), " ");
+    out = out.replace(/&#(\d+);/g, function(m, d) {
+      try {
+        return String.fromCharCode(parseInt(d, 10));
+      } catch (e) {
+        return m;
+      }
+    });
+    return out;
+  }
+  function mapOutsideFences(s, fn) {
+    var str = String(s == null ? "" : s);
+    var out = "";
+    var last = 0;
+    var m;
+    FENCE_RE.lastIndex = 0;
+    while ((m = FENCE_RE.exec(str)) !== null) {
+      out += fn(str.slice(last, m.index)) + m[0];
+      last = m.index + m[0].length;
+    }
+    return out + fn(str.slice(last));
+  }
+  function stripTagsSeg(seg) {
+    return String(seg).replace(/<script[\s\S]*?<\/script>/gi, " ").replace(/<style[\s\S]*?<\/style>/gi, " ").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ");
+  }
+  function stripTags(html) {
+    if (!html) return "";
+    return mapOutsideFences(html, stripTagsSeg).replace(/^\s+/, "").replace(/\s+$/, "");
+  }
+  function sanitizeAssistantSeg(seg) {
+    return String(seg).replace(/<script[\s\S]*?<\/script>/gi, " ").replace(/<style[\s\S]*?<\/style>/gi, " ").replace(/<[^>]+>/g, " ").replace(/[ \t\f\v]+/g, " ").split("\n").map(function(ln) {
+      return ln.trim();
+    }).join("\n").replace(/\n{3,}/g, "\n\n");
+  }
+  function sanitizeAssistant(s) {
+    if (!s) return "";
+    return mapOutsideFences(s, sanitizeAssistantSeg).replace(/^\s+/, "").replace(/\s+$/, "");
+  }
+  function tableCellText(cellEl) {
+    var clone = cellEl.cloneNode(true);
+    clone.querySelectorAll("script, style, button, svg").forEach(function(el) {
+      el.remove();
+    });
+    return stripTags(decodeEntities(clone.innerHTML)).trim();
+  }
+  function tableToMarkdown2(tableEl) {
+    var rows = tableEl.querySelectorAll("tr");
+    var lines = [];
+    for (var r = 0; r < rows.length; r++) {
+      var cells = rows[r].querySelectorAll("th, td");
+      var cellTexts = [];
+      for (var c = 0; c < cells.length; c++) {
+        cellTexts.push(tableCellText(cells[c]));
+      }
+      if (cellTexts.length === 0) continue;
+      lines.push("| " + cellTexts.join(" | ") + " |");
+    }
+    return lines.join("\n");
+  }
+  function isQuestionHeading(el) {
+    return el.tagName === "H2" && el.className && String(el.className).indexOf("iMqumd") !== -1;
+  }
+  function classOf(el) {
+    try {
+      return String(el && el.className || "");
+    } catch (e) {
+      return "";
+    }
+  }
+  function isCodeLikeNode(el) {
+    if (!el || !el.tagName) return false;
+    var tag = String(el.tagName).toUpperCase();
+    return tag === "PRE" || tag === "CODE" || /code-?block/i.test(classOf(el));
+  }
+  function codeTextOf(el) {
+    if (!el || typeof el.cloneNode !== "function") return "";
+    var clone;
+    try {
+      clone = el.cloneNode(true);
+    } catch (e) {
+      return "";
+    }
+    try {
+      var junk = clone.querySelectorAll("script, style, button, svg");
+      for (var i = 0; i < junk.length; i++) {
+        if (junk[i].parentNode) junk[i].parentNode.removeChild(junk[i]);
+      }
+      var brs = clone.querySelectorAll("br");
+      var doc = clone.ownerDocument || (typeof document !== "undefined" ? document : null);
+      for (var b = 0; b < brs.length; b++) {
+        if (brs[b].parentNode && doc && doc.createTextNode) {
+          brs[b].parentNode.replaceChild(doc.createTextNode("\n"), brs[b]);
+        }
+      }
+    } catch (e2) {
+    }
+    var txt = "";
+    try {
+      txt = String(clone.textContent || "");
+    } catch (e3) {
+      txt = "";
+    }
+    if (txt.indexOf("\n") === -1 && clone.children && clone.children.length > 1) {
+      var allBlock = true;
+      for (var k = 0; k < clone.children.length; k++) {
+        if (!/^(DIV|P|LI|TR|SECTION|ARTICLE|FIGURE|BLOCKQUOTE|H[1-6])$/.test(String(clone.children[k].tagName || "").toUpperCase())) {
+          allBlock = false;
+          break;
+        }
+      }
+      if (allBlock) {
+        var lines = [];
+        for (var k2 = 0; k2 < clone.children.length; k2++) {
+          lines.push(String(clone.children[k2].textContent || ""));
+        }
+        var joined = lines.join("\n");
+        if (joined.replace(/\s+/g, "")) txt = joined;
+      }
+    }
+    return txt.replace(/[ \t]+$/gm, "").replace(/^\n+/, "").replace(/\s+$/, "");
+  }
+  function codeBodyElement(el) {
+    try {
+      var inner = el.querySelectorAll ? el.querySelectorAll("pre, code") : null;
+      if (inner && inner.length) return inner[inner.length - 1];
+    } catch (e) {
+    }
+    return el;
+  }
+  function detectCodeLang(el, langHint) {
+    if (langHint != null && CODE_LANG_RE.test(String(langHint).trim())) return String(langHint).trim();
+    var attrNames = ["code-lang", "data-lang", "data-code-lang"];
+    try {
+      for (var a = 0; a < attrNames.length; a++) {
+        var v = el && el.getAttribute ? el.getAttribute(attrNames[a]) : null;
+        if (v && CODE_LANG_RE.test(String(v).trim())) return String(v).trim();
+      }
+    } catch (e) {
+    }
+    var m = classOf(el).match(/(?:^|[\s_-])(?:language|lang)[-_]([A-Za-z][A-Za-z0-9+#._-]{0,19})/);
+    if (m && CODE_LANG_RE.test(m[1])) return m[1];
+    var cur = el;
+    for (var up = 0; cur && up < 4; up++) {
+      var prev = cur.previousSibling;
+      for (var hops = 0; prev && hops < 3; hops++) {
+        var t = "";
+        try {
+          t = String(prev.textContent || "").trim();
+        } catch (e2) {
+          t = "";
+        }
+        if (t) {
+          if (CODE_LANG_RE.test(t)) return t;
+          break;
+        }
+        prev = prev.previousSibling;
+      }
+      cur = cur.parentNode;
+    }
+    return "";
+  }
+  function isCodeBlockElement(el) {
+    if (!el || !el.tagName) return false;
+    var tag = String(el.tagName).toUpperCase();
+    if (/code-?block/i.test(classOf(el))) return true;
+    if (tag === "PRE") return true;
+    if (tag !== "CODE") return false;
+    if (/(?:^|[\s_-])(?:language|lang)[-_]/.test(classOf(el))) return true;
+    return codeTextOf(el).indexOf("\n") !== -1;
+  }
+  function renderCodeBlock(node, langHint) {
+    if (!node) return "";
+    var body = codeBodyElement(node);
+    var text = codeTextOf(body);
+    if (!text) text = codeTextOf(node);
+    if (!text) return "";
+    var lang = detectCodeLang(node, langHint) || detectCodeLang(body, langHint);
+    var fence = "```";
+    while (text.indexOf(fence) !== -1) fence += "`";
+    return fence + lang + "\n" + text + "\n" + fence;
+  }
+  function answerTextOf(node) {
+    if (!node) return "";
+    if (isCodeBlockElement(node)) return renderCodeBlock(node);
+    if (typeof node.cloneNode !== "function") return "";
+    var clone;
+    try {
+      clone = node.cloneNode(true);
+    } catch (e) {
+      return "";
+    }
+    try {
+      var junk = clone.querySelectorAll("script, style, button, svg");
+      for (var i = 0; i < junk.length; i++) {
+        if (junk[i].parentNode) junk[i].parentNode.removeChild(junk[i]);
+      }
+      var found = clone.querySelectorAll ? clone.querySelectorAll(CODE_CONTAINER_SEL) : [];
+      var outer = [];
+      for (var f = 0; f < found.length; f++) {
+        if (!isCodeBlockElement(found[f])) continue;
+        var nested = false;
+        for (var o = 0; o < outer.length; o++) {
+          if (outer[o].contains && outer[o].contains(found[f])) {
+            nested = true;
+            break;
+          }
+        }
+        if (!nested) outer.push(found[f]);
+      }
+      var doc = clone.ownerDocument || (typeof document !== "undefined" ? document : null);
+      for (var c = outer.length - 1; c >= 0; c--) {
+        var fenced = renderCodeBlock(outer[c]);
+        if (!fenced || !outer[c].parentNode || !doc || !doc.createTextNode) continue;
+        outer[c].parentNode.replaceChild(doc.createTextNode("\n" + fenced + "\n"), outer[c]);
+      }
+    } catch (e2) {
+    }
+    var txt = "";
+    try {
+      txt = String(clone.textContent || "");
+    } catch (e3) {
+      txt = "";
+    }
+    return txt.trim();
+  }
+  function answerDomNodes(root) {
+    var doc = root || (typeof document !== "undefined" ? document : null);
+    if (!doc || typeof doc.querySelectorAll !== "function") return [];
+    var nodes = doc.querySelectorAll(".n6owBd.awi2gc, " + CODE_CONTAINER_SEL);
+    var out = [];
+    for (var i = 0; i < nodes.length; i++) {
+      var el = nodes[i];
+      if (isCodeLikeNode(el) && !isCodeBlockElement(el)) continue;
+      var nested = false;
+      for (var j = 0; j < out.length; j++) {
+        if (out[j].contains && out[j].contains(el)) {
+          nested = true;
+          break;
+        }
+      }
+      if (nested) continue;
+      out.push(el);
+    }
+    return out;
+  }
+  function nodeText(node) {
+    try {
+      return (node.textContent || "").trim();
+    } catch (e) {
+      return "";
+    }
+  }
+  function isWebSearchChipNode(node) {
+    return WEB_SEARCH_CHIP_RE.test(nodeText(node));
+  }
+  function isForeignQuestionNode(node) {
+    return FOREIGN_QUESTION_RE.test(nodeText(node));
+  }
+  function listItemToMarkdown(liEl) {
+    var clone = liEl.cloneNode(true);
+    clone.querySelectorAll("script, style, button, svg").forEach(function(el) {
+      el.remove();
+    });
+    var label = null;
+    var b = clone.querySelector("strong, b");
+    if (b) {
+      label = (b.textContent || "").replace(/\s+/g, " ").trim();
+      b.remove();
+    }
+    var rest = stripTags(decodeEntities(clone.innerHTML)).trim();
+    if (label) {
+      return "- **" + label + "**" + (rest ? ": " + rest : "");
+    }
+    return rest ? "- " + rest : "";
+  }
+  function listToText(listEl) {
+    var items = listEl.querySelectorAll("li");
+    var lines = [];
+    for (var r = 0; r < items.length; r++) {
+      var t = listItemToMarkdown(items[r]);
+      if (t) lines.push(t);
+    }
+    return lines.join("\n");
+  }
+  function gatherAnswerContentNodes(doc) {
+    var raw = doc.querySelectorAll('.n6owBd.awi2gc, table, [role="heading"], h2, h3, h4, ul, ol, li, [role="list"], [role="listitem"], ' + CODE_CONTAINER_SEL);
+    var out = [];
+    for (var i = 0; i < raw.length; i++) {
+      var el = raw[i];
+      if (isQuestionHeading(el)) continue;
+      if (isCodeLikeNode(el) && !isCodeBlockElement(el)) continue;
+      var nested = false;
+      for (var j = 0; j < out.length; j++) {
+        if (out[j].contains && out[j].contains(el)) {
+          nested = true;
+          break;
+        }
+      }
+      if (nested) continue;
+      out.push(el);
+    }
+    return out;
+  }
+  function assignContentToTurns(turnsArr, contentNodes) {
+    var answers = [];
+    var skipAfterChip = [];
+    for (var ti = 0; ti < turnsArr.length; ti++) {
+      answers[ti] = [];
+      skipAfterChip[ti] = false;
+    }
+    for (var n = 0; n < contentNodes.length; n++) {
+      var node = contentNodes[n];
+      var assigned = -1;
+      for (var t2 = 0; t2 < turnsArr.length; t2++) {
+        if (turnsArr[t2].compareDocumentPosition(node) & Node.DOCUMENT_POSITION_FOLLOWING) {
+          assigned = t2;
+        } else {
+          break;
+        }
+      }
+      if (assigned < 0) continue;
+      if (isForeignQuestionNode(node)) continue;
+      if (isWebSearchChipNode(node)) {
+        skipAfterChip[assigned] = true;
+        continue;
+      }
+      if (skipAfterChip[assigned]) continue;
+      var part = null;
+      if (node.tagName === "TABLE") {
+        var md = tableToMarkdown2(node);
+        if (md) part = md;
+      } else if (node.tagName === "UL" || node.tagName === "OL") {
+        var lt = listToText(node);
+        if (lt) part = lt;
+      } else {
+        var ct = answerTextOf(node).trim();
+        if (ct) part = ct;
+      }
+      if (part) answers[assigned].push(part);
+    }
+    return answers;
+  }
+  function readThreadId(doc) {
+    try {
+      var el = doc.querySelector("[data-session-thread-id]");
+      if (el) {
+        var v = el.getAttribute("data-session-thread-id");
+        return v ? v.trim() : "";
+      }
+    } catch (e) {
+    }
+    return "";
+  }
+  function parseGoogleFolwrOpen(htmlText) {
+    var turns = [];
+    var messages = [];
+    if (!htmlText || typeof htmlText !== "string") {
+      return { threadId: "", turns, messages, text: "", count: 0 };
+    }
+    var doc;
+    try {
+      doc = new DOMParser().parseFromString(htmlText, "text/html");
+    } catch (e) {
+      return { threadId: "", turns, messages, text: "", count: 0 };
+    }
+    var threadId = readThreadId(doc);
+    var turnEls = doc.querySelectorAll('[data-scope-id="turn"]');
+    var allAimfl = doc.querySelectorAll('[data-subtree="aimfl"]');
+    var turnsArr = Array.prototype.slice.call(turnEls);
+    var tgQuestions = [];
+    try {
+      var tgRe = /<!--TgQPHd\|[\s\S]*?-->/g;
+      var m;
+      while ((m = tgRe.exec(htmlText)) !== null) {
+        var c = decodeEntities(m[0]);
+        var longRe = /"([^"]{20,})"/g;
+        var lm;
+        var found = null;
+        while ((lm = longRe.exec(c)) !== null) {
+          var cand = lm[1];
+          if (cand.indexOf("\\u0026") !== -1) continue;
+          if (cand.indexOf("OLOoOd") !== -1) continue;
+          if (cand.indexOf("dRog6c") !== -1) continue;
+          if (cand.indexOf("TgQPHd") !== -1) continue;
+          if (!/[а-яёА-ЯЁ]/.test(cand) && cand.indexOf(" ") === -1) continue;
+          found = cand;
+          break;
+        }
+        tgQuestions.push(found);
+      }
+    } catch (e) {
+      swallowSoft(e, "gsa-utils:parseGoogleFolwrOpen-tgqphd");
+    }
+    var contentNodes = gatherAnswerContentNodes(doc);
+    var answers = assignContentToTurns(turnsArr, contentNodes);
+    for (var i = 0; i < turnsArr.length; i++) {
+      var turn = turnsArr[i];
+      var question = null;
+      var h2 = turn.querySelector("h2.iMqumd");
+      if (h2) {
+        var raw = (h2.textContent || "").trim();
+        var qm = raw.match(/^Вы сказали:\s*"([\s\S]*)"$/);
+        question = qm ? qm[1].trim() : raw;
+      }
+      var assistantText = answers[i].length > 0 ? answers[i].join("\n\n") : null;
+      if (!assistantText) {
+        var nestedAimfl = turn.querySelector('[data-subtree="aimfl"]');
+        if (nestedAimfl) {
+          var nat = (nestedAimfl.textContent || "").trim();
+          if (nat) assistantText = nat;
+        }
+      }
+      if (!assistantText && allAimfl[i]) {
+        var at = (allAimfl[i].textContent || "").trim();
+        if (at) assistantText = at;
+      }
+      if (!question && tgQuestions[i]) question = tgQuestions[i];
+      turns.push({
+        id: turn.getAttribute && turn.getAttribute("jsuid") || "idx" + i,
+        userText: question || null,
+        assistantText: assistantText || null
+      });
+    }
+    if (turns.length === 0) {
+      var folifAnswer = null;
+      for (var aa = 0; aa < allAimfl.length; aa++) {
+        var at2 = (allAimfl[aa].textContent || "").trim();
+        if (at2) {
+          folifAnswer = at2;
+          break;
+        }
+      }
+      if (!folifAnswer && contentNodes.length > 0) {
+        var firstNode = contentNodes[0];
+        if (firstNode.tagName === "TABLE") {
+          folifAnswer = tableToMarkdown2(firstNode);
+        } else {
+          folifAnswer = answerTextOf(firstNode).trim() || null;
+        }
+      }
+      var folifQuestion = tgQuestions.length > 0 ? tgQuestions[0] : null;
+      if (folifQuestion || folifAnswer) {
+        turns.push({ id: "folif_" + Date.now(), userText: folifQuestion, assistantText: folifAnswer });
+      }
+    }
+    for (var t = 0; t < turns.length; t++) {
+      var t2 = turns[t];
+      if (t2.userText) messages.push({ role: "user", text: stripTags(decodeEntities(t2.userText)) });
+      if (t2.assistantText) messages.push({ role: "assistant", text: sanitizeAssistant(t2.assistantText) });
+    }
+    var text = "";
+    for (var mi = 0; mi < messages.length; mi++) {
+      text += (mi > 0 ? "\n" : "") + messages[mi].text;
+    }
+    return { threadId, turns, messages, text, count: messages.length };
+  }
+  function countTurnContainers(htmlText) {
+    if (!htmlText || typeof htmlText !== "string") return 0;
+    try {
+      var doc = new DOMParser().parseFromString(htmlText, "text/html");
+      return doc.querySelectorAll('[data-scope-id="turn"]').length;
+    } catch (e) {
+      return 0;
+    }
+  }
+  function extractTurnsFromDocument(doc) {
+    if (!doc || typeof doc.querySelectorAll !== "function") return [];
+    var turns = [];
+    try {
+      var turnEls = doc.querySelectorAll('[data-scope-id="turn"]');
+      var allAimfl = doc.querySelectorAll('[data-subtree="aimfl"]');
+      var turnsArr = Array.prototype.slice.call(turnEls);
+      var questions = [];
+      for (var i = 0; i < turnsArr.length; i++) {
+        var h2 = turnsArr[i].querySelector("h2.iMqumd");
+        var q = null;
+        if (h2) {
+          var raw = (h2.textContent || "").trim();
+          var m = raw.match(/^Вы сказали:\s*"([\s\S]*)"$/);
+          q = m ? m[1].trim() : raw;
+        }
+        questions.push(q);
+      }
+      var answers = [];
+      for (var t = 0; t < turnsArr.length; t++) answers[t] = [];
+      var blocks = answerDomNodes(doc);
+      for (var b = 0; b < blocks.length; b++) {
+        var blk = blocks[b];
+        var assigned = -1;
+        for (var t2 = 0; t2 < turnsArr.length; t2++) {
+          if (turnsArr[t2].compareDocumentPosition(blk) & Node.DOCUMENT_POSITION_FOLLOWING) assigned = t2;
+          else break;
+        }
+        if (assigned >= 0 && assigned < turnsArr.length) {
+          var txt = answerTextOf(blk).trim();
+          if (txt) answers[assigned].push(txt);
+        }
+      }
+      for (var k = 0; k < turnsArr.length; k++) {
+        var joined = answers[k].length ? answers[k].join("\n\n") : null;
+        if (!joined && allAimfl[k]) {
+          var at = (allAimfl[k].textContent || "").trim();
+          if (at) joined = at;
+        }
+        turns.push({
+          id: turnsArr[k].getAttribute && turnsArr[k].getAttribute("jsuid") || "idx" + k,
+          userText: questions[k] || null,
+          assistantText: joined || null
+        });
+      }
+    } catch (e) {
+      swallowSoft(e, "gsa-utils:extractTurnsFromDocument");
+    }
+    return turns;
+  }
+  function extractContinuationToken(htmlText) {
+    if (!htmlText || typeof htmlText !== "string") return null;
+    try {
+      var doc = new DOMParser().parseFromString(htmlText, "text/html");
+      var els = doc.querySelectorAll("[data-mstk]");
+      var last = null;
+      for (var i = 0; i < els.length; i++) {
+        var v = els[i].getAttribute("data-mstk");
+        if (v) last = v.trim();
+      }
+      return last;
+    } catch (e) {
+      return null;
+    }
+  }
+  function normalizeTurnKeyPart(s) {
+    return String(s == null ? "" : s).toLowerCase().replace(/\u00a0/g, " ").replace(/[^a-zа-яё0-9]+/g, "");
+  }
+  function isAnswerWrapperTail(tail) {
+    var t = String(tail == null ? "" : tail);
+    var body = t.replace(/^["»”']{0,2}/, "").replace(/^[\s.,:;-]{0,4}/, "");
+    return body.replace(/\s+/g, "").length > 0;
+  }
+  function wrapperPrefix(text) {
+    var s = String(text == null ? "" : text);
+    var head = s.slice(0, 96);
+    var at = head.indexOf(":");
+    if (at === -1) return null;
+    var after = head.slice(at + 1);
+    var m = /^\s*"/.exec(after);
+    if (!m) return null;
+    return s.slice(0, at + 1 + m[0].length);
+  }
+  function answerWrapperParts(text) {
+    var s = String(text == null ? "" : text);
+    var prefix = wrapperPrefix(s);
+    if (!prefix) return null;
+    var rest = s.slice(prefix.length);
+    var close = rest.indexOf('"');
+    if (close === -1) return null;
+    var tail = rest.slice(close + 1);
+    if (!isAnswerWrapperTail(tail)) return null;
+    var question = rest.slice(0, close).trim();
+    if (!question) return null;
+    var body = tail.replace(/^["»”']{0,2}/, "").replace(/^[\s.,:;-]+/, "");
+    if (!body) return null;
+    return { question, body };
+  }
+  function canonicalAnswerBody(text) {
+    var wrapper = answerWrapperParts(text);
+    if (wrapper) return wrapper.body;
+    var s = String(text == null ? "" : text);
+    try {
+      var q = QUESTION_ASK_RE.exec(s);
+      if (q) {
+        var rest2 = s.slice(q[0].length);
+        var close2 = rest2.indexOf('"?');
+        if (close2 !== -1 && close2 < 200) {
+          var body2 = rest2.slice(close2 + 2).replace(/^[\s.,:;-]+/, "");
+          if (body2) s = body2;
+        }
+      }
+    } catch (e) {
+      return String(text == null ? "" : text);
+    }
+    return s;
+  }
+  function turnIdentityParts(turn) {
+    if (!turn) return { u: "", a: "" };
+    var wrapper = answerWrapperParts(turn.assistantText);
+    var u = normalizeTurnKeyPart(turn.userText);
+    if (!u && wrapper) u = normalizeTurnKeyPart(wrapper.question);
+    var a = normalizeTurnKeyPart(wrapper ? wrapper.body : canonicalAnswerBody(turn.assistantText));
+    return { u, a };
+  }
+  function canonicalTurnKeyOf(turn) {
+    if (!turn) return "";
+    var parts = turnIdentityParts(turn);
+    return parts.u + "||" + parts.a;
+  }
+  function canonicalizeTurnForThread(turn) {
+    if (!turn) return turn;
+    var question = turn.userText == null ? "" : String(turn.userText).trim();
+    if (!question) {
+      var wrapper = answerWrapperParts(turn.assistantText);
+      if (wrapper) question = wrapper.question;
+    }
+    return {
+      id: turn.id,
+      userText: question || null,
+      assistantText: turn.assistantText == null ? null : turn.assistantText
+    };
+  }
+  function isBetterTurn(candidate, current) {
+    if (!current) return true;
+    var la = String(candidate && candidate.assistantText || "").length;
+    var lb = String(current && current.assistantText || "").length;
+    if (la !== lb) return la > lb;
+    return String(candidate && candidate.userText || "").length > String(current && current.userText || "").length;
+  }
+  function turnRecord(t, idFallback) {
+    return {
+      id: t && t.id != null ? t.id : idFallback,
+      userText: t && t.userText || null,
+      assistantText: t && t.assistantText || null
+    };
+  }
+  function bodiesPrefixCompatible(a, b) {
+    var x = String(a == null ? "" : a);
+    var y = String(b == null ? "" : b);
+    if (!x || !y) return false;
+    if (x === y) return true;
+    var n = Math.min(x.length, y.length);
+    if (n < PREFIX_MIN_CHARS) return false;
+    var common = 0;
+    while (common < n && x.charCodeAt(common) === y.charCodeAt(common)) common++;
+    if (common === n) return true;
+    return common / n >= PREFIX_FUZZY_RATIO;
+  }
+  function isFullerTurn(candidate, current) {
+    var la = turnIdentityParts(candidate).a.length;
+    var lb = turnIdentityParts(current).a.length;
+    if (la !== lb) return la > lb;
+    return isBetterTurn(candidate, current);
+  }
+  function answerBodyParagraphs(turn) {
+    var wrapper = answerWrapperParts(turn && turn.assistantText);
+    var body = wrapper ? wrapper.body : canonicalAnswerBody(turn && turn.assistantText);
+    var lines = String(body == null ? "" : body).split(String.fromCharCode(10));
+    var out = [];
+    var cur = "";
+    for (var i = 0; i < lines.length; i++) {
+      var line = lines[i];
+      if (line.trim() === "") {
+        var p = normalizeTurnKeyPart(cur);
+        if (p) out.push(p);
+        cur = "";
+        continue;
+      }
+      cur = cur ? cur + String.fromCharCode(10) + line : line;
+    }
+    var tail = normalizeTurnKeyPart(cur);
+    if (tail) out.push(tail);
+    return out;
+  }
+  function bodiesParagraphPermutation(aTurn, bTurn) {
+    var pa = answerBodyParagraphs(aTurn);
+    var pb = answerBodyParagraphs(bTurn);
+    if (pa.length < PARAGRAPH_PERMUTATION_MIN || pa.length !== pb.length) return false;
+    pa.sort();
+    pb.sort();
+    for (var i = 0; i < pa.length; i++) {
+      if (pa[i] !== pb[i]) return false;
+    }
+    return true;
+  }
+  function findPrefixCompatibleIndex(turns, turn) {
+    var parts = turnIdentityParts(turn);
+    if (!parts.u || !parts.a) return -1;
+    for (var i = 0; i < turns.length; i++) {
+      var other = turnIdentityParts(turns[i]);
+      if (other.u !== parts.u) continue;
+      if (bodiesPrefixCompatible(other.a, parts.a)) return i;
+      if (other.a.length === parts.a.length && bodiesParagraphPermutation(turns[i], turn)) return i;
+    }
+    return -1;
+  }
+  function reindexTurnKey(byKey, turns, at) {
+    var k;
+    for (k in byKey) {
+      if (byKey[k] === at) delete byKey[k];
+    }
+    var key = canonicalTurnKeyOf(turns[at]);
+    if (key !== "||") byKey[key] = at;
+  }
+  function mergeTurnsById(baseTurns, extraTurns) {
+    baseTurns = Array.isArray(baseTurns) ? baseTurns : [];
+    extraTurns = Array.isArray(extraTurns) ? extraTurns : [];
+    var byId = {};
+    var byKey = {};
+    var out = [];
+    function add(t) {
+      if (!t) return;
+      var id = t.id != null ? String(t.id) : "x" + out.length;
+      var key = canonicalTurnKeyOf(t);
+      var hasId = Object.prototype.hasOwnProperty.call(byId, id);
+      var hasKey = key !== "||" && Object.prototype.hasOwnProperty.call(byKey, key);
+      var at = hasId ? byId[id] : hasKey ? byKey[key] : findPrefixCompatibleIndex(out, t);
+      if (at !== -1) {
+        var richer = hasId || hasKey ? isBetterTurn(t, out[at]) : isFullerTurn(t, out[at]);
+        if (richer) {
+          out[at] = turnRecord(t, out[at].id);
+          reindexTurnKey(byKey, out, at);
+        }
+        return;
+      }
+      byId[id] = out.length;
+      if (key !== "||") byKey[key] = out.length;
+      out.push(turnRecord(t, id));
+    }
+    var i;
+    for (i = 0; i < baseTurns.length; i++) add(baseTurns[i]);
+    for (i = 0; i < extraTurns.length; i++) add(extraTurns[i]);
+    return out;
+  }
+  function mergeTurnsMonotone(baseTurns, extraTurns) {
+    return mergeTurnsById(baseTurns, extraTurns);
+  }
+  function mergeTurnsByKey(baseTurns, extraTurns) {
+    baseTurns = Array.isArray(baseTurns) ? baseTurns : [];
+    extraTurns = Array.isArray(extraTurns) ? extraTurns : [];
+    var byKey = {};
+    var out = [];
+    function add(t) {
+      if (!t) return;
+      var key = canonicalTurnKeyOf(t);
+      if (key === "||") return;
+      var hasKey = Object.prototype.hasOwnProperty.call(byKey, key);
+      var at = hasKey ? byKey[key] : findPrefixCompatibleIndex(out, t);
+      if (at === -1) {
+        byKey[key] = out.length;
+        out.push(turnRecord(t, "x" + out.length));
+        return;
+      }
+      var richer = hasKey ? isBetterTurn(t, out[at]) : isFullerTurn(t, out[at]);
+      if (richer) {
+        out[at] = turnRecord(t, out[at].id);
+        reindexTurnKey(byKey, out, at);
+      }
+    }
+    for (var i = 0; i < baseTurns.length; i++) add(baseTurns[i]);
+    for (var j = 0; j < extraTurns.length; j++) add(extraTurns[j]);
+    return out;
+  }
+  function dedupeTurns(turns) {
+    var list = Array.isArray(turns) ? turns : [];
+    var byKey = {};
+    var out = [];
+    for (var i = 0; i < list.length; i++) {
+      var t = list[i];
+      if (!t) continue;
+      var key = canonicalTurnKeyOf(t);
+      var hasKey = key !== "||" && Object.prototype.hasOwnProperty.call(byKey, key);
+      var at = hasKey ? byKey[key] : findPrefixCompatibleIndex(out, t);
+      if (at === -1) {
+        if (key !== "||") byKey[key] = out.length;
+        out.push(t);
+        continue;
+      }
+      var richer = hasKey ? isBetterTurn(t, out[at]) : isFullerTurn(t, out[at]);
+      if (richer) {
+        out[at] = t;
+        reindexTurnKey(byKey, out, at);
+      }
+    }
+    return out;
+  }
+  function classifyFolwrContinuation(input) {
+    var i = input || {};
+    var ok = i.ok === true;
+    var status = i.status == null ? 0 : i.status;
+    var bodyLength = typeof i.bodyLength === "number" && i.bodyLength >= 0 ? i.bodyLength : 0;
+    var newTurns = typeof i.newTurns === "number" && i.newTurns > 0 ? i.newTurns : 0;
+    var cursor = i.cursor ? String(i.cursor) : null;
+    var sentCursor = i.sentCursor ? String(i.sentCursor) : null;
+    var cursorRepeated = !!(cursor && sentCursor && cursor === sentCursor);
+    var kind;
+    var complete, canContinue;
+    if (!ok) {
+      kind = "http-error";
+      complete = false;
+      canContinue = false;
+    } else if (bodyLength === 0) {
+      kind = "empty-body";
+      complete = true;
+      canContinue = false;
+    } else if (cursorRepeated) {
+      kind = "cursor-repeat";
+      complete = true;
+      canContinue = false;
+    } else if (newTurns > 0) {
+      kind = "new-turns";
+      complete = false;
+      canContinue = true;
+    } else {
+      kind = "no-new-turns";
+      complete = true;
+      canContinue = false;
+    }
+    return {
+      kind,
+      complete,
+      canContinue,
+      status,
+      ok,
+      bodyLength,
+      newTurns,
+      cursor,
+      cursorRepeated,
+      log: "kind=" + kind + " status=" + status + " ok=" + (ok ? 1 : 0) + " len=" + bodyLength + "B \u0445\u043E\u0434\u043E\u0432=+" + newTurns + " \u043A\u0443\u0440\u0441\u043E\u0440=" + (cursor ? "\u0435\u0441\u0442\u044C(" + (cursorRepeated ? "\u043F\u043E\u0432\u0442\u043E\u0440" : "\u043D\u043E\u0432\u044B\u0439") + ")" : "\u043D\u0435\u0442")
+    };
+  }
+  var FENCE_RE, CODE_CONTAINER_SEL, CODE_LANG_RE, WEB_SEARCH_CHIP_RE, FOREIGN_QUESTION_RE, QUESTION_ASK_RE, PREFIX_MIN_CHARS, PREFIX_FUZZY_RATIO, PARAGRAPH_PERMUTATION_MIN;
+  var init_google_search_folwr_parser = __esm({
+    "../utils/google-search-folwr-parser.ts"() {
+      FENCE_RE = /(`{3,})[\s\S]*?\1/g;
+      CODE_CONTAINER_SEL = 'pre, code, [class*="code-block"], [class*="codeBlock"], [class*="codeblock"]';
+      CODE_LANG_RE = /^[A-Za-z][A-Za-z0-9+#._-]{0,19}$/;
+      WEB_SEARCH_CHIP_RE = /(?:Самые популярные результаты веб-поиска по этой теме|People also search|Related searches|Похожие запросы|Связанные запросы)/i;
+      FOREIGN_QUESTION_RE = /^Вы сказали:\s*"/;
+      QUESTION_ASK_RE = /^(?:в\s+)?(?:ответ(?:е)?(?:\s+на\s+вопрос)?|на\s+вопрос|вопрос)\s*:?\s*/i;
+      PREFIX_MIN_CHARS = 12;
+      PREFIX_FUZZY_RATIO = 0.8;
+      PARAGRAPH_PERMUTATION_MIN = 2;
+      if (typeof window !== "undefined") {
+        window.parseGoogleFolwrOpen = parseGoogleFolwrOpen;
+        window.GoogleFolwrUtils = {
+          countTurnContainers,
+          extractTurnsFromDocument,
+          mergeTurnsByKey,
+          extractContinuationToken,
+          mergeTurnsById,
+          mergeTurnsMonotone,
+          classifyFolwrContinuation,
+          // O-32: каноническая идентичность/форма хода — ОДИН источник правды для сетевого пути,
+          // DOM-добора перехватчика и DOM-пути адаптера (см. блок «O-32» ниже по файлу).
+          canonicalTurnKeyOf,
+          canonicalAnswerBody,
+          canonicalizeTurnForThread,
+          normalizeTurnKeyPart,
+          // O-32 (фикс A/C): префикс-терпимая идентичность хода и дедуп списка перед кэшем.
+          turnIdentityParts,
+          bodiesPrefixCompatible,
+          dedupeTurns,
+          // O-45: общий рендер код-блоков (```lang … ```) и отбор узлов DOM-пути —
+          // переиспользуются адаптером (adapters/google-search-adapter.js) и тестами.
+          renderCodeBlock,
+          answerTextOf,
+          answerDomNodes,
+          isCodeBlockElement
+        };
+      }
+    }
+  });
+
+  // entry-content.js
+  var require_entry_content = __commonJS({
+    "entry-content.js"(exports, module) {
+      init_gemini_dom_parser();
+      init_platform();
+      init_debug();
+      init_tokenizer();
+      init_model_config();
+      init_export_text_builders();
+      init_export_emit_pipeline();
+      init_gemini_batchexecute_parser();
+      init_google_search_folwr_parser();
       var BaseAdapter = class {
         constructor() {
           this.siteName = "base";
@@ -2463,53 +4968,46 @@
         }
         /**
          * Проверяет, находимся ли мы на странице диалога этого сайта.
-         * @returns {boolean}
          */
         isOnDialogPage() {
           throw new Error("\u041C\u0435\u0442\u043E\u0434 isOnDialogPage() \u0434\u043E\u043B\u0436\u0435\u043D \u0431\u044B\u0442\u044C \u043F\u0435\u0440\u0435\u043E\u043F\u0440\u0435\u0434\u0435\u043B\u0451\u043D");
         }
         /**
          * Извлекает все сообщения из диалога.
-         * @returns {BaseExtractedMessage[]}
+         * Аргумент опций не читается — поведение то же, что до типизации.
          */
-        extractMessages() {
+        extractMessages(_options) {
           throw new Error("\u041C\u0435\u0442\u043E\u0434 extractMessages() \u0434\u043E\u043B\u0436\u0435\u043D \u0431\u044B\u0442\u044C \u043F\u0435\u0440\u0435\u043E\u043F\u0440\u0435\u0434\u0435\u043B\u0451\u043D");
         }
         /**
          * Собирает полный текст диалога для оценки токенов.
-         * @returns {string}
          */
         getFullDialogText() {
           const messages = this.extractMessages();
-          return messages.map((msg) => msg.content).join("\n");
+          return messages.map((msg) => msg.content).join("\\n");
         }
         /**
          * Возвращает количество сообщений в диалоге.
-         * @returns {number}
          */
         getMessageCount() {
           return this.extractMessages().length;
         }
         /**
          * Определяет модель ИИ по DOM (если возможно).
-         * @returns {string|null} - название модели или null
+         * @returns название модели или null
          */
         detectModel() {
           return null;
         }
         /**
          * Безопасное получение текста из элемента.
-         * @param {Element} element
-         * @returns {string}
          */
         _getTextContent(element) {
           return element ? element.textContent.trim() : "";
         }
         /**
          * Безопасный querySelector с проверкой.
-         * @param {string} selector
-         * @param {ParentNode} [parent] - Document по умолчанию
-         * @returns {Element|null}
+         * @param parent - Document по умолчанию
          */
         _safeQuerySelector(selector, parent = document) {
           try {
@@ -2521,12 +5019,10 @@
         }
         /**
          * Безопасный querySelectorAll с проверкой.
-         * Ветка ошибки возвращает пустой массив, а не NodeList: у NodeList есть .item(),
-         * у массива нет (TS2741). Потребители берут только .length и срез в массив
-         * (Array.prototype.slice.call в qwen-adapter.js:143), поэтому обе формы годятся.
-         * @param {string} selector
-         * @param {ParentNode} [parent] - Document по умолчанию
-         * @returns {NodeList|Element[]}
+         * Ветка ошибки возвращает пустой массив: у NodeList есть .item(), у массива нет,
+         * поэтому форма возврата — объединение, а потребители берут только .length и срез
+         * в массив (Array.prototype.slice.call в qwen-adapter.ts), где годятся обе формы.
+         * @param parent - Document по умолчанию
          */
         _safeQuerySelectorAll(selector, parent = document) {
           try {
@@ -2557,9 +5053,6 @@
         /**
          * Есть ли в className узла хоть один из маркеров (подстрока — как в исходной версии:
          * хеш-суффиксы Tailwind являются частью того же класса-токена).
-         * @param {string} className
-         * @param {string[]} markers
-         * @returns {boolean}
          */
         _markerHit(className, markers) {
           const cls = String(className || "");
@@ -2574,8 +5067,6 @@
          * (в исходной версии маркер жил именно на предке) или внутри своего поддерева.
          * Служит и определению роли, и ИСКЛЮЧЕНИЮ обёрток: узел, внутри которого лежит
          * реплика пользователя, ответом быть не может (иначе в ответ попал бы и вопрос).
-         * @param {Element} element
-         * @returns {boolean}
          */
         _hasUserMarker(element) {
           if (!element) return false;
@@ -2593,8 +5084,6 @@
         /**
          * Первая непустая реплика пользователя внутри узла. Кандидаты — по порядку
          * `_userSelectors`: первый непустой набор выигрывает (форма донора qwen-adapter.js).
-         * @param {Document|Element} scope
-         * @returns {Element|null}
          */
         _firstUserNode(scope) {
           for (let i = 0; i < this._userSelectors.length; i++) {
@@ -2608,9 +5097,6 @@
         /**
          * Структурный фолбэк: самый длинный текстовый узел поддерева, не являющийся репликой
          * пользователя и не содержащий её.
-         * @param {Element} scope
-         * @param {Element|null} userEl
-         * @returns {Element|null}
          */
         _longestTextNode(scope, userEl) {
           const nodes = scope.querySelectorAll("*");
@@ -2637,9 +5123,6 @@
          * Уровень 2 (структурный) — самый длинный текстовый узел хода ПОСЛЕ реплики; он
          * включается, только если реплика пользователя найдена (иначе роль ответа угадывалась
          * бы длиной, а это тот же дефект, что и нормализация 'unknown' → 'user').
-         * @param {Element} turn
-         * @param {Element|null} userEl
-         * @returns {Element|null}
          */
         _assistantInTurn(turn, userEl) {
           let best = null;
@@ -2670,7 +5153,6 @@
          * только если живой отбор не дал ничего: на новых сборках он дал бы дубли.
          * Роль 'unknown' в результат НЕ попадает — исходная нормализация 'unknown' → 'user'
          * и была корнем дефекта (ответ записывался в базу как реплика пользователя).
-         * @returns {{role: string, element: Element}[]}
          */
         _findMessageElements() {
           const found = [];
@@ -2732,8 +5214,6 @@
          * Возвращаем string, а не литеральный union 'user'|'assistant': пока тип узкий, tsc
          * (TS2367) счёл бы сверку `role === 'unknown'` в extractMessages заведомо ложной, а она —
          * живой детектор дрейфа разметки. TODO: уточнить тип в шаге 5 (контракт ролей адаптера).
-         * @param {Element} element
-         * @returns {string}
          */
         _detectRole(element) {
           const classAttr = String(element.className || "");
@@ -2748,8 +5228,6 @@
          * Заменяет `clone.textContent`, который склеивал абзацы БЕЗ разделителя («первыйвторой»)
          * и тем самым ломал формат многострочного ответа. trim — только на краях результата:
          * значимые переводы строк ВНУТРИ текста сохраняются.
-         * @param {Element} root
-         * @returns {string}
          */
         _blockText(root) {
           let out = "";
@@ -2798,8 +5276,6 @@
         /**
          * Текст хода. markdown-рендер (легаси-разметка) — абзацы построчно. Иначе — клон без
          * кнопок/svg (как в исходной версии) и структурная нормализация блочных границ.
-         * @param {Element} element
-         * @returns {string}
          */
         _extractText(element) {
           const classAttr = String(element.className || "");
@@ -2813,10 +5289,7 @@
               return lines.join("\n").trim();
             }
           }
-          const clone = (
-            /** @type {Element} */
-            element.cloneNode(true)
-          );
+          const clone = element.cloneNode(true);
           clone.querySelectorAll('button, [role="button"], svg').forEach((el) => el.remove());
           return this._blockText(clone);
         }
@@ -2825,10 +5298,9 @@
          * отбрасываются, а роль 'unknown' (легаси-узел не опознан) ПРОПУСКАЕТСЯ: нормализации
          * 'unknown' → 'user' больше нет — это и был корень дефекта. Диагностика — ТОЛЬКО под
          * гейтом (typeof-гард: в срез-песочницах тестов хелперов гейта может не быть).
-         * @returns {ChatGPTExtractedMessage[]}
          */
         extractMessages() {
-          const diagOn = typeof aiCmDiagOn === "function" ? aiCmDiagOn() : false;
+          const diagOn2 = typeof aiCmDiagOn2 === "function" ? aiCmDiagOn2() : false;
           const elements = this._findMessageElements();
           const messages = [];
           for (let i = 0; i < elements.length; i++) {
@@ -2838,7 +5310,7 @@
             if (role === "unknown") continue;
             messages.push({ role, content });
           }
-          if (diagOn && typeof aiCmDiagLine2 === "function") {
+          if (diagOn2 && typeof aiCmDiagLine2 === "function") {
             const stats = this._lastTurnStats;
             aiCmDiagLine2("chatgpt-adapter-turn", {
               turns: stats.turns,
@@ -2863,7 +5335,6 @@
         /**
          * Полный текст диалога: содержимое ходов, склеенное переводом строки.
          * Явное переопределение базового (у ChatGPT свой путь отбора узлов).
-         * @returns {string}
          */
         getFullDialogText() {
           const messages = this.extractMessages();
@@ -2872,7 +5343,6 @@
         /**
          * Находимся ли мы на странице диалога: есть ход ([data-turn-key]) либо реплика
          * пользователя (в т.ч. хвост без атрибута) либо легаси-узел содержимого.
-         * @returns {boolean}
          */
         isOnDialogPage() {
           if (document.querySelector(this._turnSelectors.join(", "))) return true;
@@ -2886,7 +5356,6 @@
         /**
          * Имя модели из шапки/селектора; если шапка показывает только бренд — null
          * (не захардкоженное имя), иначе модель возьмётся из сети/дефолта.
-         * @returns {string|null}
          */
         detectModel() {
           if (this._modelDetectLogged === void 0) this._modelDetectLogged = false;
@@ -2902,10 +5371,7 @@
               "header button"
             ];
             for (let i = 0; i < selectors.length && !found; i++) {
-              const els = (
-                /** @type {NodeListOf<HTMLElement>} */
-                document.querySelectorAll(selectors[i])
-              );
+              const els = document.querySelectorAll(selectors[i]);
               for (let j = 0; j < els.length; j++) {
                 const txt = (els[j].innerText || els[j].textContent || "").trim();
                 const m = txt.match(re);
@@ -2945,7 +5411,6 @@
         }
         /**
          * Находимся ли мы на диалоге (контейнер диалога ИЛИ поле ввода).
-         * @returns {boolean}
          */
         isOnDialogPage() {
           try {
@@ -2962,7 +5427,6 @@
         /**
          * Ходы диалога: сперва по turn-контейнерам, при пустом результате — общий запасной
          * отбор по классам/дата-атрибутам роли. При ошибке — пустой массив.
-         * @returns {GeminiExtractedMessage[]}
          */
         extractMessages() {
           try {
@@ -3017,7 +5481,6 @@
         }
         /**
          * Модель: из DOM (.model-name и т.п.), затем localStorage, затем this.defaultModel.
-         * @returns {string}
          */
         detectModel() {
           try {
@@ -3041,8 +5504,6 @@
         }
         /**
          * Нормализация текста хода (схлопывание пробелов и пустых строк).
-         * @param {string} text
-         * @returns {string}
          */
         _cleanText(text) {
           if (!text) return "";
@@ -3058,7 +5519,6 @@
         }
         /**
          * Находимся ли мы на диалоге: признак — узлы реплик ms-cmark-node.
-         * @returns {boolean}
          */
         isOnDialogPage() {
           try {
@@ -3080,7 +5540,6 @@
          * Ходы диалога: все ms-cmark-node.v3-font-body, кроме вложенных в другой
          * ms-cmark-node (иначе текст реплики попал бы в счёт дважды — родитель и ребёнок).
          * Роль: класс user-chunk → 'user', иначе — 'assistant'.
-         * @returns {AistudioExtractedMessage[]}
          */
         extractMessages() {
           try {
@@ -3132,7 +5591,6 @@
          * ПОЧЕМУ НЕ DOM. Индикатор модели в панели Run settings не имеет стабильного класса, а
          * текстовая догадка по «Gemini <версия> <семейство>» ловила бы упоминания модели в самой
          * реплике и подписывала чат чужой моделью. Сеть — единственный недвусмысленный источник.
-         * @returns {string}
          */
         detectModel() {
           try {
@@ -3154,7 +5612,6 @@
          * Снимок принимается только для ТЕКУЩЕГО пути (SPA: AI Studio меняет /prompts/<id>
          * без перезагрузки) — иначе история прошлого разговора питала бы счётчик нового.
          * Нет снимка/путь не тот → [] и обычный DOM-парсинг.
-         * @returns {AistudioExtractedMessage[]}
          */
         _netMessages() {
           try {
@@ -3173,10 +5630,7 @@
             }
             const messages = [];
             Array.prototype.forEach.call(raw.msgs, (m) => {
-              const rec = (
-                /** @type {any} */
-                m
-              );
+              const rec = m;
               if (!rec || typeof rec.text !== "string") return;
               const sections = typeof rec.sections === "string" ? rec.sections : "";
               const content = this._cleanText(rec.text) + sections;
@@ -3194,7 +5648,6 @@
          * ленты DOM короче уже виденного снимка. core/content.js пишет пик в
          * ai_cm_aistudio_history_<convId> ({ v, href, msgs, count, ... }) — читаем его
          * только для ТЕКУЩЕГО пути (SPA-гард, как у _netMessages) и только как фолбэк.
-         * @returns {AistudioExtractedMessage[]}
          */
         _domPeakMessages() {
           try {
@@ -3219,10 +5672,7 @@
             }
             const messages = [];
             Array.prototype.forEach.call(cached.msgs, (msg) => {
-              const rec = (
-                /** @type {any} */
-                msg
-              );
+              const rec = msg;
               if (!rec || typeof rec.text !== "string") return;
               const sections = typeof rec.sections === "string" ? rec.sections : "";
               const content = this._cleanText(rec.text) + sections;
@@ -3238,15 +5688,10 @@
         /**
          * Текст узла реплики. innerText предпочтителен (видимый текст, как в браузере);
          * textContent — фолбэк для окружений без innerText (jsdom, песочницы тестов).
-         * @param {Element} node
-         * @returns {string}
          */
         _readNodeText(node) {
           try {
-            const inner = (
-              /** @type {HTMLElement} */
-              node.innerText
-            );
+            const inner = node.innerText;
             if (typeof inner === "string" && inner.length > 0) return inner;
             return typeof node.textContent === "string" ? node.textContent : "";
           } catch (error) {
@@ -3256,8 +5701,6 @@
         }
         /**
          * Вложенный ли узел: у него есть предок ms-cmark-node (текст уже учтён предком).
-         * @param {Element} node
-         * @returns {boolean}
          */
         _isNestedNode(node) {
           try {
@@ -3271,8 +5714,6 @@
         }
         /**
          * Реплика пользователя? В AI Studio её единственный признак — класс user-chunk.
-         * @param {Element} node
-         * @returns {boolean}
          */
         _isUserChunk(node) {
           try {
@@ -3294,7 +5735,6 @@
         }
         /**
         * Находимся ли мы на странице диалога: есть узлы ds-message ИЛИ поле ввода.
-        * @returns {boolean}
         */
         isOnDialogPage() {
           const hasMessages = document.querySelectorAll('div[class*="ds-message"]').length > 0;
@@ -3316,8 +5756,6 @@
         }
         /**
          * Признак панели размышлений: класс узла, вложенный think-узел либо маркер в начале текста.
-         * @param {Element} element
-         * @returns {boolean}
          */
         _hasThinkMarker(element) {
           try {
@@ -3333,8 +5771,6 @@
         }
         /**
          * Узел markdown-рендера ответа (сам узел либо вложенный .ds-markdown), иначе null.
-         * @param {Element} element
-         * @returns {Element|null}
          */
         _answerMarkdown(element) {
           try {
@@ -3349,8 +5785,6 @@
         // Узел — ТОЛЬКО панель размышлений (ответа в нём нет): сообщением хода не является.
         /**
          * Узел — только панель размышлений (ответа в нём нет): сообщением хода не является.
-         * @param {Element} element
-         * @returns {boolean}
          */
         _isReasoningOnly(element) {
           try {
@@ -3363,8 +5797,6 @@
         }
         /**
          * Находится ли узел внутри панели размышлений (сам think-класс либо ближайший think-предок).
-         * @param {Element} element
-         * @returns {boolean}
          */
         _isInsideReasoning(element) {
           try {
@@ -3377,15 +5809,10 @@
         }
         /**
          * Текст элемента БЕЗ панелей размышлений и служебных кнопок/иконок.
-         * @param {Element} element
-         * @returns {string}
          */
         _textWithoutReasoning(element) {
           try {
-            const clone = (
-              /** @type {Element} */
-              element.cloneNode(true)
-            );
+            const clone = element.cloneNode(true);
             Array.prototype.slice.call(clone.querySelectorAll(this._thinkSelector())).forEach((el) => el.remove());
             clone.querySelectorAll('button, svg, [class*="avatar"], [class*="icon"], [class*="toolbar"]').forEach((el) => el.remove());
             return clone.textContent.trim();
@@ -3399,12 +5826,10 @@
         // терялся на ЗАХВАТЕ. Здесь он сохраняется рядом с текстом (hiddenReasoning) и НЕ
         // попадает ни в content, ни в метрики/токены: базовый текст байтово прежний, а в
         // экспорт блок уходит только при включённом тумблере aiCmIncludeHiddenInExport
-        // (сырой режим, utils/export-emit-pipeline.js:includeHiddenExportBlocks).
+        // (сырой режим, utils/export-emit-pipeline.ts:includeHiddenExportBlocks).
         // Служебная шапка свёрнутой панели («DeepThink · 12 с», «Размышления:», «Thought for 3s») —
         /**
          * Снимает служебную шапку панели в начале текста («DeepThink · 12 с», «Размышления:»).
-         * @param {string} text
-         * @returns {string}
          */
         _stripReasoningHeader(text) {
           try {
@@ -3420,8 +5845,6 @@
         /**
          * Текст панели размышлений узла (сама панель либо вложенные think-узлы),
          * склеенный пустой строкой; пустые/служебные части отброшены.
-         * @param {Element} element
-         * @returns {string}
          */
         _reasoningText(element) {
           try {
@@ -3448,8 +5871,6 @@
         /**
          * Есть ли в тексте реальные символы (буква/цифра), а не только артефакт интерфейса
          * вроде «.» свёрнутой панели.
-         * @param {string} text
-         * @returns {boolean}
          */
         _hasRealContent(text) {
           return /[0-9A-Za-z\u00C0-\u024F\u0400-\u04FF\u4E00-\u9FFF]/.test(String(text == null ? "" : text));
@@ -3457,8 +5878,6 @@
         /**
          * Первый дочерний узел с текстом, годный как текст хода (без avatar/button/icon,
          * без панелей размышлений), иначе null.
-         * @param {Element} element
-         * @returns {Element|null}
          */
         _firstContentChild(element) {
           try {
@@ -3484,8 +5903,6 @@
          * «ожить», если _detectRole снова начнёт отдавать 'unknown'. Тип string оставляет
          * гейт живым и типизирует функцию честно — она отдаёт произвольную строку роли.
          * TODO: уточнить тип в шаге 5 (контракт ролей адаптера).
-         * @param {Element} element
-         * @returns {string}
          */
         _detectRole(element) {
           const classes = element.className || "";
@@ -3495,15 +5912,13 @@
             if (element.querySelector && element.querySelector(".ds-markdown, .ds-markdown-paragraph")) return "assistant";
             if (this._isReasoningOnly(element)) return "assistant";
           } catch (e) {
-            swallow(e, "adapter:deepseek:detectRole");
+            swallow2(e, "adapter:deepseek:detectRole");
           }
           return "user";
         }
         /**
          * Текст хода: markdown-абзацы ответа построчно, иначе первый текстовый узел
          * пузыря без панелей размышлений.
-         * @param {Element} element
-         * @returns {string}
          */
         _extractText(element) {
           const markdown = this._answerMarkdown(element);
@@ -3523,13 +5938,12 @@
          * Узлы-панели reasoning сообщениями НЕ являются: их текст переносится в
          * hiddenReasoning ближайшего assistant-хода (висячий — предыдущего, иначе
          * последнего). Возвращает пустой массив при ошибке.
-         * @returns {DeepSeekExtractedMessage[]}
          */
         extractMessages() {
           try {
             const messages = [];
             const messageElements = document.querySelectorAll('div[class*="ds-message"]');
-            const o21DiagOn = typeof aiCmDiagOn === "function" ? aiCmDiagOn() : false;
+            const o21DiagOn = typeof aiCmDiagOn2 === "function" ? aiCmDiagOn2() : false;
             const o21Stats = o21DiagOn ? {
               totalFound: messageElements.length,
               extracted: 0,
@@ -3622,7 +6036,6 @@
         }
         /**
          * Полный текст диалога: содержимое ходов, склеенное переводом строки.
-         * @returns {string}
          */
         getFullDialogText() {
           return this.extractMessages().map((msg) => msg.content).join("\n");
@@ -3630,7 +6043,6 @@
         /**
          * Модель: DeepThink (R1) по aria-pressed, затем UI-селекторы, затем localStorage,
          * иначе 'deepseek-v3'.
-         * @returns {string}
          */
         detectModel() {
           try {
@@ -3652,13 +6064,7 @@
             for (const selector of modelSelectors) {
               const el = document.querySelector(selector);
               if (el) {
-                let text = el.tagName === "SELECT" ? (
-                  /** @type {HTMLSelectElement} */
-                  el.options[
-                    /** @type {HTMLSelectElement} */
-                    el.selectedIndex
-                  ]?.text || ""
-                ) : el.textContent.trim();
+                let text = el.tagName === "SELECT" ? el.options[el.selectedIndex]?.text || "" : el.textContent.trim();
                 if (text) {
                   debugLog("log", "[DeepSeekAdapter] \u041C\u043E\u0434\u0435\u043B\u044C \u0438\u0437 UI:", text);
                   if (text.toLowerCase().includes("r1")) return "deepseek-r1";
@@ -3688,7 +6094,7 @@
         }
         try {
           if (typeof __require === "function") {
-            var mod = require_google_search_folwr_parser();
+            var mod = (init_google_search_folwr_parser(), __toCommonJS(google_search_folwr_parser_exports));
             if (mod && typeof mod.answerTextOf === "function" && typeof mod.answerDomNodes === "function") {
               return mod;
             }
@@ -3707,10 +6113,7 @@
           }
         }
         try {
-          var clone = (
-            /** @type {Element} */
-            el.cloneNode(true)
-          );
+          var clone = el.cloneNode(true);
           clone.querySelectorAll("script, style, button, svg").forEach(function(n) {
             n.remove();
           });
@@ -3747,10 +6150,7 @@
             var self = this;
             try {
               window.addEventListener("ai-cm-full-history", function(ev) {
-                var evt = (
-                  /** @type {CustomEvent} */
-                  ev
-                );
+                var evt = ev;
                 var detail = evt && evt.detail;
                 if (detail && detail.modelSlug) {
                   self._lastNetworkModel = detail.modelSlug;
@@ -3764,7 +6164,6 @@
         /**
          * Находимся ли мы на странице диалога AI-режима: есть turn-контейнеры,
          * блок ответа aimfl или поле ввода.
-         * @returns {boolean}
          */
         isOnDialogPage() {
           var hasTurns = document.querySelector('[data-scope-id="turn"]') !== null;
@@ -3777,7 +6176,6 @@
         /**
          * Ходы диалога: вопрос из заголовка turn'а, ответ — блоки ответа, отнесённые к
          * тому же turn'у. Пустые вопросы/ответы пропускаются; при ошибке — пустой массив.
-         * @returns {GoogleSearchExtractedMessage[]}
          */
         extractMessages() {
           try {
@@ -3817,18 +6215,14 @@
                 }
               }
               if (assignedIdx >= 0 && assignedIdx < turns.length) {
-                var blockText = gsaAnswerText(
-                  /** @type {Element} */
-                  /** @type {unknown} */
-                  block
-                ).trim();
+                var blockText = gsaAnswerText(block).trim();
                 if (blockText) {
                   answerBlocks[assignedIdx].push(blockText);
                 }
               }
             }
             try {
-              if (typeof aiCmDiagOn === "function" && aiCmDiagOn() && typeof aiCmDiagLine2 === "function") {
+              if (typeof aiCmDiagOn2 === "function" && aiCmDiagOn2() && typeof aiCmDiagLine2 === "function") {
                 var codeSels = [
                   ".n6owBd.awi2gc pre",
                   ".n6owBd.awi2gc code",
@@ -3899,7 +6293,6 @@
         }
         /**
          * Полный текст диалога: содержимое ходов, склеенное переводом строки.
-         * @returns {string}
          */
         getFullDialogText() {
           return this.extractMessages().map(function(msg) {
@@ -3909,7 +6302,6 @@
         /**
          * Модель: ТОЛЬКО из сети (активный/пассивный ответ, detail.modelSlug), иначе ''.
          * DOM-догадка сознательно не возвращается — см. комментарий в теле метода.
-         * @returns {string}
          */
         detectModel() {
           if (this._lastNetworkModel) return this._lastNetworkModel;
@@ -3929,10 +6321,7 @@
             var self = this;
             try {
               window.addEventListener("ai-cm-full-history", function(ev) {
-                var evt = (
-                  /** @type {CustomEvent} */
-                  ev
-                );
+                var evt = ev;
                 var detail = evt && evt.detail;
                 if (detail && detail.modelSlug && self.siteName === "claude") {
                   self._lastNetworkModel = detail.modelSlug;
@@ -3944,7 +6333,6 @@
         }
         /**
          * Находимся ли мы на диалоге claude.ai (хост + префикс пути /chat/).
-         * @returns {boolean}
          */
         isOnDialogPage() {
           try {
@@ -3960,7 +6348,6 @@
         }
         /**
          * Запасной DOM-парсинг: всегда пустой (основной источник — сеть).
-         * @returns {ClaudeExtractedMessage[]}
          */
         extractMessages() {
           var stubConvId = "";
@@ -3977,7 +6364,6 @@
         }
         /**
          * Модель: сначала последняя из сети (точнее), иначе this.defaultModel.
-         * @returns {string}
          */
         detectModel() {
           try {
@@ -3994,8 +6380,6 @@
         }
         /**
          * Нормализация текста хода (схлопывание пробелов и пустых строк).
-         * @param {string} text
-         * @returns {string}
          */
         _cleanText(text) {
           if (!text) return "";
@@ -4015,10 +6399,7 @@
             var self = this;
             try {
               window.addEventListener("ai-cm-full-history", function(ev) {
-                var evt = (
-                  /** @type {CustomEvent} */
-                  ev
-                );
+                var evt = ev;
                 var detail = evt && evt.detail;
                 if (detail && detail.modelSlug && self.siteName === "perplexity") {
                   self._lastNetworkModel = detail.modelSlug;
@@ -4029,14 +6410,14 @@
           }
         }
         /**
-         * Находимся ли мы на диалоге perplexity.ai (хост + префикс /search/ или /thread/).
-         * @returns {boolean}
+         * Находимся ли мы на диалоге perplexity.ai (хост + префикс /search/, /thread/
+         * или новый /session/).
          */
         isOnDialogPage() {
           try {
             var host = window.location.hostname;
             var path = window.location.pathname;
-            var result = (host === "www.perplexity.ai" || host === "perplexity.ai") && (path.indexOf("/search/") === 0 || path.indexOf("/thread/") === 0);
+            var result = (host === "www.perplexity.ai" || host === "perplexity.ai") && (path.indexOf("/search/") === 0 || path.indexOf("/thread/") === 0 || path.indexOf("/session/") === 0);
             debugLog("debug", "[PerplexityAdapter] isOnDialogPage: " + result);
             return result;
           } catch (error) {
@@ -4046,7 +6427,6 @@
         }
         /**
          * Запасной DOM-парсинг: всегда пустой (основной источник — сеть).
-         * @returns {PerplexityExtractedMessage[]}
          */
         extractMessages() {
           var stubConvId = "";
@@ -4063,7 +6443,6 @@
         }
         /**
          * Модель: сначала последняя из сети (точнее), иначе this.defaultModel.
-         * @returns {string}
          */
         detectModel() {
           try {
@@ -4080,8 +6459,6 @@
         }
         /**
          * Нормализация текста хода (схлопывание пробелов и пустых строк).
-         * @param {string} text
-         * @returns {string}
          */
         _cleanText(text) {
           if (!text) return "";
@@ -4162,14 +6539,12 @@
         }
         /**
          * Блочные теги для структурного фолбэка innerText (перевод строки после элемента).
-         * @returns {Record<string, boolean>}
          */
         static get _BLOCK_TAGS() {
           return QWEN_BLOCK_TAGS;
         }
         /**
          * Живой признак ввода Qwen (подтверждён сниффером: textarea «Спросить Qwen»).
-         * @returns {boolean}
          */
         _hasComposer() {
           try {
@@ -4181,7 +6556,6 @@
         /**
          * Находимся ли мы на странице чата Qwen: хост qwen.ai И (поле ввода ИЛИ узлы реплик
          * ИЛИ адрес вида /c/<id>). Иначе адаптер не считается активным.
-         * @returns {boolean}
          */
         isOnDialogPage() {
           try {
@@ -4194,7 +6568,6 @@
         /**
          * Узлы сообщений: первый непустой набор кандидатов (точные классы — первым, см. шапку),
          * с отсевом обёрток turn-selection. Пусто, если не отрисовано ни одной реплики.
-         * @returns {Element[]}
          */
         _messageNodes() {
           for (let i = 0; i < this._messageSelectors.length; i++) {
@@ -4210,8 +6583,6 @@
          * класс-независимый барьер (страховка на случай смены класса обёртки): узлом-обёрткой
          * считается ТОЛЬКО тот, чей класс содержит `select-turn`, — реальные реплики
          * (`.qwen-chat-message.qwen-chat-message-user/assistant`) не содержат его никогда.
-         * @param {Element[]} nodes
-         * @returns {Element[]}
          */
         _dropTurnOnlyNodes(nodes) {
           return nodes.filter(function(el) {
@@ -4224,8 +6595,6 @@
          * Живой браузер: `innerText` — 1:1 с тем, что видит пользователь (многострочность).
          * jsdom/срез: `innerText` не реализован → структурный фолбэк (тот же принцип: перевод
          * строки после блочного элемента), затем ОДНА нормализация для обоих путей.
-         * @param {Element & {innerText?: string}} element
-         * @returns {string}
          */
         _readableText(element) {
           try {
@@ -4245,8 +6614,6 @@
         /**
          * Структурный фолбэк innerText (jsdom/срез, где innerText не реализован): обход дерева,
          * перевод строки вокруг блочных элементов и на маркере среза; <br> — перевод строки.
-         * @param {Element} root
-         * @returns {string}
          */
         _innerTextFallback(root) {
           try {
@@ -4263,11 +6630,7 @@
                 return;
               }
               if (type !== 1) return;
-              const tag = String(
-                /** @type {Element} */
-                /** @type {unknown} */
-                node.tagName || ""
-              ).toUpperCase();
+              const tag = String(node.tagName || "").toUpperCase();
               if (tag === "BR") {
                 out += "\n";
                 return;
@@ -4288,8 +6651,6 @@
          * Схлопывание — осознанный компромисс: пустые строки верстки (`\n\n` между абзацами) не
          * размножаются, многострочность и границы блоков при этом сохраняются (дефект textContent
          * был в ПОТЕРЕ переводов строк, а не в их количестве).
-         * @param {string} text
-         * @returns {string}
          */
         _normalizeLines(text) {
           try {
@@ -4302,8 +6663,6 @@
          * Снятие служебного узла с сохранением границы: на месте узла остаётся маркер-комментарий,
          * который `_innerTextFallback` превращает в перевод строки. Без маркера соседние текст-узлы
          * склеились бы («привет» + снятая кнопка + «как дела» → «приветкак дела»).
-         * @param {NodeList|Element[]} nodes
-         * @returns {void}
          */
         _removeKeepingCut(nodes) {
           Array.prototype.slice.call(nodes).forEach(function(el) {
@@ -4316,15 +6675,10 @@
         }
         /**
          * Текст узла БЕЗ служебных элементов и БЕЗ блока размышлений (многострочность сохранена).
-         * @param {Element} element
-         * @returns {string}
          */
         _textWithoutReasoning(element) {
           try {
-            const clone = (
-              /** @type {Element} */
-              element.cloneNode(true)
-            );
+            const clone = element.cloneNode(true);
             this._removeKeepingCut(clone.querySelectorAll(this._noiseSelectors));
             this._removeKeepingCut(clone.querySelectorAll(this._reasoningSelectors));
             return this._readableText(clone);
@@ -4334,8 +6688,6 @@
         }
         /**
          * Служебная шапка свёрнутой панели («Завершено размышление», «Thinking… 3s») — не текст.
-         * @param {string} text
-         * @returns {string}
          */
         _stripReasoningHeader(text) {
           try {
@@ -4349,8 +6701,6 @@
         /**
          * Текст панели размышлений реплики (сама панель либо вложенные think-узлы), без шапки,
          * без карточек инструментов; части склеены пустой строкой.
-         * @param {Element} element
-         * @returns {string}
          */
         _reasoningText(element) {
           try {
@@ -4364,11 +6714,7 @@
             }
             const parts = [];
             for (let j = 0; j < nodes.length; j++) {
-              const node = (
-                /** @type {Element} */
-                /** @type {unknown} */
-                nodes[j]
-              );
+              const node = nodes[j];
               if (this._isToolStatusCard(node)) continue;
               const text = this._stripReasoningHeader(this._readableText(node));
               if (text && /[0-9A-Za-z\u00C0-\u024F\u0400-\u04FF\u4E00-\u9FFF]/.test(text)) parts.push(text);
@@ -4382,16 +6728,10 @@
          * Служебная карточка инструмента Qwen (не панель размышления) — по классу узла.
          * Вызывается только для элементов (узлы панели размышлений), поэтому className читаем
          * у узла как у Element.
-         * @param {Node} node
-         * @returns {boolean}
          */
         _isToolStatusCard(node) {
           try {
-            const el = (
-              /** @type {Element} */
-              /** @type {unknown} */
-              node
-            );
+            const el = node;
             const cls = String(node && el.className || "").toLowerCase();
             return cls.indexOf("tool-status-card") !== -1;
           } catch (e) {
@@ -4406,8 +6746,6 @@
          * Возвращаем string, а не литеральный union 'user'|'assistant': пока тип узкий,
          * tsc (TS2367) счёл бы вызовы и сверку ролей в extractMessages заведомо ложными.
          * TODO: уточнить тип в шаге 5 (контракт ролей адаптера).
-         * @param {Element} element
-         * @returns {string}
          */
         _detectRole(element) {
           try {
@@ -4419,7 +6757,7 @@
             if (element.querySelector && element.querySelector(this.modelMessageSelector)) return "assistant";
             if (element.querySelector && element.querySelector('[class*="markdown"], [class*="prose"]')) return "assistant";
           } catch (e) {
-            swallow(e, "adapter:qwen:detectRole");
+            swallow2(e, "adapter:qwen:detectRole");
           }
           return "user";
         }
@@ -4433,50 +6771,35 @@
          * адаптера, но к моменту extractMessages он уже загружен (общий ISOLATED-мир контент-скриптов).
          * Хелпера нет (Node/срез-песочница) → массив возвращается КАК ЕСТЬ: поведение 1:1, никакой
          * второй копии правил здесь нет.
-         * @param {(QwenExtractedMessage & {hiddenReasoning?: string})[]} messages
-         * @returns {(QwenExtractedMessage & {hiddenReasoning?: string})[]}
          */
         _dropContainerNodes(messages) {
           try {
-            var drop = (
-              /** @type {QwenContainerDrop<unknown>|null} */
-              this._containerDrop()
-            );
-            if (typeof drop === "function") return (
-              /** @type {(QwenExtractedMessage & {hiddenReasoning?: string})[]} */
-              /** @type {unknown} */
-              drop(messages)
-            );
+            var drop = this._containerDrop();
+            if (typeof drop === "function") return drop(messages);
           } catch (eDrop) {
-            swallow(eDrop, "adapter:qwen:dropContainerNodes");
+            swallow2(eDrop, "adapter:qwen:dropContainerNodes");
           }
           return messages;
         }
         /**
-         * Ленивый резолв общего хелпера контейнер-чистки (боевой путь — window сборщиков,
-         * Node-путь — require), иначе null (правила не дублируются локально).
-         * TODO: уточнить тип в шаге 5 (форма window.AiCmExportBuilders без @types).
-         * @returns {QwenContainerDrop<unknown>|null}
+         * Ленивый резолв общего хелпера контейнер-чистки, иначе null (правила не дублируются
+         * локально). Боевой путь — ESM-биндинг AiCmExportBuilders, который сборка втягивает
+         * в общий скоуп content-бандла (тот же модуль, что и остальные core/*.js); фолбэк на
+         * window — для песочниц, где адаптер исполняется как сырой текст (new Function).
+         * Node-путь (require) удалён вместе с UMD-хвостом сборщиков.
          */
         _containerDrop() {
+          try {
+            if (typeof export_text_builders_default !== "undefined" && export_text_builders_default && typeof export_text_builders_default.aiCmDropContainerMessages === "function") {
+              return export_text_builders_default.aiCmDropContainerMessages;
+            }
+          } catch (eEsm) {
+          }
           try {
             if (typeof window !== "undefined" && window && window.AiCmExportBuilders && typeof window.AiCmExportBuilders.aiCmDropContainerMessages === "function") {
               return window.AiCmExportBuilders.aiCmDropContainerMessages;
             }
           } catch (eWin) {
-          }
-          try {
-            var hasNodeModule = typeof module !== "undefined" && !!module && typeof __require === "function";
-            if (hasNodeModule) {
-              var builders = (
-                /** @type {any} */
-                require_export_text_builders()
-              );
-              if (builders && typeof builders.aiCmDropContainerMessages === "function") {
-                return builders.aiCmDropContainerMessages;
-              }
-            }
-          } catch (eReq) {
           }
           return null;
         }
@@ -4486,7 +6809,6 @@
          * Пустые и «технические» тексты (артефакт свёрнутой панели) пропускаются; текст панели
          * размышлений у assistant-хода уходит в hiddenReasoning, а не в content. Метод
          * stateless — пересъём без перезагрузки (см. комментарий O-35 C в теле).
-         * @returns {QwenExtractedMessage[]}
          */
         extractMessages() {
           try {
@@ -4523,7 +6845,6 @@
         /**
          * Полный текст диалога: содержимое ходов, склеенное переводом строки.
          * Явное переопределение базового (у Qwen путь отбора узлов свой).
-         * @returns {string}
          */
         getFullDialogText() {
           try {
@@ -4535,7 +6856,6 @@
         /**
          * Модель из UI. Живой id /chats/new — qwen3.8-max, но это НЕ дефолт: если в разметке
          * модели нет — возвращаем null («не определена»), как base-adapter.js:88-90.
-         * @returns {string|null}
          */
         detectModel() {
           try {
@@ -4557,3613 +6877,6 @@
       if (typeof module !== "undefined" && module.exports) {
         module.exports = QwenAdapter;
       }
-      (function() {
-        var THINK_RE = /think|thought/i;
-        var THINKING_LABEL_RE = /thinking|\bthought\b|\bдумал\b/i;
-        var ATTACH_TOKEN_RE = /\$AXzLiR[A-Za-z0-9+\/=]+/g;
-        function stripAttachmentTokens(s) {
-          if (typeof s !== "string") return s;
-          return s.replace(ATTACH_TOKEN_RE, " ").replace(/[ \t\f\v]+/g, " ");
-        }
-        function attrString(el, names) {
-          var out = "";
-          for (var i = 0; i < names.length; i++) {
-            try {
-              var v = el.getAttribute ? el.getAttribute(names[i]) : null;
-              if (v) out += " " + v;
-            } catch (e) {
-            }
-          }
-          return out;
-        }
-        function classNameId(el) {
-          try {
-            return String(el.className || "") + " " + String(el.id || "");
-          } catch (e) {
-            return "";
-          }
-        }
-        function isHiddenContainer(el) {
-          var h = classNameId(el).toLowerCase();
-          return h.indexOf("cdk-visually-hidden") !== -1 || h.indexOf("cdk-live-announcer") !== -1;
-        }
-        function isThinkingContainer(el) {
-          if (THINK_RE.test(classNameId(el))) return true;
-          var label = attrString(el, ["aria-label", "title"]);
-          return THINKING_LABEL_RE.test(label);
-        }
-        function thinkingControlLabel(el) {
-          var label = attrString(el, ["aria-label", "title"]);
-          if (el.tagName && String(el.tagName).toLowerCase() === "button") {
-            try {
-              label += " " + (el.textContent || "");
-            } catch (e) {
-            }
-          }
-          return label;
-        }
-        function containsThinkingControl(node) {
-          var found = false;
-          (function scan(n, depth) {
-            if (found || depth > 4) return;
-            if (!n || n.nodeType !== 1) return;
-            if (THINKING_LABEL_RE.test(thinkingControlLabel(n))) {
-              found = true;
-              return;
-            }
-            var ch = n.childNodes;
-            for (var i = 0; i < ch.length; i++) scan(ch[i], depth + 1);
-          })(node, 0);
-          return found;
-        }
-        function containsTable(node) {
-          try {
-            return !!node.querySelector && !!node.querySelector("table");
-          } catch (e) {
-            return false;
-          }
-        }
-        function isThinkingPanel(node) {
-          if (isHiddenContainer(node) || isThinkingContainer(node)) return true;
-          if (containsTable(node)) return false;
-          return containsThinkingControl(node);
-        }
-        function cleanCell(el) {
-          var clone;
-          try {
-            clone = el.cloneNode(true);
-          } catch (e) {
-            return "";
-          }
-          try {
-            clone.querySelectorAll("script, style, button, svg").forEach(function(x) {
-              x.remove();
-            });
-          } catch (e) {
-          }
-          try {
-            return stripAttachmentTokens((clone.textContent || "").replace(/\s+/g, " ").trim());
-          } catch (e) {
-            return "";
-          }
-        }
-        function tableToMarkdown(tableEl) {
-          var rows = [];
-          try {
-            rows = tableEl.querySelectorAll("tr");
-          } catch (e) {
-            rows = [];
-          }
-          var lines = [];
-          for (var r = 0; r < rows.length; r++) {
-            var cells = rows[r].querySelectorAll("th, td");
-            var cellTexts = [];
-            for (var c = 0; c < cells.length; c++) {
-              cellTexts.push(cleanCell(cells[c]));
-            }
-            if (cellTexts.length === 0) continue;
-            lines.push("| " + cellTexts.join(" | ") + " |");
-          }
-          return lines.join("\n");
-        }
-        var BLOCK_TAGS = {
-          "P": 1,
-          "DIV": 1,
-          "SECTION": 1,
-          "ARTICLE": 1,
-          "UL": 1,
-          "OL": 1,
-          "LI": 1,
-          "H1": 1,
-          "H2": 1,
-          "H3": 1,
-          "H4": 1,
-          "H5": 1,
-          "H6": 1,
-          "BLOCKQUOTE": 1,
-          "PRE": 1,
-          "BR": 1,
-          "HR": 1,
-          "HEADER": 1,
-          "FOOTER": 1,
-          "MAIN": 1,
-          "ASIDE": 1,
-          "TR": 1,
-          "THEAD": 1,
-          "TBODY": 1
-        };
-        function extractGeminiResponse(root) {
-          var parts = [];
-          var buf = [];
-          function flush() {
-            if (!buf.length) return;
-            var s = buf.join(" ");
-            buf = [];
-            s = s.replace(/\s+/g, " ").trim();
-            if (s) parts.push(s);
-          }
-          function pushText(str) {
-            if (typeof str !== "string") return;
-            var t = stripAttachmentTokens(str.replace(/\s+/g, " ").trim());
-            if (t) buf.push(t);
-          }
-          function walk(node) {
-            if (!node) return;
-            var type = node.nodeType;
-            if (type === 3) {
-              pushText(node.nodeValue || "");
-              return;
-            }
-            if (type !== 1) return;
-            if (isThinkingPanel(node)) {
-              flush();
-              return;
-            }
-            var tag = (node.tagName || "").toUpperCase();
-            if (tag === "TABLE") {
-              flush();
-              var md = tableToMarkdown(node);
-              if (md) parts.push(md);
-              return;
-            }
-            if (BLOCK_TAGS[tag]) flush();
-            var children = node.childNodes;
-            for (var i2 = 0; i2 < children.length; i2++) {
-              walk(children[i2]);
-            }
-            if (BLOCK_TAGS[tag]) flush();
-          }
-          if (root) {
-            var rootChildren = root.childNodes;
-            for (var i = 0; i < rootChildren.length; i++) {
-              walk(rootChildren[i]);
-            }
-          }
-          flush();
-          var text = parts.join("\n").replace(/\n{3,}/g, "\n\n").trim();
-          return { text, count: parts.length, parts };
-        }
-        var api = { extractGeminiResponse, tableToMarkdown, stripAttachmentTokens };
-        if (typeof window !== "undefined") {
-          window.GeminiDomParser = api;
-        }
-        if (typeof module !== "undefined" && module.exports) {
-          module.exports = api;
-        }
-      })();
-      (function() {
-        var PARSER_VERSION = "g3";
-        function logSegmentParseFail(e, where) {
-          try {
-            console.log("[AI CM][batchexecute] segment parse fail " + where + ": " + (e && e.message || e));
-          } catch (e2) {
-          }
-        }
-        var ATTACH_TOKEN_RE = /\$AXzLiR[A-Za-z0-9+\/=]+/g;
-        function stripAttachmentTokens(s) {
-          if (typeof s !== "string") return s;
-          return s.replace(ATTACH_TOKEN_RE, " ").replace(/[ \t\f\v]+/g, " ");
-        }
-        function sanitizeGeminiText2(s) {
-          if (typeof s !== "string") return s;
-          return s.replace(/\$AXzLiR[A-Za-z0-9+\/=\s]+/g, " ").replace(/File attachment was not previously registered/g, "").replace(/\[cite:\s*\d+\]/g, "");
-        }
-        function isIdLike(s) {
-          return typeof s === "string" && /^(c_|r_|rc_|fbb[0-9a-f]|[0-9a-f]{16})/.test(s);
-        }
-        function isFileLike(s) {
-          return typeof s === "string" && /\.(pdf|png|jpe?g|gif|docx?|txt|webp|csv|xlsx?)(\b|$)/i.test(s);
-        }
-        function isUrlLike(s) {
-          return typeof s === "string" && /^https?:\/\//i.test(s);
-        }
-        function isTokenLike(s) {
-          return typeof s === "string" && /^\$?AVuib/.test(s);
-        }
-        function isMimeLike(s) {
-          return typeof s === "string" && /^(image|application|video|audio)\//i.test(s);
-        }
-        var UI_BLACKLIST = {
-          "DE": 1,
-          "ru": 1,
-          "mk": 1,
-          "generic": 1,
-          "personal_context": 1,
-          "google": 1,
-          "\u0418\u0449\u0443 \u0432 \u0438\u043D\u0442\u0435\u0440\u043D\u0435\u0442\u0435": 1,
-          "\u041F\u0435\u0440\u0441\u043E\u043D\u0430\u043B\u044C\u043D\u044B\u0439 \u043A\u043E\u043D\u0442\u0435\u043A\u0441\u0442": 1,
-          "Google Search": 1,
-          "true": 1,
-          "false": 1
-        };
-        function isJunk(s) {
-          if (typeof s !== "string") return true;
-          var t = s.trim();
-          if (t.length === 0) return true;
-          if (UI_BLACKLIST[t]) return true;
-          return isIdLike(t) || isFileLike(t) || isUrlLike(t) || isTokenLike(t) || isMimeLike(t);
-        }
-        function isUserQuestionJunk(s) {
-          if (typeof s !== "string") return true;
-          var t = s.trim();
-          if (!t) return true;
-          if (UI_BLACKLIST[t]) return true;
-          return isIdLike(t) || isUrlLike(t) || isTokenLike(t) || isMimeLike(t);
-        }
-        var THINKING_TITLE_RE = /^\s*\*\*[^*\n]{1,120}\*\*/;
-        var THINKING_BODY_RE = /^(I'm now|I've been|I am going|I'm currently|I'm focusing|I'm working|I will now|I've fleshed|I've got|I need to|I'm going to|I've shifted|My focus is|I've settled|I've outlined|I've started|I'm aiming|My approach is|I'm leaning|I'm choosing|I'm prioritizing)\b/i;
-        var THINKING_BODY_EXTRA_RE = /^(I'm (?:currently|now|also|still) (?:focused|zeroing|analyzing|integrating|identifying|assessing|refining|evaluating|structuring|addressing|considering|formulating|prioritizing|parsing)|I've (?:been|now) (?:analyzing|noted|shifted|outlined|fleshed)|My (?:focus|goal) is|Specifically, I've)\b/i;
-        var THINKING_GERUND_RE = /^(Assessing|Defining|Refining|Outlining|Constructing|Uncovering|Tracing|Confirming|Reassuring|Clarifying|Deepening|Integrating|Evaluating|Formulating|Focusing|Prioritizing|Solidifying|Exploring|Analyzing|Reviewing|Validating|Synthesizing|Considering|Identifying|Structuring|Addressing|Reconstructing)\b/;
-        var FILE_ATTACHMENT_RE = /File attachment was not previously registered/;
-        function hasCyrillic(s) {
-          for (var i = 0; i < s.length; i++) {
-            var c = s.charCodeAt(i);
-            if (c >= 1024 && c <= 1279) return true;
-          }
-          return false;
-        }
-        function isThinkingStart(s) {
-          if (typeof s !== "string") return false;
-          var t = s.trim();
-          if (!t) return false;
-          if (hasCyrillic(t)) return false;
-          if (THINKING_TITLE_RE.test(t)) return true;
-          if (THINKING_BODY_RE.test(t)) return true;
-          if (THINKING_BODY_EXTRA_RE.test(t)) return true;
-          if (THINKING_GERUND_RE.test(t)) return true;
-          return false;
-        }
-        function isResponseSegment(s) {
-          if (typeof s !== "string") return false;
-          var t = s.trim();
-          if (!t) return false;
-          if (hasCyrillic(t)) return true;
-          if (/```/.test(t)) return true;
-          if (/^\s*\|.+\|\s*$/m.test(t)) return true;
-          return false;
-        }
-        function headIsThinking(node, depth) {
-          if (typeof node === "string") return isThinkingStart(node);
-          if (Array.isArray(node)) {
-            if (depth > 4) return false;
-            return headIsThinking(node[0], depth + 1);
-          }
-          return false;
-        }
-        function isThoughtBlock(node) {
-          if (!Array.isArray(node)) return false;
-          return headIsThinking(node[0], 0);
-        }
-        function collectTurnText(node, out, state) {
-          state = state || { inThinking: false };
-          if (typeof node === "string") {
-            var s = sanitizeGeminiText2(node);
-            var t = s.trim();
-            if (!t) return;
-            if (FILE_ATTACHMENT_RE.test(t)) return;
-            if (isJunk(t)) return;
-            if (state.inThinking) {
-              if (!isResponseSegment(t)) return;
-              state.inThinking = false;
-              out.push(s);
-              return;
-            }
-            if (isThinkingStart(t)) {
-              state.inThinking = true;
-              return;
-            }
-            out.push(s);
-            return;
-          }
-          if (!Array.isArray(node)) return;
-          for (var k = 0; k < node.length; k++) collectTurnText(node[k], out, state);
-        }
-        function extractUserQuestion(turn) {
-          var q = "";
-          try {
-            q = turn[2][0][0];
-          } catch (e) {
-            q = "";
-          }
-          if (typeof q === "string") {
-            var s = sanitizeGeminiText2(q).trim();
-            if (s && !isUserQuestionJunk(s) && !isThinkingStart(s)) return s;
-          }
-          return "";
-        }
-        var MODEL_NAME_RE = /^\s*(?:Gemini\s*[\d.]?|\d+(?:\.\d+)?\s+(?:Flash|Pro|Ultra|Gemini))/i;
-        function extractModelName(node) {
-          var found = null;
-          (function walk(n) {
-            if (found) return;
-            if (typeof n === "string") {
-              if (n.length < 60 && n.indexOf("\n") < 0 && MODEL_NAME_RE.test(n)) {
-                found = n.trim();
-                return;
-              }
-            } else if (Array.isArray(n)) {
-              for (var i = 0; i < n.length; i++) {
-                walk(n[i]);
-                if (found) return;
-              }
-            }
-          })(node);
-          return found || "";
-        }
-        function extractTurnId(node) {
-          var found = null;
-          (function walk(n) {
-            if (found) return;
-            if (typeof n === "string" && /^r_[0-9a-f]+$/.test(n)) {
-              found = n;
-              return;
-            } else if (Array.isArray(n)) {
-              for (var i = 0; i < n.length; i++) {
-                walk(n[i]);
-                if (found) return;
-              }
-            }
-          })(node);
-          return found;
-        }
-        function extractTurnR1(t) {
-          try {
-            if (Array.isArray(t) && Array.isArray(t[1]) && typeof t[1][1] === "string") return t[1][1];
-          } catch (e) {
-          }
-          return null;
-        }
-        function extractTurnTs(t) {
-          try {
-            if (Array.isArray(t) && Array.isArray(t[4]) && typeof t[4][0] === "number" && t[4][0] > 1e9) return t[4][0];
-          } catch (e) {
-          }
-          return 0;
-        }
-        function fileRefFromNode(n) {
-          try {
-            if (!Array.isArray(n)) return null;
-            var name = typeof n[2] === "string" ? n[2].trim() : "";
-            if (!name) return null;
-            var mime = typeof n[11] === "string" ? n[11] : "";
-            var type = typeof n[1] === "number" ? n[1] : 0;
-            var token = typeof n[5] === "string" ? n[5] : "";
-            var img = typeof n[3] === "string" ? n[3] : "";
-            var tail = n ? n[15] : null;
-            var size = Array.isArray(tail) && typeof tail[2] === "number" && isFinite(tail[2]) && tail[2] > 0 ? tail[2] : 0;
-            var dl = "";
-            var urls = [];
-            (function walk(v) {
-              if (typeof v === "string") {
-                if (v) urls.push(v);
-                if (!dl && v.indexOf("contribution.usercontent.google.com/download") !== -1) dl = v;
-              } else if (Array.isArray(v)) {
-                for (var i = 0; i < v.length; i++) walk(v[i]);
-              }
-            })(n[7]);
-            return {
-              name,
-              mime,
-              type,
-              token,
-              size,
-              img,
-              dl,
-              urls,
-              isImage: type === 1 || /^image\//i.test(mime)
-            };
-          } catch (e) {
-            return null;
-          }
-        }
-        function collectTurnFiles(turn) {
-          var out = [];
-          try {
-            var arr = turn[2][0][4][0][4];
-            if (!Array.isArray(arr)) return out;
-            for (var i = 0; i < arr.length; i++) {
-              var ref = fileRefFromNode(arr[i]);
-              if (ref) {
-                ref.pos = i;
-                out.push(ref);
-              }
-            }
-          } catch (e) {
-          }
-          return out;
-        }
-        var filePoolsByConv = {};
-        function fileOwnerTs(ts) {
-          return typeof ts === "number" && isFinite(ts) && ts > 0 ? ts : 0;
-        }
-        function fileOwnerOrder(order) {
-          return typeof order === "number" && isFinite(order) && order >= 0 ? order : -1;
-        }
-        function filePoolForConv(convId, create) {
-          var cid = typeof convId === "string" ? convId : "";
-          var pool = filePoolsByConv[cid];
-          if (!pool && create) {
-            pool = { turns: {}, seq: 0 };
-            filePoolsByConv[cid] = pool;
-          }
-          return pool || null;
-        }
-        function fileRefPoolName(ref) {
-          return ref && typeof ref.name === "string" ? ref.name : "";
-        }
-        function poolSharedPrefixLen(a, b) {
-          var n = Math.min(a.length, b.length);
-          var k = 0;
-          while (k < n && fileRefPoolName(a[k]) === fileRefPoolName(b[k])) k++;
-          return k;
-        }
-        function isTurnBefore(a, b) {
-          var aTs = fileOwnerTs(a.ts);
-          var bTs = fileOwnerTs(b.ts);
-          if (aTs > 0 && bTs > 0 && aTs !== bTs) return aTs < bTs;
-          if (aTs > 0 && bTs === 0) return true;
-          if (aTs === 0 && bTs > 0) return false;
-          var aRefs = Array.isArray(a.refs) ? a.refs : null;
-          var bRefs = Array.isArray(b.refs) ? b.refs : null;
-          if (aRefs && bRefs && aRefs.length !== bRefs.length) {
-            var nest = poolSharedPrefixLen(aRefs, bRefs);
-            if (nest === Math.min(aRefs.length, bRefs.length)) return aRefs.length < bRefs.length;
-          }
-          var aTid = typeof a.turnId === "string" ? a.turnId : "";
-          var bTid = typeof b.turnId === "string" ? b.turnId : "";
-          if (aTid && bTid && aTid !== bTid) return aTid < bTid;
-          var aOrd = fileOwnerOrder(a.order);
-          var bOrd = fileOwnerOrder(b.order);
-          if (aOrd >= 0 && bOrd >= 0 && aOrd !== bOrd) return aOrd < bOrd;
-          return a.seq < b.seq;
-        }
-        function fileRefIdentityKey(ref) {
-          var name = ref && typeof ref.name === "string" ? ref.name : "";
-          var size = ref && typeof ref.size === "number" && isFinite(ref.size) ? ref.size : 0;
-          return name + "|" + size;
-        }
-        function fileOwnerKey(convId, ref) {
-          var cid = typeof convId === "string" ? convId : "";
-          return cid + "|" + fileRefIdentityKey(ref);
-        }
-        function registerTurnFileOwner(turn, convId, turnId, ts, order) {
-          var own = typeof turnId === "string" ? turnId : "";
-          if (!own) return 0;
-          var all = collectTurnFiles(turn);
-          var pool = filePoolForConv(convId, true);
-          if (!all.length) {
-            if (pool && pool.turns[own]) delete pool.turns[own];
-            return 0;
-          }
-          var nTs = fileOwnerTs(ts);
-          var nOrd = fileOwnerOrder(order);
-          var prev = pool.turns[own];
-          if (prev) {
-            prev.refs = all;
-            if (nTs > 0) prev.ts = nTs;
-            if (nOrd >= 0) prev.order = nOrd;
-            return all.length;
-          }
-          pool.seq++;
-          pool.turns[own] = { turnId: own, ts: nTs, order: nOrd, seq: pool.seq, refs: all };
-          return all.length;
-        }
-        function previousPoolTurn(pool, rec, all) {
-          var ids = Object.keys(pool.turns);
-          var chrono = null;
-          var i;
-          for (i = 0; i < ids.length; i++) {
-            if (ids[i] === rec.turnId) continue;
-            var cand = pool.turns[ids[i]];
-            if (!cand || !Array.isArray(cand.refs)) continue;
-            if (!isTurnBefore(cand, rec)) continue;
-            if (!chrono || isTurnBefore(chrono, cand)) chrono = cand;
-          }
-          var donor = null;
-          for (i = 0; i < ids.length; i++) {
-            if (ids[i] === rec.turnId) continue;
-            var reg = pool.turns[ids[i]];
-            if (!reg || !Array.isArray(reg.refs)) continue;
-            var len = reg.refs.length;
-            if (!len || len >= all.length) continue;
-            if (poolSharedPrefixLen(reg.refs, all) !== len) continue;
-            if (!donor || len > donor.refs.length) donor = reg;
-          }
-          if (donor && (!chrono || donor.refs.length > chrono.refs.length)) return donor;
-          return chrono;
-        }
-        function poolDelta(prevRefs, all) {
-          var k = poolSharedPrefixLen(prevRefs, all);
-          if (k === prevRefs.length || k === all.length) return all.slice(k);
-          var spent = {};
-          var i;
-          for (i = 0; i < prevRefs.length; i++) {
-            var pk = fileRefIdentityKey(prevRefs[i]);
-            spent[pk] = (spent[pk] || 0) + 1;
-          }
-          var out = [];
-          for (i = 0; i < all.length; i++) {
-            var ck = fileRefIdentityKey(all[i]);
-            if (spent[ck] > 0) {
-              spent[ck]--;
-              continue;
-            }
-            out.push(all[i]);
-          }
-          return out;
-        }
-        function assignPoolOwners(turns) {
-          var list = Array.isArray(turns) ? turns : [];
-          var out = [];
-          var prevPool = [];
-          for (var i = 0; i < list.length; i++) {
-            var item = list[i];
-            if (!item) continue;
-            var pool = Array.isArray(item.refs) ? item.refs : [];
-            var own = [];
-            if (pool.length) {
-              own = prevPool.length ? poolDelta(prevPool, pool) : pool.slice(0);
-              prevPool = pool;
-            }
-            out.push({ id: item.id, own });
-          }
-          return out;
-        }
-        function collectTurnFilesForOwner(turn, convId, ownerId, ts, order) {
-          var all = collectTurnFiles(turn);
-          var own = typeof ownerId === "string" ? ownerId : "";
-          if (!own) return all;
-          if (!all.length) return [];
-          var pool = filePoolForConv(convId, true);
-          var rec = pool.turns[own];
-          if (!rec) {
-            pool.seq++;
-            rec = { turnId: own, ts: fileOwnerTs(ts), order: fileOwnerOrder(order), seq: pool.seq, refs: all };
-            pool.turns[own] = rec;
-          }
-          rec.refs = all;
-          if (fileOwnerTs(ts) > 0) rec.ts = fileOwnerTs(ts);
-          if (fileOwnerOrder(order) >= 0) rec.order = fileOwnerOrder(order);
-          var prev = previousPoolTurn(pool, rec, all);
-          if (!prev) return all;
-          return poolDelta(prev.refs, all);
-        }
-        function __resetFileOwners(convId) {
-          if (convId === void 0 || convId === null || convId === "") {
-            filePoolsByConv = {};
-            return;
-          }
-          delete filePoolsByConv[typeof convId === "string" ? convId : String(convId)];
-        }
-        var THINKING_ASSISTANT_RE = /^([A-Z][a-z]+ing\b|I'm\b|I've\b|My (?:focus|goal)\b|sr |Ev )/;
-        var LEADING_THINKING_RE = /^\s*\*?\*?([A-Z][a-z]+ing\b|I'm|I've|My (focus|goal)|sr |Ev )/;
-        function isThinkingAssistant(s) {
-          if (typeof s !== "string") return false;
-          var t = s.trim();
-          if (!t) return false;
-          if (hasCyrillic(t)) return false;
-          return THINKING_ASSISTANT_RE.test(t);
-        }
-        function firstCyrillicIndex(s) {
-          for (var i = 0; i < s.length; i++) {
-            var c = s.charCodeAt(i);
-            if (c >= 1024 && c <= 1279) return i;
-          }
-          return -1;
-        }
-        function stripLeadingThinking(s) {
-          if (typeof s !== "string") return s;
-          var t = s.trim();
-          if (!LEADING_THINKING_RE.test(t)) return s;
-          var idx = firstCyrillicIndex(t);
-          if (idx < 0) return "";
-          return t.slice(idx);
-        }
-        function hasMarkdownMarkup(t) {
-          if (typeof t !== "string") return false;
-          if (/\*\*[^*\n]+\*\*/.test(t)) return true;
-          if (/^\s*#{1,6}\s/m.test(t)) return true;
-          if (/^\s*\|.+\|\s*$/m.test(t)) return true;
-          if (/```/.test(t)) return true;
-          if (/^\s*[-*+]\s/m.test(t)) return true;
-          if (/^\s*>\s/m.test(t)) return true;
-          if (/\[[^\]]+\]\([^)]+\)/.test(t)) return true;
-          if (/^\s*(---+|\*\*\*+|___+)\s*$/m.test(t)) return true;
-          return false;
-        }
-        function pickCanonicalAnswer(parts) {
-          if (!parts || !parts.length) return "";
-          for (var i = 0; i < parts.length; i++) {
-            if (hasMarkdownMarkup(parts[i])) return parts[i];
-          }
-          return parts[0];
-        }
-        function extractCanonicalAnswer(turn) {
-          var cands = [];
-          var isFallback = false;
-          try {
-            var box = Array.isArray(turn[3]) && Array.isArray(turn[3][0]) && Array.isArray(turn[3][0][0]) ? turn[3][0][0][1] : null;
-            if (Array.isArray(box)) {
-              for (var i = 0; i < box.length; i++) cands.push(box[i]);
-            } else if (typeof box === "string") {
-              cands.push(box);
-            }
-          } catch (e) {
-          }
-          if (!cands.length) {
-            isFallback = true;
-            try {
-              collectTurnText(turn[3], cands);
-            } catch (e) {
-              swallowSoft2(e, "gemini-utils:extractCanonicalAnswer-fallback");
-            }
-          }
-          var cleaned = [];
-          for (i = 0; i < cands.length; i++) {
-            if (typeof cands[i] !== "string") continue;
-            var s = sanitizeGeminiText2(cands[i]).trim();
-            if (s) cleaned.push(s);
-          }
-          return { text: pickCanonicalAnswer(cleaned), isFallback };
-        }
-        var DR_REPORT_MIN_LEN = 1e3;
-        var DR_PLAN_MIN_LEN = 60;
-        function collectDrStrings(node, out, minLen, depth) {
-          try {
-            if (typeof node === "string") {
-              if (node.length >= minLen) out.push(node);
-              return;
-            }
-            if (Array.isArray(node) && depth < 40) {
-              for (var i = 0; i < node.length; i++) collectDrStrings(node[i], out, minLen, depth + 1);
-            }
-          } catch (e) {
-            swallowSoft2(e, "gemini-utils:collectDrStrings");
-          }
-        }
-        function ctText(s) {
-          return sanitizeGeminiText2(s).trim();
-        }
-        function extractDrTexts(realTurns) {
-          var res = { planText: "", reportText: "" };
-          try {
-            if (!Array.isArray(realTurns)) return res;
-            var cands = [];
-            for (var i = 0; i < realTurns.length; i++) collectDrStrings(realTurns[i], cands, DR_REPORT_MIN_LEN, 0);
-            var best = "";
-            for (var j = 0; j < cands.length; j++) {
-              var s = cands[j];
-              if (isUrlLike(s) || isJunk(s)) continue;
-              if (!best || s.length > best.length) best = s;
-            }
-            if (best) res.reportText = ctText(best);
-            var pc = [];
-            for (var k = 0; k < realTurns.length; k++) collectDrStrings(realTurns[k], pc, DR_PLAN_MIN_LEN, 0);
-            var pbest = "";
-            for (var q = 0; q < pc.length; q++) {
-              var ps = pc[q];
-              if (isUrlLike(ps) || isJunk(ps)) continue;
-              if (res.reportText && ps === res.reportText) continue;
-              if (ps.indexOf("deep_research_confirmation_content") !== -1) continue;
-              if (ps.indexOf("immersive_entry_chip") !== -1) continue;
-              if (res.reportText && ps.length >= res.reportText.length) continue;
-              if (!pbest || ps.length > pbest.length) pbest = ps;
-            }
-            if (pbest) res.planText = ctText(pbest);
-          } catch (e) {
-            swallowSoft2(e, "gemini-utils:extractDrTexts");
-          }
-          return res;
-        }
-        var lastDrTexts = { planText: "", reportText: "" };
-        function __setDrTexts(d) {
-          try {
-            lastDrTexts = d || { planText: "", reportText: "" };
-          } catch (e) {
-          }
-        }
-        function injectDrLinks(text, dr) {
-          try {
-            if (typeof text !== "string") return text;
-            var t = text;
-            if (dr && dr.reportText && t.indexOf("immersive_entry_chip/0") !== -1) {
-              t = t.replace(/https?:\/\/googleusercontent\.com\/immersive_entry_chip\/0/gi, dr.reportText);
-            }
-            if (dr && dr.planText && t.indexOf("deep_research_confirmation_content/0") !== -1) {
-              t = t.replace(/https?:\/\/googleusercontent\.com\/deep_research_confirmation_content\/0/gi, dr.planText);
-            }
-            return t;
-          } catch (e) {
-            return text;
-          }
-        }
-        function buildTurnMessages(turn) {
-          var question = extractUserQuestion(turn);
-          var canon = extractCanonicalAnswer(turn);
-          var answer = canon.text.replace(/\n{3,}/g, "\n\n").trim();
-          var msgs = [];
-          if (question) msgs.push({ role: "user", text: question });
-          if (answer) {
-            var drAn = injectDrLinks(answer, lastDrTexts);
-            if (canon.isFallback) {
-              if (isThinkingAssistant(drAn)) {
-              } else {
-                var kept = stripLeadingThinking(drAn);
-                if (kept) msgs.push({ role: "assistant", text: kept });
-              }
-            } else {
-              msgs.push({ role: "assistant", text: drAn });
-            }
-          }
-          return msgs;
-        }
-        function handleOuter(outer, out) {
-          try {
-            if (!Array.isArray(outer) || !Array.isArray(outer[0])) return;
-            if (outer[0][1] !== "hNvQHb") return;
-            var inner = outer[0][2];
-            if (typeof inner !== "string") return;
-            var turns = JSON.parse(inner);
-            if (!Array.isArray(turns)) return;
-            var realTurns = Array.isArray(turns[0]) && Array.isArray(turns[0][0]) ? turns[0] : turns;
-            try {
-              lastDrTexts = extractDrTexts(realTurns);
-            } catch (eD13) {
-            }
-            var rawCount = realTurns.length;
-            for (var i = rawCount - 1; i >= 0; i--) {
-              var t = realTurns[i];
-              if (!Array.isArray(t)) continue;
-              var modelName = extractModelName(t);
-              var turnId = extractTurnId(t) || "idx" + i;
-              var turnTs = extractTurnTs(t);
-              var r1 = extractTurnR1(t);
-              var msgs = buildTurnMessages(t);
-              for (var m = 0; m < msgs.length; m++) {
-                var role = msgs[m].role === "user" ? "user" : "assistant";
-                out.push({
-                  role,
-                  content: msgs[m].text,
-                  model: modelName || "",
-                  id: turnId + "_" + role,
-                  ts: turnTs,
-                  r1
-                });
-              }
-            }
-          } catch (e) {
-            logSegmentParseFail(e, "handleOuter");
-          }
-        }
-        function parseByBytes(raw, out) {
-          var bytes;
-          try {
-            bytes = new TextEncoder().encode(raw);
-          } catch (e) {
-            return;
-          }
-          var pos = 0;
-          if (bytes.length >= 4 && bytes[0] === 41 && bytes[1] === 93 && bytes[2] === 125 && bytes[3] === 39) pos = 4;
-          var dec = new TextDecoder("utf-8");
-          var guard = 0;
-          while (pos < bytes.length && guard++ < 200) {
-            while (pos < bytes.length && (bytes[pos] < 48 || bytes[pos] > 57)) pos++;
-            if (pos >= bytes.length) break;
-            var n = 0;
-            while (pos < bytes.length && bytes[pos] >= 48 && bytes[pos] <= 57) {
-              n = n * 10 + (bytes[pos] - 48);
-              pos++;
-            }
-            if (n <= 0) {
-              pos++;
-              continue;
-            }
-            if (pos < bytes.length && bytes[pos] === 10) pos++;
-            var end = pos + n;
-            if (end > bytes.length) end = bytes.length;
-            var payloadStr = dec.decode(bytes.subarray(pos, end));
-            pos = end;
-            if (pos < bytes.length && bytes[pos] === 10) pos++;
-            if (payloadStr.indexOf("hNvQHb") !== -1) {
-              try {
-                handleOuter(JSON.parse(payloadStr), out);
-              } catch (e) {
-                logSegmentParseFail(e, "parseByBytes");
-              }
-            }
-          }
-        }
-        function parseByLines(raw, out) {
-          var lines = raw.split("\n");
-          for (var i = 0; i < lines.length; i++) {
-            var ln = lines[i];
-            if (!ln || ln === ")]}'") continue;
-            var c0 = ln.charAt(0);
-            if (c0 !== "[" && c0 !== "{") continue;
-            if (ln.indexOf("hNvQHb") === -1) continue;
-            try {
-              handleOuter(JSON.parse(ln), out);
-            } catch (e) {
-              logSegmentParseFail(e, "parseByLines");
-            }
-          }
-        }
-        function parseGeminiHistory(raw) {
-          var parsed = [];
-          parseByBytes(raw, parsed);
-          if (!parsed.length) parseByLines(raw, parsed);
-          var model = "";
-          for (var i = 0; i < parsed.length; i++) {
-            if (parsed[i].model) {
-              model = parsed[i].model;
-              break;
-            }
-          }
-          var totalChars = 0;
-          var messages = [];
-          var texts = [];
-          for (var j = 0; j < parsed.length; j++) {
-            var txt = parsed[j].content || "";
-            totalChars += txt.length;
-            messages.push({ role: parsed[j].role, text: txt, model: parsed[j].model || "", id: parsed[j].id, ts: parsed[j].ts || 0, r1: parsed[j].r1 || null });
-            texts.push(txt);
-          }
-          return {
-            messages,
-            model: model || "Gemini 2.5 Pro",
-            tokens: Math.ceil(totalChars / 4),
-            text: texts.join("\n"),
-            count: messages.length
-          };
-        }
-        var api = {
-          PARSER_VERSION,
-          stripAttachmentTokens,
-          sanitizeGeminiText: sanitizeGeminiText2,
-          collectTurnText,
-          isThinkingAssistant,
-          firstCyrillicIndex,
-          stripLeadingThinking,
-          splitTurnMessages: buildTurnMessages,
-          extractDrTexts,
-          injectDrLinks,
-          __setDrTexts,
-          fileRefFromNode,
-          fileRefIdentityKey,
-          collectTurnFiles,
-          registerTurnFileOwner,
-          collectTurnFilesForOwner,
-          assignPoolOwners,
-          __resetFileOwners,
-          parseGeminiHistory
-        };
-        if (typeof window !== "undefined") {
-          window.GeminiBatchexecuteParser = api;
-        }
-        if (typeof module !== "undefined" && module.exports) {
-          module.exports = api;
-        }
-      })();
-      (function() {
-        function decodeEntities(s) {
-          if (!s) return "";
-          var out = String(s);
-          out = out.replace(new RegExp("&quot;", "g"), '"');
-          out = out.replace(new RegExp("&amp;", "g"), "&");
-          out = out.replace(new RegExp("&#39;", "g"), "'");
-          out = out.replace(new RegExp("&lt;", "g"), "<");
-          out = out.replace(new RegExp("&gt;", "g"), ">");
-          out = out.replace(new RegExp("&nbsp;", "g"), " ");
-          out = out.replace(/&#(\d+);/g, function(m, d) {
-            try {
-              return String.fromCharCode(parseInt(d, 10));
-            } catch (e) {
-              return m;
-            }
-          });
-          return out;
-        }
-        var FENCE_RE = /(`{3,})[\s\S]*?\1/g;
-        function mapOutsideFences(s, fn) {
-          var str = String(s == null ? "" : s);
-          var out = "";
-          var last = 0;
-          var m;
-          FENCE_RE.lastIndex = 0;
-          while ((m = FENCE_RE.exec(str)) !== null) {
-            out += fn(str.slice(last, m.index)) + m[0];
-            last = m.index + m[0].length;
-          }
-          return out + fn(str.slice(last));
-        }
-        function stripTagsSeg(seg) {
-          return String(seg).replace(/<script[\s\S]*?<\/script>/gi, " ").replace(/<style[\s\S]*?<\/style>/gi, " ").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ");
-        }
-        function stripTags(html) {
-          if (!html) return "";
-          return mapOutsideFences(html, stripTagsSeg).replace(/^\s+/, "").replace(/\s+$/, "");
-        }
-        function sanitizeAssistantSeg(seg) {
-          return String(seg).replace(/<script[\s\S]*?<\/script>/gi, " ").replace(/<style[\s\S]*?<\/style>/gi, " ").replace(/<[^>]+>/g, " ").replace(/[ \t\f\v]+/g, " ").split("\n").map(function(ln) {
-            return ln.trim();
-          }).join("\n").replace(/\n{3,}/g, "\n\n");
-        }
-        function sanitizeAssistant(s) {
-          if (!s) return "";
-          return mapOutsideFences(s, sanitizeAssistantSeg).replace(/^\s+/, "").replace(/\s+$/, "");
-        }
-        function tableCellText(cellEl) {
-          var clone = cellEl.cloneNode(true);
-          clone.querySelectorAll("script, style, button, svg").forEach(function(el) {
-            el.remove();
-          });
-          return stripTags(decodeEntities(clone.innerHTML)).trim();
-        }
-        function tableToMarkdown(tableEl) {
-          var rows = tableEl.querySelectorAll("tr");
-          var lines = [];
-          for (var r = 0; r < rows.length; r++) {
-            var cells = rows[r].querySelectorAll("th, td");
-            var cellTexts = [];
-            for (var c = 0; c < cells.length; c++) {
-              cellTexts.push(tableCellText(cells[c]));
-            }
-            if (cellTexts.length === 0) continue;
-            lines.push("| " + cellTexts.join(" | ") + " |");
-          }
-          return lines.join("\n");
-        }
-        function isQuestionHeading(el) {
-          return el.tagName === "H2" && el.className && String(el.className).indexOf("iMqumd") !== -1;
-        }
-        var CODE_CONTAINER_SEL = 'pre, code, [class*="code-block"], [class*="codeBlock"], [class*="codeblock"]';
-        var CODE_LANG_RE = /^[A-Za-z][A-Za-z0-9+#._-]{0,19}$/;
-        function classOf(el) {
-          try {
-            return String(el && el.className || "");
-          } catch (e) {
-            return "";
-          }
-        }
-        function isCodeLikeNode(el) {
-          if (!el || !el.tagName) return false;
-          var tag = String(el.tagName).toUpperCase();
-          return tag === "PRE" || tag === "CODE" || /code-?block/i.test(classOf(el));
-        }
-        function codeTextOf(el) {
-          if (!el || typeof el.cloneNode !== "function") return "";
-          var clone;
-          try {
-            clone = el.cloneNode(true);
-          } catch (e) {
-            return "";
-          }
-          try {
-            var junk = clone.querySelectorAll("script, style, button, svg");
-            for (var i = 0; i < junk.length; i++) {
-              if (junk[i].parentNode) junk[i].parentNode.removeChild(junk[i]);
-            }
-            var brs = clone.querySelectorAll("br");
-            var doc = clone.ownerDocument || (typeof document !== "undefined" ? document : null);
-            for (var b = 0; b < brs.length; b++) {
-              if (brs[b].parentNode && doc && doc.createTextNode) {
-                brs[b].parentNode.replaceChild(doc.createTextNode("\n"), brs[b]);
-              }
-            }
-          } catch (e2) {
-          }
-          var txt = "";
-          try {
-            txt = String(clone.textContent || "");
-          } catch (e3) {
-            txt = "";
-          }
-          if (txt.indexOf("\n") === -1 && clone.children && clone.children.length > 1) {
-            var allBlock = true;
-            for (var k = 0; k < clone.children.length; k++) {
-              if (!/^(DIV|P|LI|TR|SECTION|ARTICLE|FIGURE|BLOCKQUOTE|H[1-6])$/.test(String(clone.children[k].tagName || "").toUpperCase())) {
-                allBlock = false;
-                break;
-              }
-            }
-            if (allBlock) {
-              var lines = [];
-              for (var k2 = 0; k2 < clone.children.length; k2++) {
-                lines.push(String(clone.children[k2].textContent || ""));
-              }
-              var joined = lines.join("\n");
-              if (joined.replace(/\s+/g, "")) txt = joined;
-            }
-          }
-          return txt.replace(/[ \t]+$/gm, "").replace(/^\n+/, "").replace(/\s+$/, "");
-        }
-        function codeBodyElement(el) {
-          try {
-            var inner = el.querySelectorAll ? el.querySelectorAll("pre, code") : null;
-            if (inner && inner.length) return inner[inner.length - 1];
-          } catch (e) {
-          }
-          return el;
-        }
-        function detectCodeLang(el, langHint) {
-          if (langHint != null && CODE_LANG_RE.test(String(langHint).trim())) return String(langHint).trim();
-          var attrNames = ["code-lang", "data-lang", "data-code-lang"];
-          try {
-            for (var a = 0; a < attrNames.length; a++) {
-              var v = el && el.getAttribute ? el.getAttribute(attrNames[a]) : null;
-              if (v && CODE_LANG_RE.test(String(v).trim())) return String(v).trim();
-            }
-          } catch (e) {
-          }
-          var m = classOf(el).match(/(?:^|[\s_-])(?:language|lang)[-_]([A-Za-z][A-Za-z0-9+#._-]{0,19})/);
-          if (m && CODE_LANG_RE.test(m[1])) return m[1];
-          var cur = el;
-          for (var up = 0; cur && up < 4; up++) {
-            var prev = cur.previousSibling;
-            for (var hops = 0; prev && hops < 3; hops++) {
-              var t = "";
-              try {
-                t = String(prev.textContent || "").trim();
-              } catch (e2) {
-                t = "";
-              }
-              if (t) {
-                if (CODE_LANG_RE.test(t)) return t;
-                break;
-              }
-              prev = prev.previousSibling;
-            }
-            cur = cur.parentNode;
-          }
-          return "";
-        }
-        function isCodeBlockElement(el) {
-          if (!el || !el.tagName) return false;
-          var tag = String(el.tagName).toUpperCase();
-          if (/code-?block/i.test(classOf(el))) return true;
-          if (tag === "PRE") return true;
-          if (tag !== "CODE") return false;
-          if (/(?:^|[\s_-])(?:language|lang)[-_]/.test(classOf(el))) return true;
-          return codeTextOf(el).indexOf("\n") !== -1;
-        }
-        function renderCodeBlock(node, langHint) {
-          if (!node) return "";
-          var body = codeBodyElement(node);
-          var text = codeTextOf(body);
-          if (!text) text = codeTextOf(node);
-          if (!text) return "";
-          var lang = detectCodeLang(node, langHint) || detectCodeLang(body, langHint);
-          var fence = "```";
-          while (text.indexOf(fence) !== -1) fence += "`";
-          return fence + lang + "\n" + text + "\n" + fence;
-        }
-        function answerTextOf(node) {
-          if (!node) return "";
-          if (isCodeBlockElement(node)) return renderCodeBlock(node);
-          if (typeof node.cloneNode !== "function") return "";
-          var clone;
-          try {
-            clone = node.cloneNode(true);
-          } catch (e) {
-            return "";
-          }
-          try {
-            var junk = clone.querySelectorAll("script, style, button, svg");
-            for (var i = 0; i < junk.length; i++) {
-              if (junk[i].parentNode) junk[i].parentNode.removeChild(junk[i]);
-            }
-            var found = clone.querySelectorAll ? clone.querySelectorAll(CODE_CONTAINER_SEL) : [];
-            var outer = [];
-            for (var f = 0; f < found.length; f++) {
-              if (!isCodeBlockElement(found[f])) continue;
-              var nested = false;
-              for (var o = 0; o < outer.length; o++) {
-                if (outer[o].contains && outer[o].contains(found[f])) {
-                  nested = true;
-                  break;
-                }
-              }
-              if (!nested) outer.push(found[f]);
-            }
-            var doc = clone.ownerDocument || (typeof document !== "undefined" ? document : null);
-            for (var c = outer.length - 1; c >= 0; c--) {
-              var fenced = renderCodeBlock(outer[c]);
-              if (!fenced || !outer[c].parentNode || !doc || !doc.createTextNode) continue;
-              outer[c].parentNode.replaceChild(doc.createTextNode("\n" + fenced + "\n"), outer[c]);
-            }
-          } catch (e2) {
-          }
-          var txt = "";
-          try {
-            txt = String(clone.textContent || "");
-          } catch (e3) {
-            txt = "";
-          }
-          return txt.trim();
-        }
-        function answerDomNodes(root) {
-          var doc = root || (typeof document !== "undefined" ? document : null);
-          if (!doc || typeof doc.querySelectorAll !== "function") return [];
-          var nodes = doc.querySelectorAll(".n6owBd.awi2gc, " + CODE_CONTAINER_SEL);
-          var out = [];
-          for (var i = 0; i < nodes.length; i++) {
-            var el = nodes[i];
-            if (isCodeLikeNode(el) && !isCodeBlockElement(el)) continue;
-            var nested = false;
-            for (var j = 0; j < out.length; j++) {
-              if (out[j].contains && out[j].contains(el)) {
-                nested = true;
-                break;
-              }
-            }
-            if (nested) continue;
-            out.push(el);
-          }
-          return out;
-        }
-        var WEB_SEARCH_CHIP_RE = /(?:Самые популярные результаты веб-поиска по этой теме|People also search|Related searches|Похожие запросы|Связанные запросы)/i;
-        var FOREIGN_QUESTION_RE = /^Вы сказали:\s*"/;
-        function nodeText(node) {
-          try {
-            return (node.textContent || "").trim();
-          } catch (e) {
-            return "";
-          }
-        }
-        function isWebSearchChipNode(node) {
-          return WEB_SEARCH_CHIP_RE.test(nodeText(node));
-        }
-        function isForeignQuestionNode(node) {
-          return FOREIGN_QUESTION_RE.test(nodeText(node));
-        }
-        function listItemToMarkdown(liEl) {
-          var clone = liEl.cloneNode(true);
-          clone.querySelectorAll("script, style, button, svg").forEach(function(el) {
-            el.remove();
-          });
-          var label = null;
-          var b = clone.querySelector("strong, b");
-          if (b) {
-            label = (b.textContent || "").replace(/\s+/g, " ").trim();
-            b.remove();
-          }
-          var rest = stripTags(decodeEntities(clone.innerHTML)).trim();
-          if (label) {
-            return "- **" + label + "**" + (rest ? ": " + rest : "");
-          }
-          return rest ? "- " + rest : "";
-        }
-        function listToText(listEl) {
-          var items = listEl.querySelectorAll("li");
-          var lines = [];
-          for (var r = 0; r < items.length; r++) {
-            var t = listItemToMarkdown(items[r]);
-            if (t) lines.push(t);
-          }
-          return lines.join("\n");
-        }
-        function gatherAnswerContentNodes(doc) {
-          var raw = doc.querySelectorAll('.n6owBd.awi2gc, table, [role="heading"], h2, h3, h4, ul, ol, li, [role="list"], [role="listitem"], ' + CODE_CONTAINER_SEL);
-          var out = [];
-          for (var i = 0; i < raw.length; i++) {
-            var el = raw[i];
-            if (isQuestionHeading(el)) continue;
-            if (isCodeLikeNode(el) && !isCodeBlockElement(el)) continue;
-            var nested = false;
-            for (var j = 0; j < out.length; j++) {
-              if (out[j].contains && out[j].contains(el)) {
-                nested = true;
-                break;
-              }
-            }
-            if (nested) continue;
-            out.push(el);
-          }
-          return out;
-        }
-        function assignContentToTurns(turnsArr, contentNodes) {
-          var answers = [];
-          var skipAfterChip = [];
-          for (var ti = 0; ti < turnsArr.length; ti++) {
-            answers[ti] = [];
-            skipAfterChip[ti] = false;
-          }
-          for (var n = 0; n < contentNodes.length; n++) {
-            var node = contentNodes[n];
-            var assigned = -1;
-            for (var t2 = 0; t2 < turnsArr.length; t2++) {
-              if (turnsArr[t2].compareDocumentPosition(node) & Node.DOCUMENT_POSITION_FOLLOWING) {
-                assigned = t2;
-              } else {
-                break;
-              }
-            }
-            if (assigned < 0) continue;
-            if (isForeignQuestionNode(node)) continue;
-            if (isWebSearchChipNode(node)) {
-              skipAfterChip[assigned] = true;
-              continue;
-            }
-            if (skipAfterChip[assigned]) continue;
-            var part = null;
-            if (node.tagName === "TABLE") {
-              var md = tableToMarkdown(node);
-              if (md) part = md;
-            } else if (node.tagName === "UL" || node.tagName === "OL") {
-              var lt = listToText(node);
-              if (lt) part = lt;
-            } else {
-              var ct = answerTextOf(node).trim();
-              if (ct) part = ct;
-            }
-            if (part) answers[assigned].push(part);
-          }
-          return answers;
-        }
-        function readThreadId(doc) {
-          try {
-            var el = doc.querySelector("[data-session-thread-id]");
-            if (el) {
-              var v = el.getAttribute("data-session-thread-id");
-              return v ? v.trim() : "";
-            }
-          } catch (e) {
-          }
-          return "";
-        }
-        function parseGoogleFolwrOpen(htmlText) {
-          var turns = [];
-          var messages = [];
-          if (!htmlText || typeof htmlText !== "string") {
-            return { threadId: "", turns, messages, text: "", count: 0 };
-          }
-          var doc;
-          try {
-            doc = new DOMParser().parseFromString(htmlText, "text/html");
-          } catch (e) {
-            return { threadId: "", turns, messages, text: "", count: 0 };
-          }
-          var threadId = readThreadId(doc);
-          var turnEls = doc.querySelectorAll('[data-scope-id="turn"]');
-          var allAimfl = doc.querySelectorAll('[data-subtree="aimfl"]');
-          var turnsArr = Array.prototype.slice.call(turnEls);
-          var tgQuestions = [];
-          try {
-            var tgRe = /<!--TgQPHd\|[\s\S]*?-->/g;
-            var m;
-            while ((m = tgRe.exec(htmlText)) !== null) {
-              var c = decodeEntities(m[0]);
-              var longRe = /"([^"]{20,})"/g;
-              var lm;
-              var found = null;
-              while ((lm = longRe.exec(c)) !== null) {
-                var cand = lm[1];
-                if (cand.indexOf("\\u0026") !== -1) continue;
-                if (cand.indexOf("OLOoOd") !== -1) continue;
-                if (cand.indexOf("dRog6c") !== -1) continue;
-                if (cand.indexOf("TgQPHd") !== -1) continue;
-                if (!/[а-яёА-ЯЁ]/.test(cand) && cand.indexOf(" ") === -1) continue;
-                found = cand;
-                break;
-              }
-              tgQuestions.push(found);
-            }
-          } catch (e) {
-            swallowSoft2(e, "gsa-utils:parseGoogleFolwrOpen-tgqphd");
-          }
-          var contentNodes = gatherAnswerContentNodes(doc);
-          var answers = assignContentToTurns(turnsArr, contentNodes);
-          for (var i = 0; i < turnsArr.length; i++) {
-            var turn = turnsArr[i];
-            var question = null;
-            var h2 = turn.querySelector("h2.iMqumd");
-            if (h2) {
-              var raw = (h2.textContent || "").trim();
-              var qm = raw.match(/^Вы сказали:\s*"([\s\S]*)"$/);
-              question = qm ? qm[1].trim() : raw;
-            }
-            var assistantText = answers[i].length > 0 ? answers[i].join("\n\n") : null;
-            if (!assistantText) {
-              var nestedAimfl = turn.querySelector('[data-subtree="aimfl"]');
-              if (nestedAimfl) {
-                var nat = (nestedAimfl.textContent || "").trim();
-                if (nat) assistantText = nat;
-              }
-            }
-            if (!assistantText && allAimfl[i]) {
-              var at = (allAimfl[i].textContent || "").trim();
-              if (at) assistantText = at;
-            }
-            if (!question && tgQuestions[i]) question = tgQuestions[i];
-            turns.push({
-              id: turn.getAttribute && turn.getAttribute("jsuid") || "idx" + i,
-              userText: question || null,
-              assistantText: assistantText || null
-            });
-          }
-          if (turns.length === 0) {
-            var folifAnswer = null;
-            for (var aa = 0; aa < allAimfl.length; aa++) {
-              var at2 = (allAimfl[aa].textContent || "").trim();
-              if (at2) {
-                folifAnswer = at2;
-                break;
-              }
-            }
-            if (!folifAnswer && contentNodes.length > 0) {
-              var firstNode = contentNodes[0];
-              if (firstNode.tagName === "TABLE") {
-                folifAnswer = tableToMarkdown(firstNode);
-              } else {
-                folifAnswer = answerTextOf(firstNode).trim() || null;
-              }
-            }
-            var folifQuestion = tgQuestions.length > 0 ? tgQuestions[0] : null;
-            if (folifQuestion || folifAnswer) {
-              turns.push({ id: "folif_" + Date.now(), userText: folifQuestion, assistantText: folifAnswer });
-            }
-          }
-          for (var t = 0; t < turns.length; t++) {
-            var t2 = turns[t];
-            if (t2.userText) messages.push({ role: "user", text: stripTags(decodeEntities(t2.userText)) });
-            if (t2.assistantText) messages.push({ role: "assistant", text: sanitizeAssistant(t2.assistantText) });
-          }
-          var text = "";
-          for (var mi = 0; mi < messages.length; mi++) {
-            text += (mi > 0 ? "\n" : "") + messages[mi].text;
-          }
-          return { threadId, turns, messages, text, count: messages.length };
-        }
-        function countTurnContainers(htmlText) {
-          if (!htmlText || typeof htmlText !== "string") return 0;
-          try {
-            var doc = new DOMParser().parseFromString(htmlText, "text/html");
-            return doc.querySelectorAll('[data-scope-id="turn"]').length;
-          } catch (e) {
-            return 0;
-          }
-        }
-        function extractTurnsFromDocument(doc) {
-          if (!doc || typeof doc.querySelectorAll !== "function") return [];
-          var turns = [];
-          try {
-            var turnEls = doc.querySelectorAll('[data-scope-id="turn"]');
-            var allAimfl = doc.querySelectorAll('[data-subtree="aimfl"]');
-            var turnsArr = Array.prototype.slice.call(turnEls);
-            var questions = [];
-            for (var i = 0; i < turnsArr.length; i++) {
-              var h2 = turnsArr[i].querySelector("h2.iMqumd");
-              var q = null;
-              if (h2) {
-                var raw = (h2.textContent || "").trim();
-                var m = raw.match(/^Вы сказали:\s*"([\s\S]*)"$/);
-                q = m ? m[1].trim() : raw;
-              }
-              questions.push(q);
-            }
-            var answers = [];
-            for (var t = 0; t < turnsArr.length; t++) answers[t] = [];
-            var blocks = answerDomNodes(doc);
-            for (var b = 0; b < blocks.length; b++) {
-              var blk = blocks[b];
-              var assigned = -1;
-              for (var t2 = 0; t2 < turnsArr.length; t2++) {
-                if (turnsArr[t2].compareDocumentPosition(blk) & Node.DOCUMENT_POSITION_FOLLOWING) assigned = t2;
-                else break;
-              }
-              if (assigned >= 0 && assigned < turnsArr.length) {
-                var txt = answerTextOf(blk).trim();
-                if (txt) answers[assigned].push(txt);
-              }
-            }
-            for (var k = 0; k < turnsArr.length; k++) {
-              var joined = answers[k].length ? answers[k].join("\n\n") : null;
-              if (!joined && allAimfl[k]) {
-                var at = (allAimfl[k].textContent || "").trim();
-                if (at) joined = at;
-              }
-              turns.push({
-                id: turnsArr[k].getAttribute && turnsArr[k].getAttribute("jsuid") || "idx" + k,
-                userText: questions[k] || null,
-                assistantText: joined || null
-              });
-            }
-          } catch (e) {
-            swallowSoft2(e, "gsa-utils:extractTurnsFromDocument");
-          }
-          return turns;
-        }
-        function extractContinuationToken(htmlText) {
-          if (!htmlText || typeof htmlText !== "string") return null;
-          try {
-            var doc = new DOMParser().parseFromString(htmlText, "text/html");
-            var els = doc.querySelectorAll("[data-mstk]");
-            var last = null;
-            for (var i = 0; i < els.length; i++) {
-              var v = els[i].getAttribute("data-mstk");
-              if (v) last = v.trim();
-            }
-            return last;
-          } catch (e) {
-            return null;
-          }
-        }
-        function normalizeTurnKeyPart(s) {
-          return String(s == null ? "" : s).toLowerCase().replace(/\u00a0/g, " ").replace(/[^a-zа-яё0-9]+/g, "");
-        }
-        function isAnswerWrapperTail(tail) {
-          var t = String(tail == null ? "" : tail);
-          var body = t.replace(/^["»”']{0,2}/, "").replace(/^[\s.,:;-]{0,4}/, "");
-          return body.replace(/\s+/g, "").length > 0;
-        }
-        var QUESTION_ASK_RE = /^(?:в\s+)?(?:ответ(?:е)?(?:\s+на\s+вопрос)?|на\s+вопрос|вопрос)\s*:?\s*/i;
-        function wrapperPrefix(text) {
-          var s = String(text == null ? "" : text);
-          var head = s.slice(0, 96);
-          var at = head.indexOf(":");
-          if (at === -1) return null;
-          var after = head.slice(at + 1);
-          var m = /^\s*"/.exec(after);
-          if (!m) return null;
-          return s.slice(0, at + 1 + m[0].length);
-        }
-        function answerWrapperParts(text) {
-          var s = String(text == null ? "" : text);
-          var prefix = wrapperPrefix(s);
-          if (!prefix) return null;
-          var rest = s.slice(prefix.length);
-          var close = rest.indexOf('"');
-          if (close === -1) return null;
-          var tail = rest.slice(close + 1);
-          if (!isAnswerWrapperTail(tail)) return null;
-          var question = rest.slice(0, close).trim();
-          if (!question) return null;
-          var body = tail.replace(/^["»”']{0,2}/, "").replace(/^[\s.,:;-]+/, "");
-          if (!body) return null;
-          return { question, body };
-        }
-        function canonicalAnswerBody(text) {
-          var wrapper = answerWrapperParts(text);
-          if (wrapper) return wrapper.body;
-          var s = String(text == null ? "" : text);
-          try {
-            var q = QUESTION_ASK_RE.exec(s);
-            if (q) {
-              var rest2 = s.slice(q[0].length);
-              var close2 = rest2.indexOf('"?');
-              if (close2 !== -1 && close2 < 200) {
-                var body2 = rest2.slice(close2 + 2).replace(/^[\s.,:;-]+/, "");
-                if (body2) s = body2;
-              }
-            }
-          } catch (e) {
-            return String(text == null ? "" : text);
-          }
-          return s;
-        }
-        function turnIdentityParts(turn) {
-          if (!turn) return { u: "", a: "" };
-          var wrapper = answerWrapperParts(turn.assistantText);
-          var u = normalizeTurnKeyPart(turn.userText);
-          if (!u && wrapper) u = normalizeTurnKeyPart(wrapper.question);
-          var a = normalizeTurnKeyPart(wrapper ? wrapper.body : canonicalAnswerBody(turn.assistantText));
-          return { u, a };
-        }
-        function canonicalTurnKeyOf(turn) {
-          if (!turn) return "";
-          var parts = turnIdentityParts(turn);
-          return parts.u + "||" + parts.a;
-        }
-        function canonicalizeTurnForThread(turn) {
-          if (!turn) return turn;
-          var question = turn.userText == null ? "" : String(turn.userText).trim();
-          if (!question) {
-            var wrapper = answerWrapperParts(turn.assistantText);
-            if (wrapper) question = wrapper.question;
-          }
-          return {
-            id: turn.id,
-            userText: question || null,
-            assistantText: turn.assistantText == null ? null : turn.assistantText
-          };
-        }
-        function isBetterTurn(candidate, current) {
-          if (!current) return true;
-          var la = String(candidate && candidate.assistantText || "").length;
-          var lb = String(current && current.assistantText || "").length;
-          if (la !== lb) return la > lb;
-          return String(candidate && candidate.userText || "").length > String(current && current.userText || "").length;
-        }
-        function turnRecord(t, idFallback) {
-          return {
-            id: t && t.id != null ? t.id : idFallback,
-            userText: t && t.userText || null,
-            assistantText: t && t.assistantText || null
-          };
-        }
-        var PREFIX_MIN_CHARS = 12;
-        var PREFIX_FUZZY_RATIO = 0.8;
-        function bodiesPrefixCompatible(a, b) {
-          var x = String(a == null ? "" : a);
-          var y = String(b == null ? "" : b);
-          if (!x || !y) return false;
-          if (x === y) return true;
-          var n = Math.min(x.length, y.length);
-          if (n < PREFIX_MIN_CHARS) return false;
-          var common = 0;
-          while (common < n && x.charCodeAt(common) === y.charCodeAt(common)) common++;
-          if (common === n) return true;
-          return common / n >= PREFIX_FUZZY_RATIO;
-        }
-        function isFullerTurn(candidate, current) {
-          var la = turnIdentityParts(candidate).a.length;
-          var lb = turnIdentityParts(current).a.length;
-          if (la !== lb) return la > lb;
-          return isBetterTurn(candidate, current);
-        }
-        var PARAGRAPH_PERMUTATION_MIN = 2;
-        function answerBodyParagraphs(turn) {
-          var wrapper = answerWrapperParts(turn && turn.assistantText);
-          var body = wrapper ? wrapper.body : canonicalAnswerBody(turn && turn.assistantText);
-          var lines = String(body == null ? "" : body).split(String.fromCharCode(10));
-          var out = [];
-          var cur = "";
-          for (var i = 0; i < lines.length; i++) {
-            var line = lines[i];
-            if (line.trim() === "") {
-              var p = normalizeTurnKeyPart(cur);
-              if (p) out.push(p);
-              cur = "";
-              continue;
-            }
-            cur = cur ? cur + String.fromCharCode(10) + line : line;
-          }
-          var tail = normalizeTurnKeyPart(cur);
-          if (tail) out.push(tail);
-          return out;
-        }
-        function bodiesParagraphPermutation(aTurn, bTurn) {
-          var pa = answerBodyParagraphs(aTurn);
-          var pb = answerBodyParagraphs(bTurn);
-          if (pa.length < PARAGRAPH_PERMUTATION_MIN || pa.length !== pb.length) return false;
-          pa.sort();
-          pb.sort();
-          for (var i = 0; i < pa.length; i++) {
-            if (pa[i] !== pb[i]) return false;
-          }
-          return true;
-        }
-        function findPrefixCompatibleIndex(turns, turn) {
-          var parts = turnIdentityParts(turn);
-          if (!parts.u || !parts.a) return -1;
-          for (var i = 0; i < turns.length; i++) {
-            var other = turnIdentityParts(turns[i]);
-            if (other.u !== parts.u) continue;
-            if (bodiesPrefixCompatible(other.a, parts.a)) return i;
-            if (other.a.length === parts.a.length && bodiesParagraphPermutation(turns[i], turn)) return i;
-          }
-          return -1;
-        }
-        function reindexTurnKey(byKey, turns, at) {
-          var k;
-          for (k in byKey) {
-            if (byKey[k] === at) delete byKey[k];
-          }
-          var key = canonicalTurnKeyOf(turns[at]);
-          if (key !== "||") byKey[key] = at;
-        }
-        function mergeTurnsById(baseTurns, extraTurns) {
-          baseTurns = Array.isArray(baseTurns) ? baseTurns : [];
-          extraTurns = Array.isArray(extraTurns) ? extraTurns : [];
-          var byId = {};
-          var byKey = {};
-          var out = [];
-          function add(t) {
-            if (!t) return;
-            var id = t.id != null ? String(t.id) : "x" + out.length;
-            var key = canonicalTurnKeyOf(t);
-            var hasId = Object.prototype.hasOwnProperty.call(byId, id);
-            var hasKey = key !== "||" && Object.prototype.hasOwnProperty.call(byKey, key);
-            var at = hasId ? byId[id] : hasKey ? byKey[key] : findPrefixCompatibleIndex(out, t);
-            if (at !== -1) {
-              var richer = hasId || hasKey ? isBetterTurn(t, out[at]) : isFullerTurn(t, out[at]);
-              if (richer) {
-                out[at] = turnRecord(t, out[at].id);
-                reindexTurnKey(byKey, out, at);
-              }
-              return;
-            }
-            byId[id] = out.length;
-            if (key !== "||") byKey[key] = out.length;
-            out.push(turnRecord(t, id));
-          }
-          var i;
-          for (i = 0; i < baseTurns.length; i++) add(baseTurns[i]);
-          for (i = 0; i < extraTurns.length; i++) add(extraTurns[i]);
-          return out;
-        }
-        function mergeTurnsMonotone(baseTurns, extraTurns) {
-          return mergeTurnsById(baseTurns, extraTurns);
-        }
-        function mergeTurnsByKey(baseTurns, extraTurns) {
-          baseTurns = Array.isArray(baseTurns) ? baseTurns : [];
-          extraTurns = Array.isArray(extraTurns) ? extraTurns : [];
-          var byKey = {};
-          var out = [];
-          function add(t) {
-            if (!t) return;
-            var key = canonicalTurnKeyOf(t);
-            if (key === "||") return;
-            var hasKey = Object.prototype.hasOwnProperty.call(byKey, key);
-            var at = hasKey ? byKey[key] : findPrefixCompatibleIndex(out, t);
-            if (at === -1) {
-              byKey[key] = out.length;
-              out.push(turnRecord(t, "x" + out.length));
-              return;
-            }
-            var richer = hasKey ? isBetterTurn(t, out[at]) : isFullerTurn(t, out[at]);
-            if (richer) {
-              out[at] = turnRecord(t, out[at].id);
-              reindexTurnKey(byKey, out, at);
-            }
-          }
-          for (var i = 0; i < baseTurns.length; i++) add(baseTurns[i]);
-          for (var j = 0; j < extraTurns.length; j++) add(extraTurns[j]);
-          return out;
-        }
-        function dedupeTurns(turns) {
-          var list = Array.isArray(turns) ? turns : [];
-          var byKey = {};
-          var out = [];
-          for (var i = 0; i < list.length; i++) {
-            var t = list[i];
-            if (!t) continue;
-            var key = canonicalTurnKeyOf(t);
-            var hasKey = key !== "||" && Object.prototype.hasOwnProperty.call(byKey, key);
-            var at = hasKey ? byKey[key] : findPrefixCompatibleIndex(out, t);
-            if (at === -1) {
-              if (key !== "||") byKey[key] = out.length;
-              out.push(t);
-              continue;
-            }
-            var richer = hasKey ? isBetterTurn(t, out[at]) : isFullerTurn(t, out[at]);
-            if (richer) {
-              out[at] = t;
-              reindexTurnKey(byKey, out, at);
-            }
-          }
-          return out;
-        }
-        function classifyFolwrContinuation(input) {
-          var i = input || {};
-          var ok = i.ok === true;
-          var status = i.status == null ? 0 : i.status;
-          var bodyLength = typeof i.bodyLength === "number" && i.bodyLength >= 0 ? i.bodyLength : 0;
-          var newTurns = typeof i.newTurns === "number" && i.newTurns > 0 ? i.newTurns : 0;
-          var cursor = i.cursor ? String(i.cursor) : null;
-          var sentCursor = i.sentCursor ? String(i.sentCursor) : null;
-          var cursorRepeated = !!(cursor && sentCursor && cursor === sentCursor);
-          var kind;
-          var complete, canContinue;
-          if (!ok) {
-            kind = "http-error";
-            complete = false;
-            canContinue = false;
-          } else if (bodyLength === 0) {
-            kind = "empty-body";
-            complete = true;
-            canContinue = false;
-          } else if (cursorRepeated) {
-            kind = "cursor-repeat";
-            complete = true;
-            canContinue = false;
-          } else if (newTurns > 0) {
-            kind = "new-turns";
-            complete = false;
-            canContinue = true;
-          } else {
-            kind = "no-new-turns";
-            complete = true;
-            canContinue = false;
-          }
-          return {
-            kind,
-            complete,
-            canContinue,
-            status,
-            ok,
-            bodyLength,
-            newTurns,
-            cursor,
-            cursorRepeated,
-            log: "kind=" + kind + " status=" + status + " ok=" + (ok ? 1 : 0) + " len=" + bodyLength + "B \u0445\u043E\u0434\u043E\u0432=+" + newTurns + " \u043A\u0443\u0440\u0441\u043E\u0440=" + (cursor ? "\u0435\u0441\u0442\u044C(" + (cursorRepeated ? "\u043F\u043E\u0432\u0442\u043E\u0440" : "\u043D\u043E\u0432\u044B\u0439") + ")" : "\u043D\u0435\u0442")
-          };
-        }
-        if (typeof window !== "undefined") {
-          window.parseGoogleFolwrOpen = parseGoogleFolwrOpen;
-          window.GoogleFolwrUtils = {
-            countTurnContainers,
-            extractTurnsFromDocument,
-            mergeTurnsByKey,
-            extractContinuationToken,
-            mergeTurnsById,
-            mergeTurnsMonotone,
-            classifyFolwrContinuation,
-            // O-32: каноническая идентичность/форма хода — ОДИН источник правды для сетевого пути,
-            // DOM-добора перехватчика и DOM-пути адаптера (см. блок «O-32» ниже по файлу).
-            canonicalTurnKeyOf,
-            canonicalAnswerBody,
-            canonicalizeTurnForThread,
-            normalizeTurnKeyPart,
-            // O-32 (фикс A/C): префикс-терпимая идентичность хода и дедуп списка перед кэшем.
-            turnIdentityParts,
-            bodiesPrefixCompatible,
-            dedupeTurns,
-            // O-45: общий рендер код-блоков (```lang … ```) и отбор узлов DOM-пути —
-            // переиспользуются адаптером (adapters/google-search-adapter.js) и тестами.
-            renderCodeBlock,
-            answerTextOf,
-            answerDomNodes,
-            isCodeBlockElement
-          };
-        }
-        if (typeof module !== "undefined" && module.exports) {
-          module.exports = {
-            parseGoogleFolwrOpen,
-            countTurnContainers,
-            extractTurnsFromDocument,
-            mergeTurnsByKey,
-            extractContinuationToken,
-            mergeTurnsById,
-            mergeTurnsMonotone,
-            classifyFolwrContinuation,
-            canonicalTurnKeyOf,
-            canonicalAnswerBody,
-            canonicalizeTurnForThread,
-            normalizeTurnKeyPart,
-            turnIdentityParts,
-            bodiesPrefixCompatible,
-            dedupeTurns,
-            renderCodeBlock,
-            answerTextOf,
-            answerDomNodes,
-            isCodeBlockElement
-          };
-        }
-      })();
-      (function() {
-        "use strict";
-        function aiCmI18nMessage2(key, fallback, substitutions) {
-          try {
-            if (typeof chrome !== "undefined" && chrome.i18n && typeof chrome.i18n.getMessage === "function") {
-              var message = substitutions ? chrome.i18n.getMessage(key, substitutions) : chrome.i18n.getMessage(key);
-              if (message) return message;
-            }
-          } catch (eMessage) {
-          }
-          return fallback;
-        }
-        var REASONING_SECTION_TAG = "[REASONING]";
-        var ANSWER_SECTION_TAG = "[ANSWER]";
-        function reasoningOfMessage(msg) {
-          if (!msg || typeof msg !== "object") return "";
-          var r = msg.reasoning;
-          return typeof r === "string" ? r : "";
-        }
-        function withReasoningSections(text, reasoning) {
-          var t = typeof text === "string" ? text : "";
-          var r = typeof reasoning === "string" ? reasoning : "";
-          if (!r) return t;
-          if (t.indexOf(r) !== -1) return t;
-          return REASONING_SECTION_TAG + "\n" + r + "\n\n" + ANSWER_SECTION_TAG + "\n" + t;
-        }
-        function messageTextWithReasoning(msg) {
-          if (!msg || typeof msg !== "object") return "";
-          return withReasoningSections(msg.text, reasoningOfMessage(msg));
-        }
-        function reasoningOfMessageForExport(msg, useHidden) {
-          var r = reasoningOfMessage(msg);
-          if (r) return r;
-          if (useHidden !== true || !msg || typeof msg !== "object") return "";
-          return typeof msg.hiddenReasoning === "string" ? msg.hiddenReasoning : "";
-        }
-        function markersMessageTextWithReasoning(msg, useHidden) {
-          return withReasoningSections(
-            messageTextForMarkers(msg),
-            reasoningOfMessageForExport(msg, useHidden)
-          );
-        }
-        var TXT_ROLE_MARKER_SITES = ["qwen"];
-        function isTxtRoleMarkerHistory(history) {
-          try {
-            var site = String(history && history.site || "").toLowerCase();
-            return TXT_ROLE_MARKER_SITES.indexOf(site) !== -1;
-          } catch (e) {
-            return false;
-          }
-        }
-        function txtRoleMarker(role) {
-          return role === "user" ? "USER:" : "ASSISTANT:";
-        }
-        function mdRoleMarker(role) {
-          return role === "user" ? "### USER" : "### ASSISTANT";
-        }
-        var CONTAINER_MIN_CONTAINED = 2;
-        var CONTAINER_COVER_MIN = 0.8;
-        function messageTextForMarkers(msg) {
-          if (!msg || typeof msg !== "object") return "";
-          if (typeof msg.text === "string" && msg.text) return msg.text;
-          if (typeof msg.content === "string") return msg.content;
-          return typeof msg.text === "string" ? msg.text : "";
-        }
-        function dropContainerMessages(list) {
-          var src = Array.isArray(list) ? list : [];
-          var texts = [];
-          for (var t = 0; t < src.length; t++) texts.push(messageTextForMarkers(src[t]));
-          var keep = [];
-          for (var c = 0; c < src.length; c++) {
-            var candidate = texts[c];
-            var contained = 0;
-            var covered = 0;
-            var longest = 0;
-            if (candidate) {
-              for (var j = 0; j < texts.length; j++) {
-                var other = texts[j];
-                if (j === c || !other || other.length >= candidate.length) continue;
-                if (candidate.indexOf(other) === -1) continue;
-                contained++;
-                covered += other.length;
-                if (other.length > longest) longest = other.length;
-              }
-            }
-            var isContainer = contained >= CONTAINER_MIN_CONTAINED && covered >= CONTAINER_COVER_MIN * candidate.length && candidate.length >= 2 * longest;
-            if (!isContainer) keep.push(src[c]);
-          }
-          return keep;
-        }
-        function diagTxtRoleStructure(list, totalCount) {
-          if (!diagOn()) return false;
-          try {
-            var kept = Array.isArray(list) ? list.length : -1;
-            var total = typeof totalCount === "number" ? totalCount : kept;
-            var first = Array.isArray(list) && list.length > 0 ? list[0] : null;
-            var text = messageTextForMarkers(first);
-            var kind = "\u043D\u0435\u0442";
-            if (first && typeof first === "object") {
-              if (typeof first.text === "string") kind = "text";
-              else if (typeof first.content === "string") kind = "content";
-            }
-            console.log(DIAG_PREFIX + " txt-roles site=qwen isArray=" + Array.isArray(list) + " msgs=" + total + " kept=" + kept + " dropped-containers=" + (kept >= 0 && total >= kept ? total - kept : 0) + " first.role=" + (first && first.role !== void 0 && first.role !== null ? String(first.role) : "(\u043D\u0435\u0442)") + " first.kind=" + kind + " first.len=" + text.length + " first.head=" + (diagHead(text, 60) || "\u043F\u0443\u0441\u0442\u043E"));
-          } catch (eLogRoles) {
-          }
-          return true;
-        }
-        function renderReferenceText(list) {
-          return buildReferenceText(list);
-        }
-        function renderReferenceTextWithRoleMarkers(list) {
-          var src = Array.isArray(list) ? list : [];
-          var parts = [];
-          for (var i = 0; i < src.length; i++) {
-            var m = src[i] || {};
-            var text = renderReferenceText([{ role: m.role, text: messageTextForMarkers(m) }]);
-            if (text === null) return null;
-            if (!String(text).trim()) continue;
-            parts.push(txtRoleMarker(m.role) + "\n" + text);
-          }
-          return parts.join("\n\n");
-        }
-        function buildTxtFromHistory(history) {
-          var hist = history || {};
-          var site = typeof hist.site === "string" ? hist.site : "";
-          var messages = history && Array.isArray(history.messages) ? history.messages : [];
-          var marked = isTxtRoleMarkerHistory(history);
-          var kept = marked ? dropContainerMessages(messages) : messages;
-          var forTxt = kept.map(function(m) {
-            var text = marked ? markersMessageTextWithReasoning(m, true) : messageTextWithReasoning(m);
-            if (!m || typeof m !== "object" || text === m.text) return m;
-            var copy = {};
-            for (var k in m) {
-              if (Object.prototype.hasOwnProperty.call(m, k)) copy[k] = m[k];
-            }
-            copy.text = text;
-            return copy;
-          });
-          var out;
-          if (marked) {
-            diagTxtRoleStructure(forTxt, messages.length);
-            out = renderReferenceTextWithRoleMarkers(forTxt);
-          } else {
-            out = renderReferenceText(forTxt);
-          }
-          if (site === "gemini" && hist.sourceTier && out) out = hist.sourceTier + "\n\n" + out;
-          return out === null ? "" : out;
-        }
-        function exportTokenSnapshot(history) {
-          var h = history || {};
-          var tokens = typeof h.tokens === "number" ? h.tokens : 0;
-          var limit = typeof h.limit === "number" ? h.limit : 0;
-          var percent = typeof h.percent === "number" ? h.percent : 0;
-          if (limit > 0) {
-            var calc = Math.round(tokens / limit * 1e3) / 10;
-            if (calc !== percent) percent = calc;
-          }
-          return { tokens, limit, percent };
-        }
-        function buildMdFromHistory(history, platform) {
-          var h = history || {};
-          var site = typeof h.site === "string" ? h.site : "";
-          var lines = [];
-          lines.push(aiCmI18nMessage2("export_md_title", "# AI Context Monitor \u2014 \u044D\u043A\u0441\u043F\u043E\u0440\u0442 \u0438\u0441\u0442\u043E\u0440\u0438\u0438"));
-          lines.push("");
-          lines.push(aiCmI18nMessage2("export_md_platform", "\u041F\u043B\u0430\u0442\u0444\u043E\u0440\u043C\u0430: " + (platform || "AI Chat"), [platform || "AI Chat"]));
-          lines.push(aiCmI18nMessage2("export_md_model", "\u041C\u043E\u0434\u0435\u043B\u044C: " + (h.model || "\u2014"), [h.model || "\u2014"]));
-          var exportedAt = (/* @__PURE__ */ new Date()).toISOString();
-          lines.push(aiCmI18nMessage2("export_md_date", "\u0414\u0430\u0442\u0430 \u044D\u043A\u0441\u043F\u043E\u0440\u0442\u0430: " + exportedAt, [exportedAt]));
-          var snap = exportTokenSnapshot(h);
-          var tokens = snap.tokens;
-          var limit = snap.limit;
-          var percent = snap.percent;
-          if (tokens === 0 && limit === 0) {
-            lines.push("\u0422\u043E\u043A\u0435\u043D\u044B: \u043D/\u0434 (" + percent + "%)");
-          } else {
-            lines.push(aiCmI18nMessage2("export_md_tokens", "\u0422\u043E\u043A\u0435\u043D\u044B: " + tokens + " / " + limit + " (" + percent + "%)", [String(tokens), String(limit), String(percent)]));
-          }
-          lines.push("");
-          if (site === "gemini" && h.sourceTier) {
-            lines.push(h.sourceTier, "");
-          }
-          var mdMarked = isTxtRoleMarkerHistory(h);
-          var messages = Array.isArray(h.messages) ? h.messages : [];
-          if (mdMarked) messages = dropContainerMessages(messages);
-          for (var i = 0; i < messages.length; i++) {
-            var msg = messages[i] || {};
-            if (typeof aiCmDiagLine2 === "function") {
-              aiCmDiagLine2("claude-role-builder", { msgRole: msg.role, mdMarked });
-            }
-            var title = mdMarked ? mdRoleMarker(msg.role) : msg.role === "user" || msg.role === "human" ? aiCmI18nMessage2("export_md_role_user", "## \u041F\u043E\u043B\u044C\u0437\u043E\u0432\u0430\u0442\u0435\u043B\u044C") : aiCmI18nMessage2("export_md_role_assistant", "## \u0410\u0441\u0441\u0438\u0441\u0442\u0435\u043D\u0442");
-            lines.push(title);
-            lines.push("");
-            lines.push(mdMarked ? markersMessageTextWithReasoning(msg, true) : messageTextWithReasoning(msg));
-            lines.push("");
-          }
-          return lines.join("\n");
-        }
-        function buildJsonFromHistory(history, platform) {
-          var h = history || {};
-          return JSON.stringify({
-            platform: platform || "AI Chat",
-            model: h.model || "",
-            exportedAt: (/* @__PURE__ */ new Date()).toISOString(),
-            tokens: typeof h.tokens === "number" ? h.tokens : 0,
-            limit: typeof h.limit === "number" ? h.limit : 0,
-            percent: typeof h.percent === "number" ? h.percent : 0,
-            // Two-Tier (v89): аддитивное поле метаданных. undefined → JSON.stringify ключ НЕ
-            // добавляет, поэтому у прочих платформ и у Gemini без метки байты прежние.
-            sourceTier: h.sourceTier,
-            messages: Array.isArray(h.messages) ? h.messages : []
-          }, null, 2);
-        }
-        var DIAG_PREFIX = "[AI CM][diag]";
-        function diagOn() {
-          try {
-            if (typeof sessionStorage !== "undefined" && sessionStorage && sessionStorage.getItem("aiCmDebug") === "1") return true;
-          } catch (eSess) {
-          }
-          try {
-            if (typeof window !== "undefined" && window && window.__aiCmDebugLogs === true) return true;
-          } catch (eWin) {
-          }
-          return false;
-        }
-        function diagHead(v, n) {
-          try {
-            var lim = typeof n === "number" && n > 0 ? n : 100;
-            if (v === void 0 || v === null) return "";
-            var s = String(v);
-            if (!s) return "";
-            var flat = s.replace(/\s+/g, " ").trim();
-            if (!flat) return "";
-            return flat.length > lim ? flat.slice(0, lim) + "\u2026" : flat;
-          } catch (eHead) {
-            return "";
-          }
-        }
-        function diagStack() {
-          try {
-            var lines = String(new Error().stack || "").split("\n");
-            var out = [];
-            for (var i = 1; i < lines.length && out.length < 4; i++) {
-              var s = String(lines[i] || "").replace(/\s+/g, " ").trim();
-              if (!s || s.indexOf("diag") !== -1) continue;
-              out.push(s);
-            }
-            return out.join(" <- ");
-          } catch (eStack) {
-            return "";
-          }
-        }
-        function diagDownload(trigger, content, fileName, extra) {
-          try {
-            if (typeof aiCmDiagDownload2 === "function") return aiCmDiagDownload2(trigger, content, fileName, extra);
-          } catch (eGlobal) {
-          }
-          if (!diagOn()) return false;
-          try {
-            var e = extra || {};
-            var url = "";
-            try {
-              url = String(typeof location !== "undefined" && location && location.href || "");
-            } catch (eUrl) {
-            }
-            console.log(DIAG_PREFIX + " download trigger=" + (trigger || "(\u043D\u0435\u0442)") + " file=" + (fileName === void 0 || fileName === null || String(fileName) === "" ? "\u043F\u0443\u0441\u0442\u043E\u0435" : String(fileName)) + " bytes100=" + (diagHead(content, 100) || "\u043F\u0443\u0441\u0442\u043E") + " len=" + (content === void 0 || content === null ? 0 : String(content).length) + " mime=" + (e.mime === void 0 ? "(\u043D\u0435\u0442)" : e.mime) + " url=" + url + " threadId=" + (e.threadId === void 0 || e.threadId === "" ? "(\u043D\u0435\u0442)" : e.threadId) + " site=" + (e.site === void 0 ? "" : e.site) + " reason=" + (e.reason === void 0 ? "" : e.reason) + " src=" + diagStack());
-          } catch (eLog) {
-          }
-          return true;
-        }
-        var XSSI_PREFIX_LEN = 4;
-        function startsWithXssiPrefix(content) {
-          try {
-            if (content === void 0 || content === null) return false;
-            var s = String(content);
-            if (s.length < XSSI_PREFIX_LEN) return false;
-            return s.charCodeAt(0) === 41 && s.charCodeAt(1) === 93 && s.charCodeAt(2) === 125 && s.charCodeAt(3) === 39;
-          } catch (eXssi) {
-            return false;
-          }
-        }
-        function downloadBlockReason(content, fileName) {
-          if (startsWithXssiPrefix(content)) return "xssi-prefix";
-          if (fileName === void 0 || fileName === null || String(fileName).trim() === "") return "empty-name";
-          return null;
-        }
-        function diagDownloadBlocked(trigger, content, fileName, reason, extra) {
-          try {
-            if (typeof aiCmDiagDownloadBlocked2 === "function") {
-              return aiCmDiagDownloadBlocked2(trigger, content, fileName, reason, extra);
-            }
-          } catch (eGlobalBlocked) {
-          }
-          if (!diagOn()) return false;
-          try {
-            var e = extra || {};
-            var url = "";
-            try {
-              url = String(typeof location !== "undefined" && location && location.href || "");
-            } catch (eUrlB) {
-            }
-            console.log(DIAG_PREFIX + " download-blocked reason=" + (reason || "(\u043D\u0435\u0442)") + " trigger=" + (trigger || "(\u043D\u0435\u0442)") + " file=" + (fileName === void 0 || fileName === null || String(fileName) === "" ? "\u043F\u0443\u0441\u0442\u043E\u0435" : String(fileName)) + " bytes100=" + (diagHead(content, 100) || "\u043F\u0443\u0441\u0442\u043E") + " len=" + (content === void 0 || content === null ? 0 : String(content).length) + " mime=" + (e.mime === void 0 ? "(\u043D\u0435\u0442)" : e.mime) + " url=" + url + " threadId=" + (e.threadId === void 0 || e.threadId === "" ? "(\u043D\u0435\u0442)" : e.threadId) + " site=" + (e.site === void 0 ? "" : e.site) + " src=" + diagStack());
-          } catch (eLogBlocked) {
-          }
-          return true;
-        }
-        function downloadBlob(content, fileName, mimeType, trigger, extra) {
-          var ex = extra || {};
-          var blockReason = downloadBlockReason(content, fileName);
-          if (blockReason) {
-            try {
-              diagDownloadBlocked(
-                trigger || "builder-download",
-                content,
-                fileName,
-                blockReason,
-                { mime: mimeType, threadId: ex.threadId, site: ex.site }
-              );
-            } catch (eDiagBlocked) {
-            }
-            return false;
-          }
-          try {
-            diagDownload(
-              trigger || "builder-download",
-              content,
-              fileName,
-              { mime: mimeType, threadId: ex.threadId, site: ex.site, reason: ex.reason }
-            );
-          } catch (eDiag) {
-          }
-          try {
-            var blob = new Blob([content], { type: mimeType });
-            var url = URL.createObjectURL(blob);
-            var a = document.createElement("a");
-            a.href = url;
-            a.download = fileName;
-            document.body.appendChild(a);
-            a.click();
-            a.remove();
-            setTimeout(function() {
-              URL.revokeObjectURL(url);
-            }, 1e3);
-          } catch (e) {
-            console.warn("[export] \u043D\u0435 \u0443\u0434\u0430\u043B\u043E\u0441\u044C \u0441\u043A\u0430\u0447\u0430\u0442\u044C \u0444\u0430\u0439\u043B:", e);
-          }
-          return true;
-        }
-        var Api = {
-          buildTxtFromHistory,
-          buildMdFromHistory,
-          buildJsonFromHistory,
-          downloadBlob,
-          // O-27 (защитный фикс): причина отказа точки скачивания (null — выдача разрешена) и
-          // сама точка отказа наружу — для пинов тестов и переиспользования вызывающим кодом.
-          aiCmDownloadBlockReason: downloadBlockReason,
-          aiCmDiagDownloadBlocked: diagDownloadBlocked,
-          // O-27/O-32: диагностические хелперы наружу (content.js/export-manager.js зовут их
-          // через window.AiCmExportBuilders, если глобальный utils/debug.js не подключён).
-          aiCmDiagOn: diagOn,
-          aiCmDiagHead: diagHead,
-          aiCmDiagDownload: diagDownload,
-          // O-35: рендер reasoning контрактом DeepSeek — чистая функция наружу (пины тестов
-          // и переиспользование; на боевом пути вызывается только двумя сборщиками выше).
-          aiCmMessageTextWithReasoning: messageTextWithReasoning,
-          aiCmWithReasoningSections: withReasoningSections,
-          // O-37 (C): источник размышления для маркерного пути (reasoning, иначе поле захвата
-          // hiddenReasoning) и композиция «текст сообщения + секции» — чистые функции наружу;
-          // на боевом пути их зовут только buildTxtFromHistory/buildMdFromHistory выше.
-          aiCmReasoningOfMessageForExport: reasoningOfMessageForExport,
-          aiCmMarkersMessageTextWithReasoning: markersMessageTextWithReasoning,
-          // O-36 (D2): маркеры ролей txt-экспорта — чистые предикаты наружу (пины тестов;
-          // на боевом пути вызываются только сборщиком buildTxtFromHistory выше).
-          aiCmTxtRoleMarker: txtRoleMarker,
-          aiCmIsTxtRoleMarkerHistory: isTxtRoleMarkerHistory,
-          aiCmTxtRoleMarkerSites: TXT_ROLE_MARKER_SITES,
-          // O-36 (D2.1): маркер роли md (Qwen Studio), текст сообщения для маркерного пути
-          // (с фолбэком на .content) и контейнер-чистка — чистые функции наружу для пинов
-          // и переиспользования; на боевом пути их зовут только два сборщика выше.
-          aiCmMdRoleMarker: mdRoleMarker,
-          aiCmMessageTextForMarkers: messageTextForMarkers,
-          aiCmDropContainerMessages: dropContainerMessages,
-          aiCmDiagTxtRoleStructure: diagTxtRoleStructure,
-          aiCmContainerRules: { minContained: CONTAINER_MIN_CONTAINED, coverMin: CONTAINER_COVER_MIN }
-        };
-        if (typeof module !== "undefined" && module.exports) module.exports = Api;
-        if (typeof window !== "undefined") window.AiCmExportBuilders = Api;
-      })();
-      (function() {
-        "use strict";
-        function safeSeg(s) {
-          return String(s == null ? "" : s).replace(/[^a-zA-Z0-9_-]+/g, "-").replace(/^-+|-+$/g, "");
-        }
-        function extractConvIdFromUrl(pathname) {
-          try {
-            var p = String(pathname || "");
-            var mPr = p.match(/\/prompts\/(?!new(?:_chat)?(?:\/|$)|apikey(?:\/|$))([A-Za-z0-9_-]+)/);
-            if (mPr) return mPr[1];
-            var mApp = p.match(/\/app\/(?!prompts(?:\/|$)|new(?:\/|$)|apikey(?:\/|$))([A-Za-z0-9_-]+)/);
-            if (mApp) return mApp[1];
-            var mDs = p.match(/\/a\/chat\/s\/([A-Za-z0-9_-]+)/);
-            if (mDs) return mDs[1];
-            var parts = p.split("/");
-            var chatIdx = parts.indexOf("chat");
-            if (chatIdx !== -1 && chatIdx + 1 < parts.length && parts[chatIdx + 1]) return parts[chatIdx + 1];
-            var mC = p.match(/\/c\/([A-Za-z0-9_-]+)/);
-            if (mC) return mC[1];
-            var mPs = p.match(/\/search\/([A-Za-z0-9_-]{8,})/);
-            if (mPs) return mPs[1];
-            var mP = p.match(/\/thread\/([A-Za-z0-9_-]+)/);
-            if (mP) return mP[1];
-            return "";
-          } catch (e) {
-            return "";
-          }
-        }
-        function normExportFmt(fmt) {
-          return fmt === "md" ? "md" : fmt === "json" ? "json" : "txt";
-        }
-        function exportPad2(n) {
-          return (n < 10 ? "0" : "") + n;
-        }
-        function convIdStamp(d) {
-          return d.getFullYear() + "-" + exportPad2(d.getMonth() + 1) + "-" + exportPad2(d.getDate()) + "_" + exportPad2(d.getHours()) + "-" + exportPad2(d.getMinutes());
-        }
-        function manualExportStamp(d) {
-          return d.getFullYear() + "-" + exportPad2(d.getMonth() + 1) + "-" + exportPad2(d.getDate()) + "-" + exportPad2(d.getHours()) + "-" + exportPad2(d.getMinutes());
-        }
-        function safeModelSeg(model) {
-          return String(model == null ? "" : model).replace(/[^a-zA-Z0-9_.-]+/g, "-").replace(/^-+|-+$/g, "") || "model";
-        }
-        function isFileNameTaken(taken, name) {
-          try {
-            if (!taken || !name) return false;
-            if (typeof Set !== "undefined" && taken instanceof Set) return taken.has(name);
-            if (Array.isArray(taken)) return taken.indexOf(name) !== -1;
-            if (typeof taken === "object") return Object.prototype.hasOwnProperty.call(taken, name);
-            return false;
-          } catch (e) {
-            return false;
-          }
-        }
-        function disambiguateFileName(name, taken) {
-          var base = String(name == null ? "" : name);
-          try {
-            if (!isFileNameTaken(taken, base)) return base;
-            var m = base.match(/^(.*)\.([A-Za-z0-9]+)$/);
-            var stem = m ? m[1] : base;
-            var ext = m ? "." + m[2] : "";
-            for (var i = 2; i <= 999; i++) {
-              var cand = stem + "-" + i + ext;
-              if (!isFileNameTaken(taken, cand)) return cand;
-            }
-            return stem + "-" + Date.now() + ext;
-          } catch (e) {
-            return base;
-          }
-        }
-        function buildAutoExportFileName(spec) {
-          var s = spec || {};
-          var lowConfPrefix = s.isLowConfidence === true ? "[LOW CONFIDENCE]_" : "";
-          var d = /* @__PURE__ */ new Date();
-          var base;
-          if (s.mask === "manual") {
-            var siteSeg = safeSeg(s.site) || "google_search";
-            base = "ai-context-monitor-" + siteSeg + "-" + safeModelSeg(s.model) + "-" + manualExportStamp(d);
-          } else {
-            var cidSeg = safeSeg(String(s.convId || "").slice(0, 8)) || "noconv";
-            var svcSeg = safeSeg(s.service) || "chat";
-            var suffix = "";
-            if (s.reason === "pre-trim") suffix = "-pretrim";
-            else if (s.reason === "base-complete") suffix = "-base-complete";
-            base = svcSeg + "-" + cidSeg + "-" + convIdStamp(d) + suffix;
-          }
-          return disambiguateFileName(lowConfPrefix + base + "." + normExportFmt(s.fmt), s.taken);
-        }
-        function buildExportFileName(service, convId, reason, isLowConfidence, fmt) {
-          return buildAutoExportFileName({
-            mask: "convId",
-            service,
-            convId,
-            reason,
-            isLowConfidence,
-            fmt,
-            taken: arguments.length > 5 ? arguments[5] : null
-          });
-        }
-        function buildGsaExportFileName(site, model, isLowConfidence, fmt) {
-          return buildAutoExportFileName({
-            mask: "manual",
-            site,
-            model,
-            isLowConfidence,
-            fmt,
-            taken: arguments.length > 4 ? arguments[4] : null
-          });
-        }
-        function resolveAutoExportConvId(site, urlConvId, threadId) {
-          var cid = String(urlConvId == null ? "" : urlConvId);
-          if (cid) return cid;
-          if (String(site == null ? "" : site) === "google_search") {
-            return String(threadId == null ? "" : threadId);
-          }
-          return "";
-        }
-        function notCompleteReason(state) {
-          var s = state || {};
-          if (s.site === "google_search" && s.probeRunning === true) return "probe-running";
-          return "not-complete";
-        }
-        function pickExportSource(hasBaseSeen, hasNetworkTexts) {
-          return hasBaseSeen === true ? "network" : "adapter";
-        }
-        function resolveExportSource(state) {
-          var s = state || {};
-          if (s.isGemini !== true) return { action: "local", reason: "non-gemini" };
-          if (s.bridge !== true) return { action: "local", reason: "no-bridge" };
-          var arch = typeof s.archiveCount === "number" && s.archiveCount > 0 ? s.archiveCount : 0;
-          if (arch <= 0) return { action: "local", reason: "no-archive" };
-          var live = typeof s.liveCount === "number" ? s.liveCount : null;
-          if (live === 0) return { action: "block", reason: "archive-only-base" };
-          var base = typeof s.baseCount === "number" ? s.baseCount : 0;
-          var local = typeof s.localCount === "number" ? s.localCount : 0;
-          if (live !== null && live > 0 && base > local) return { action: "union", reason: "stale-local-source" };
-          return { action: "local", reason: "in-sync" };
-        }
-        function sourceTierOf(state) {
-          var s = state || {};
-          var arch = typeof s.archiveCount === "number" && s.archiveCount > 0 ? s.archiveCount : 0;
-          var live = typeof s.liveCount === "number" && s.liveCount > 0 ? s.liveCount : 0;
-          if (arch > 0 && live > 0) return "[MERGED: ARCHIVE+LIVE]";
-          if (arch > 0) return "[ARCHIVE]";
-          return "[BEST-EFFORT: LIVE CAPTURE]";
-        }
-        function shouldSkipGsaPageGuard(state) {
-          var s = state || {};
-          if (s.site !== "google_search") return { skip: false, reason: null };
-          if (s.chatPageMarker === false) return { skip: true, reason: "not-chat-page" };
-          if (typeof s.msgCount === "number" && s.msgCount < 1) return { skip: true, reason: "no-messages" };
-          if (typeof s.baseTextLen === "number" && s.baseTextLen < 1) return { skip: true, reason: "empty-base" };
-          return { skip: false, reason: null };
-        }
-        function shouldSkipAutoExport(state) {
-          var s = state || {};
-          if (s.enabled !== true) return { skip: true, reason: "not-enabled", resetFired: false };
-          if (typeof s.percentage !== "number" || !(s.percentage >= 0)) return { skip: true, reason: "no-pct", resetFired: false };
-          var gsaPage = shouldSkipGsaPageGuard(s);
-          if (gsaPage.skip) return { skip: true, reason: gsaPage.reason, resetFired: false };
-          var threshold = typeof s.threshold === "number" && s.threshold >= 1 && s.threshold <= 100 ? s.threshold : 90;
-          var domBaseTrusted = s.domBaseTrusted === true;
-          var networkCompleteLatch = s.gsaNetworkCompleteLatch === true;
-          var completeOk = s.baseComplete === true || networkCompleteLatch;
-          var baseReady = completeOk || domBaseTrusted;
-          var basePending = s.isGemini !== true && s.baseSeen !== true && !domBaseTrusted && !networkCompleteLatch;
-          if (!baseReady && !basePending) return { skip: true, reason: "not-complete", resetFired: false };
-          if (s.historyIncomplete === true) return { skip: true, reason: "not-complete", resetFired: false };
-          if (s.isGemini === true && typeof s.archiveCount === "number" && s.archiveCount > 0 && typeof s.baseCount === "number" && s.baseCount <= s.archiveCount) {
-            return { skip: true, reason: "archive-pending-live", resetFired: false };
-          }
-          if (s.isGemini === true && s.loaderRunning) return { skip: true, reason: "loader-running", resetFired: false };
-          if (s.percentage < threshold - 10) {
-            if (s.isGemini === true || s.baseSeen === true) return { skip: true, reason: "below-threshold-hysteresis", resetFired: true };
-            return { skip: true, reason: "below-threshold-unreliable", resetFired: false };
-          }
-          if (s.percentage < threshold) return { skip: true, reason: "below-threshold", resetFired: false };
-          if (!baseReady && basePending) return { skip: true, reason: "base-pending", resetFired: false };
-          if (s.fired) return { skip: true, reason: "already-fired", resetFired: false };
-          return { skip: false, reason: null, resetFired: false };
-        }
-        function shouldSkipBaseCompleteTrigger(state) {
-          var s = state || {};
-          var threshold = typeof s.threshold === "number" && s.threshold >= 1 && s.threshold <= 100 ? s.threshold : 90;
-          if (typeof s.percentage !== "number" || !(s.percentage >= 0)) {
-            return { skip: true, reason: "no-pct", threshold };
-          }
-          if (s.percentage < threshold) {
-            return { skip: true, reason: "below-threshold-base-complete", threshold };
-          }
-          return { skip: false, reason: null, threshold };
-        }
-        function effectiveAutoExportThreshold(globalPct, perSitePct) {
-          function clampPerSite(v) {
-            var n = parseInt(v, 10);
-            if (isNaN(n)) return null;
-            if (n < 1) return 1;
-            if (n > 100) return 100;
-            return n;
-          }
-          if (perSitePct !== void 0 && perSitePct !== null && String(perSitePct).trim() !== "") {
-            var per = clampPerSite(perSitePct);
-            if (per != null) return per;
-          }
-          var g = typeof globalPct === "number" && globalPct >= 1 && globalPct <= 100 ? globalPct : null;
-          return g == null ? 90 : g;
-        }
-        function latchKey(service, convId) {
-          return safeSeg(service) + "|" + String(convId || "");
-        }
-        function markAutoExportFired(store, service, convId) {
-          try {
-            store[latchKey(service, convId)] = 1;
-          } catch (e) {
-          }
-        }
-        function getAutoExportFired(store, service, convId) {
-          try {
-            return store[latchKey(service, convId)] === 1;
-          } catch (e) {
-            return false;
-          }
-        }
-        function resetAutoExportFired(store, service, convId) {
-          try {
-            delete store[latchKey(service, convId)];
-          } catch (e) {
-          }
-        }
-        var FIRED_SESSION_PREFIX = "aiCmFired:";
-        function firedSessionKey(service, convId) {
-          return FIRED_SESSION_PREFIX + latchKey(service, convId);
-        }
-        function isFiredInSession(sessionMap, service, convId) {
-          try {
-            return !!sessionMap && sessionMap[firedSessionKey(service, convId)] === 1;
-          } catch (e) {
-            return false;
-          }
-        }
-        function sessionFiredPatch(service, convId) {
-          var patch = {};
-          try {
-            patch[firedSessionKey(service, convId)] = 1;
-          } catch (e) {
-          }
-          return patch;
-        }
-        function normalizeExportMessages(raw) {
-          var out = [];
-          try {
-            if (!Array.isArray(raw)) return out;
-            for (var i = 0; i < raw.length; i++) {
-              var m = raw[i] || {};
-              var text = typeof m.text === "string" ? m.text : typeof m.content === "string" ? m.content : "";
-              if (!text) continue;
-              var norm = { role: m.role === "user" || m.role === "human" ? "user" : "assistant", text };
-              if (typeof aiCmDiagLine2 === "function") {
-                aiCmDiagLine2("claude-role-normalize", { inputRole: m.role, outputRole: norm.role });
-              }
-              if (typeof m.hiddenReasoning === "string" && m.hiddenReasoning) norm.hiddenReasoning = m.hiddenReasoning;
-              out.push(norm);
-            }
-          } catch (e) {
-            swallow(e, "export-utils:normalizeExportMessages");
-          }
-          return out;
-        }
-        var RE_RAW_HEADING_LINE = /^[\s>*+\-\d.)\]]*#{1,}(?=\s|$)/;
-        var RE_MARKER_RESIDUE_LINE = /^[\s>*+\-\d.)\]]*#{1,}[\s]*$/;
-        var RE_CODE_FENCE_LINE = /^[\s>*+\-\d.)\]]*(`{3,}|~{3,})/;
-        var RE_LIST_MARK = /^(?:[-*+]|\d+[.)])[ \t]+/;
-        var RE_ANY_SPACE = /[\u00a0\u1680\u2000-\u200a\u202f\u205f\u3000\ufeff]/g;
-        function deSpaceAny(s) {
-          return String(s == null ? "" : s).replace(RE_ANY_SPACE, " ");
-        }
-        function coreOfLine(line) {
-          try {
-            var s = deSpaceAny(line);
-            if (RE_CODE_FENCE_LINE.test(s)) return "";
-            var prev;
-            do {
-              prev = s;
-              s = s.replace(/^[ \t]+/, "");
-              if (/^>[ \t]?/.test(s)) s = s.replace(/^>[ \t]?/, "");
-              else if (RE_LIST_MARK.test(s)) s = s.replace(RE_LIST_MARK, "");
-              else if (RE_RAW_HEADING_LINE.test(s)) s = s.replace(/^#{1,}[ \t]*/, "");
-            } while (s !== prev);
-            return s.replace(/[*_`~#>]+/g, " ").replace(/\s+/g, " ").trim();
-          } catch (e) {
-            return "";
-          }
-        }
-        function coreText(text) {
-          try {
-            var lines = deSpaceAny(text).split("\n");
-            var kept = [];
-            for (var i = 0; i < lines.length; i++) {
-              var c = coreOfLine(lines[i]);
-              if (c) kept.push(c);
-            }
-            return kept.join(" ");
-          } catch (e) {
-            return "";
-          }
-        }
-        function stripMarkerResidue(text) {
-          try {
-            var s = String(text == null ? "" : text);
-            if (s.indexOf("#") === -1) return s;
-            var lines = s.split("\n");
-            var kept = [];
-            var dropped = false;
-            for (var i = 0; i < lines.length; i++) {
-              if (RE_MARKER_RESIDUE_LINE.test(lines[i])) {
-                dropped = true;
-                continue;
-              }
-              kept.push(lines[i]);
-            }
-            return dropped ? kept.join("\n") : s;
-          } catch (e) {
-            return String(text == null ? "" : text);
-          }
-        }
-        function dedupeMessages(messages) {
-          var out = [];
-          var seen = {};
-          var removed = 0;
-          try {
-            if (!Array.isArray(messages)) return { messages: out, removed: 0 };
-            for (var i = 0; i < messages.length; i++) {
-              var m = messages[i] || {};
-              var role = m.role === "user" ? "user" : "assistant";
-              var text = typeof m.text === "string" ? m.text : "";
-              var key = role + "\0" + coreText(text);
-              if (Object.prototype.hasOwnProperty.call(seen, key)) {
-                removed++;
-                continue;
-              }
-              seen[key] = true;
-              var keep = { role, text };
-              if (m.id != null) keep.id = m.id;
-              out.push(keep);
-            }
-          } catch (e) {
-            swallow(e, "export-utils:dedupeMessages");
-          }
-          return { messages: out, removed };
-        }
-        var INTRA_CORE_MIN_LEN = 20;
-        function isRawMarkdownBlock(block) {
-          try {
-            var lines = String(block == null ? "" : block).split("\n");
-            for (var i = 0; i < lines.length; i++) {
-              if (RE_RAW_HEADING_LINE.test(lines[i])) return true;
-            }
-            return false;
-          } catch (e) {
-            return false;
-          }
-        }
-        function separateRawBlocks(text) {
-          return String(text).replace(/([^#\n])[ \t]*(#{1,6})(?=[ \t])/g, function(all, prev, hashes) {
-            if (hashes.length < 2 && !/[.!?;:»")\]]$/.test(prev)) return all;
-            return prev + "\n\n" + hashes;
-          });
-        }
-        function splitRawSections(block) {
-          try {
-            var lines = String(block == null ? "" : block).split("\n");
-            var out = [];
-            var cur = null;
-            for (var i = 0; i < lines.length; i++) {
-              if (RE_RAW_HEADING_LINE.test(lines[i])) {
-                if (cur) out.push(cur.join("\n"));
-                cur = [lines[i]];
-              } else if (cur) {
-                cur.push(lines[i]);
-              } else {
-                cur = [lines[i]];
-              }
-            }
-            if (cur) out.push(cur.join("\n"));
-            return out.length ? out : [String(block == null ? "" : block)];
-          } catch (e) {
-            return [String(block == null ? "" : block)];
-          }
-        }
-        function sepForSections(block) {
-          return /\n{2,}/.test(String(block == null ? "" : block)) ? "\n\n" : "\n";
-        }
-        function cutLeadingCopy(section, folded) {
-          var lines = String(section).split("\n");
-          if (lines.length < 2) return { text: String(section), trimmed: false };
-          var head = lines[0];
-          var body = lines.slice(1).join("\n");
-          var bodyNorm = normalizeIntraBlock(body);
-          var copyNorm = normalizeIntraBlock(folded);
-          if (!bodyNorm || !copyNorm) return { text: String(section), trimmed: false };
-          if (bodyNorm === copyNorm) return null;
-          if (bodyNorm.indexOf(copyNorm) === 0) {
-            var tail = bodyNorm.slice(copyNorm.length).replace(/^\s+/, "");
-            if (!tail) return null;
-            var lastWord = copyNorm.split(" ").pop();
-            var at = body.lastIndexOf(lastWord);
-            if (at < 0) return null;
-            var rest = body.slice(at + lastWord.length).replace(/^\s+/, "");
-            if (!rest) return null;
-            return { text: head + "\n" + rest, trimmed: true };
-          }
-          var cutIdx = corePrefixCutIndex(body, coreText(folded));
-          if (cutIdx < 0) return { text: String(section), trimmed: false };
-          var restCore = body.slice(cutIdx).replace(/^\s+/, "");
-          if (!restCore) return null;
-          return { text: head + "\n" + restCore, trimmed: true };
-        }
-        function corePrefixCutIndex(body, copyCore) {
-          try {
-            if (!copyCore) return -1;
-            if (coreText(body).indexOf(copyCore) !== 0) return -1;
-            var re = /(\S+)/g;
-            var m;
-            while ((m = re.exec(body)) !== null) {
-              var end = m.index + m[0].length;
-              var probe = coreText(body.slice(0, end));
-              if (probe === copyCore) return end;
-              if (probe.length > copyCore.length) return -1;
-            }
-            return -1;
-          } catch (e) {
-            return -1;
-          }
-        }
-        function renderedBeforeRaw(blocks, i, raw) {
-          for (var b = i - 1; b >= 0; b--) {
-            if (b === i || raw[b]) continue;
-            if (!coreText(blocks[b])) continue;
-            return String(blocks[b]);
-          }
-          return null;
-        }
-        function normalizeIntraBlock(block) {
-          return String(block == null ? "" : block).replace(/\s+/g, " ").trim();
-        }
-        function intraBlocksSimilar(a, b) {
-          var x = coreText(a);
-          var y = coreText(b);
-          if (!x || !y) return false;
-          if (x === y) return true;
-          var minLen = x.length < y.length ? x.length : y.length;
-          if (minLen < INTRA_CORE_MIN_LEN) return false;
-          return x.length >= y.length ? x.indexOf(y) !== -1 : y.indexOf(x) !== -1;
-        }
-        function dedupeIntraMessage(message) {
-          var text = message && typeof message.text === "string" ? message.text : "";
-          var removedBlocks = 0;
-          try {
-            let coreDup = function(core, selfIdx, minLen) {
-              if (!core) return false;
-              if (seenCore[core]) return true;
-              if (core.length < minLen) return false;
-              for (var q = 0; q < blocks.length; q++) {
-                if (q === selfIdx || drop[q] || raw[q] || !norm[q]) continue;
-                if (intraBlocksSimilar(core, blocks[q])) return true;
-              }
-              return false;
-            };
-            if (!text) return { text, removedBlocks: 0 };
-            var seam = separateRawBlocks(text);
-            var blocks = seam.split(/\n{2,}/);
-            if (blocks.length < 2) return { text, removedBlocks: 0 };
-            var norm = [];
-            var raw = [];
-            var i;
-            for (i = 0; i < blocks.length; i++) {
-              norm.push(coreText(blocks[i]));
-              raw.push(isRawMarkdownBlock(blocks[i]));
-            }
-            var drop = {};
-            var seen = /* @__PURE__ */ Object.create(null);
-            for (i = 0; i < blocks.length; i++) {
-              if (!norm[i]) continue;
-              if (seen[norm[i]]) {
-                drop[i] = true;
-                removedBlocks++;
-                continue;
-              }
-              seen[norm[i]] = true;
-            }
-            var seenCore = /* @__PURE__ */ Object.create(null);
-            var cores = [];
-            for (i = 0; i < blocks.length; i++) {
-              cores.push(coreOfBlock(blocks[i]));
-              if (drop[i] || raw[i] || !norm[i]) continue;
-              if (cores[i]) seenCore[cores[i]] = true;
-            }
-            for (i = 0; i < blocks.length; i++) {
-              if (drop[i] || !raw[i]) continue;
-              if (coreDup(cores[i], i, INTRA_CORE_MIN_LEN)) {
-                drop[i] = true;
-                removedBlocks++;
-                continue;
-              }
-              var secs = splitRawSections(blocks[i]);
-              var folded = renderedBeforeRaw(blocks, i, raw);
-              if (folded === null) continue;
-              var cutSecs = 0;
-              var keptSecs = [];
-              for (var s = 0; s < secs.length; s++) {
-                if (coreDup(coreOfBlock(secs[s]), i, 0)) {
-                  cutSecs++;
-                  continue;
-                }
-                var cut = cutLeadingCopy(secs[s], folded);
-                if (cut === null) {
-                  cutSecs++;
-                  continue;
-                }
-                if (cut.trimmed) cutSecs++;
-                keptSecs.push(cut.text);
-              }
-              if (cutSecs === 0) continue;
-              removedBlocks += cutSecs;
-              if (keptSecs.length === 0) {
-                drop[i] = true;
-                continue;
-              }
-              blocks[i] = keptSecs.join(sepForSections(blocks[i])).replace(/^\n+/, "");
-              norm[i] = coreText(blocks[i]);
-              cores[i] = coreOfBlock(blocks[i]);
-              raw[i] = isRawMarkdownBlock(blocks[i]);
-            }
-            for (i = 0; i < blocks.length; i++) {
-              if (drop[i] || !raw[i]) continue;
-              var coreRaw = cores[i];
-              if (coreRaw.length < INTRA_CORE_MIN_LEN) continue;
-              for (var j = i + 1; j < blocks.length; j++) {
-                if (drop[j] || raw[j]) continue;
-                if (intraBlocksSimilar(coreRaw, blocks[j])) {
-                  drop[i] = true;
-                  removedBlocks++;
-                  break;
-                }
-              }
-            }
-            if (removedBlocks === 0) return { text, removedBlocks: 0 };
-            var kept = [];
-            for (i = 0; i < blocks.length; i++) {
-              if (!drop[i]) kept.push(blocks[i]);
-            }
-            return { text: kept.join("\n\n"), removedBlocks };
-          } catch (e) {
-            swallow(e, "export-utils:dedupeIntraMessage");
-          }
-          return { text, removedBlocks: 0 };
-        }
-        function coreOfBlock(block) {
-          try {
-            var lines = String(block == null ? "" : block).split("\n");
-            var kept = [];
-            for (var i = 0; i < lines.length; i++) {
-              if (RE_RAW_HEADING_LINE.test(lines[i])) continue;
-              kept.push(lines[i]);
-            }
-            return coreText(kept.join("\n"));
-          } catch (e) {
-            return coreText(block);
-          }
-        }
-        var CROSS_RAW_MIN_LINES = 2;
-        var CROSS_RAW_MIN_CHARS = 80;
-        function blockLinePair(block) {
-          var raw = deSpaceAny(block).split("\n");
-          var core = [];
-          for (var i = 0; i < raw.length; i++) core.push(coreOfLine(raw[i]));
-          return trimPairEdges(raw, core);
-        }
-        function trimPairEdges(raw, core) {
-          var a = 0, b = raw.length;
-          while (a < b && !core[a]) a++;
-          while (b > a && !core[b - 1]) b--;
-          return { raw: raw.slice(a, b), core: core.slice(a, b) };
-        }
-        function cutPairHead(pair, n) {
-          return trimPairEdges(pair.raw.slice(n), pair.core.slice(n));
-        }
-        function cutPairTail(pair, n) {
-          var k = pair.raw.length - n;
-          return trimPairEdges(pair.raw.slice(0, k), pair.core.slice(0, k));
-        }
-        function trimEdgeEmpty(lines) {
-          var a = lines.slice();
-          while (a.length && !a[0]) a.shift();
-          while (a.length && !a[a.length - 1]) a.pop();
-          return a;
-        }
-        function seqEqual(a, b) {
-          if (a.length !== b.length) return false;
-          for (var i = 0; i < a.length; i++) {
-            if (a[i] !== b[i]) return false;
-          }
-          return true;
-        }
-        function seqIsPrefix(shortArr, longArr) {
-          if (!shortArr.length || shortArr.length >= longArr.length) return false;
-          for (var i = 0; i < shortArr.length; i++) {
-            if (shortArr[i] !== longArr[i]) return false;
-          }
-          return true;
-        }
-        function seqIsSuffix(shortArr, longArr) {
-          if (!shortArr.length || shortArr.length >= longArr.length) return false;
-          var off = longArr.length - shortArr.length;
-          for (var i = 0; i < shortArr.length; i++) {
-            if (shortArr[i] !== longArr[off + i]) return false;
-          }
-          return true;
-        }
-        function crossCopyIsSubstantial(lines) {
-          var ls = trimEdgeEmpty(lines);
-          var nonEmpty = 0;
-          var chars = 0;
-          for (var i = 0; i < ls.length; i++) {
-            if (!ls[i]) continue;
-            nonEmpty++;
-            chars += ls[i].length;
-          }
-          return nonEmpty >= CROSS_RAW_MIN_LINES && chars >= CROSS_RAW_MIN_CHARS;
-        }
-        function dedupeCrossRawCopies(messages) {
-          var out = [];
-          var removed = 0;
-          var refs = [];
-          try {
-            var src = Array.isArray(messages) ? messages : [];
-            for (var i = 0; i < src.length; i++) {
-              var m = src[i] || {};
-              var text = typeof m.text === "string" ? m.text : "";
-              if (!text) {
-                out.push(m);
-                continue;
-              }
-              var blocks = separateRawBlocks(text).split(/\n{2,}/);
-              var keptBlocks = [];
-              var touched = false;
-              for (var b = 0; b < blocks.length; b++) {
-                if (!isRawMarkdownBlock(blocks[b])) {
-                  keptBlocks.push(blocks[b]);
-                  continue;
-                }
-                var pair = blockLinePair(blocks[b]);
-                var origJoin = pair.raw.join("\n");
-                var dropped = false;
-                var changed = true;
-                while (changed && !dropped) {
-                  changed = false;
-                  for (var r = 0; r < refs.length; r++) {
-                    var ref = refs[r];
-                    if (seqEqual(ref, pair.core)) {
-                      if (!crossCopyIsSubstantial(ref)) continue;
-                      dropped = true;
-                      removed++;
-                      break;
-                    }
-                    if (seqIsSuffix(ref, pair.core) && crossCopyIsSubstantial(ref)) {
-                      pair = cutPairTail(pair, ref.length);
-                      changed = true;
-                      break;
-                    }
-                    if (seqIsPrefix(ref, pair.core) && crossCopyIsSubstantial(ref)) {
-                      pair = cutPairHead(pair, ref.length);
-                      changed = true;
-                      break;
-                    }
-                  }
-                  if (!dropped && !pair.raw.length) {
-                    dropped = true;
-                    removed++;
-                  }
-                }
-                if (dropped || !pair.raw.length) {
-                  touched = true;
-                  continue;
-                }
-                var rebuilt = pair.raw.join("\n");
-                if (rebuilt !== origJoin) touched = true;
-                keptBlocks.push(rebuilt);
-                if (isRawMarkdownBlock(rebuilt)) refs.push(pair.core);
-              }
-              var keep = { role: m.role === "user" ? "user" : "assistant", text: touched ? keptBlocks.join("\n\n") : text };
-              if (m.id != null) keep.id = m.id;
-              out.push(keep);
-            }
-          } catch (e) {
-            return { messages: Array.isArray(messages) ? messages : [], removed: 0 };
-          }
-          return { messages: out, removed };
-        }
-        function prepareExportMessages(raw, onMessageDedupe) {
-          var intraRemoved = 0;
-          var out = [];
-          try {
-            var src = Array.isArray(raw) ? raw : [];
-            for (var i = 0; i < src.length; i++) {
-              var m = src[i] || {};
-              var role = m.role === "user" ? "user" : "assistant";
-              var text = typeof m.text === "string" ? m.text : "";
-              var res = dedupeIntraMessage({ role, text });
-              var next = { role, text: res.text };
-              if (m.id != null) next.id = m.id;
-              out.push(next);
-              if (res.removedBlocks > 0) {
-                intraRemoved += res.removedBlocks;
-                if (typeof onMessageDedupe === "function") {
-                  try {
-                    onMessageDedupe(role, res.removedBlocks);
-                  } catch (eCb) {
-                  }
-                }
-              }
-            }
-          } catch (e) {
-            out = Array.isArray(raw) ? raw : [];
-            intraRemoved = 0;
-          }
-          var inter = dedupeMessages(out);
-          var cross = dedupeCrossRawCopies(inter.messages);
-          var cleaned = [];
-          for (var k = 0; k < cross.messages.length; k++) {
-            var mk = cross.messages[k] || {};
-            var clean = {
-              role: mk.role === "user" ? "user" : "assistant",
-              text: stripMarkerResidue(typeof mk.text === "string" ? mk.text : "")
-            };
-            if (mk.id != null) clean.id = mk.id;
-            cleaned.push(clean);
-          }
-          return {
-            messages: cleaned,
-            intraRemoved,
-            removed: inter.removed + cross.removed,
-            crossRemoved: cross.removed
-          };
-        }
-        var VISIBLE_USER_PROMPT_START = "<!-- deepseek-pp-visible-user-prompt:start -->";
-        var VISIBLE_USER_PROMPT_END = "<!-- deepseek-pp-visible-user-prompt:end -->";
-        var VISIBLE_USER_PROMPT_VALUE = "<!-- deepseek-pp-visible-user-prompt:value=";
-        function countMarker(text, marker) {
-          var n = 0;
-          var at = text.indexOf(marker);
-          while (at !== -1) {
-            n++;
-            at = text.indexOf(marker, at + marker.length);
-          }
-          return n;
-        }
-        function injectedUserTextSkipReason(text) {
-          var s = typeof text === "string" ? text : String(text == null ? "" : text);
-          var starts = countMarker(s, VISIBLE_USER_PROMPT_START);
-          var ends = countMarker(s, VISIBLE_USER_PROMPT_END);
-          if (starts === 0 && ends === 0) {
-            return s.indexOf(VISIBLE_USER_PROMPT_VALUE) !== -1 ? "value-only" : "no-markers";
-          }
-          if (starts === 1 && ends === 1) {
-            return s.indexOf(VISIBLE_USER_PROMPT_END) < s.indexOf(VISIBLE_USER_PROMPT_START) ? "unpaired-markers" : null;
-          }
-          if (starts > 1 || ends > 1) return "multiple-pairs";
-          return "unpaired-markers";
-        }
-        function sanitizeInjectedUserText(text) {
-          var s = typeof text === "string" ? text : String(text == null ? "" : text);
-          if (injectedUserTextSkipReason(s) !== null) return s;
-          var from = s.indexOf(VISIBLE_USER_PROMPT_START) + VISIBLE_USER_PROMPT_START.length;
-          var to = s.indexOf(VISIBLE_USER_PROMPT_END, from);
-          return s.slice(from, to).trim();
-        }
-        var BDS_OPEN_TAG = "<BetterDeepSeek>";
-        var BDS_CLOSE_TAG = "</BetterDeepSeek>";
-        var BDS_TRUNCATION_MARK = "...[truncated]";
-        var BDS_BOM = "\uFEFF";
-        function bdsDiagLine(tag, fields) {
-          try {
-            if (typeof aiCmDiagLine2 !== "function") return false;
-            return aiCmDiagLine2(tag, fields) !== false;
-          } catch (eDiag) {
-            return false;
-          }
-        }
-        function bdsDiagSlice(text, from, n) {
-          try {
-            var s = typeof text === "string" ? text : String(text == null ? "" : text);
-            return JSON.stringify(from === 0 ? s.slice(0, n) : s.slice(Math.max(0, s.length - n)));
-          } catch (eSlice) {
-            return '""';
-          }
-        }
-        var BDS_INJECTION_FORMS = [
-          {
-            id: "bds-deep-code-prompt",
-            match: "exact",
-            head: "[DEEP_CODE_MODE_ACTIVE]",
-            basis: "artifact 1-257 (message), 999-1191 / 1223-1415 (span in <original_task>)"
-          },
-          {
-            id: "bds-tool-system-prompt",
-            match: "exact",
-            head: "You are Better DeepSeek. You have access to specialized tools.",
-            basis: "artifact 259-947 (message)"
-          },
-          {
-            id: "bds-system-datetime",
-            match: "prefix",
-            head: "User's System Date & Time: ",
-            basis: "artifact 980-982 (message; line 981)"
-          }
-        ];
-        var BDS_WRAPPER_ID = "bds-prompt-wrapper";
-        function isBdsOpenTagLine(line, at) {
-          if (line === BDS_OPEN_TAG) return true;
-          return at === 0 && line === BDS_BOM + BDS_OPEN_TAG;
-        }
-        function bdsFormOfHeadLine(line) {
-          var s = typeof line === "string" ? line : "";
-          for (var i = 0; i < BDS_INJECTION_FORMS.length; i++) {
-            var f = BDS_INJECTION_FORMS[i];
-            if (f.match === "prefix") {
-              if (s.slice(0, f.head.length) === f.head) return f;
-            } else if (s === f.head) return f;
-          }
-          return null;
-        }
-        function bdsFirstContentLine(lines) {
-          for (var i = 0; i < lines.length; i++) {
-            if (String(lines[i]).trim() !== "") return i;
-          }
-          return -1;
-        }
-        function bdsLastContentLine(lines) {
-          for (var i = lines.length - 1; i >= 0; i--) {
-            if (String(lines[i]).trim() !== "") return i;
-          }
-          return -1;
-        }
-        function sanitizeBetterDeepSeekText(text) {
-          var s = typeof text === "string" ? text : String(text == null ? "" : text);
-          if (s.indexOf(BDS_OPEN_TAG) === -1) return { text: s, removed: 0, forms: [] };
-          var lines = s.split("\n");
-          var drop = {};
-          var forms = [];
-          var diagRows = typeof aiCmDiagLine2 === "function" ? [] : null;
-          var firstLine = bdsFirstContentLine(lines);
-          var lastLine = bdsLastContentLine(lines);
-          for (var k = 0; k < lines.length; k++) {
-            if (!isBdsOpenTagLine(lines[k], k)) continue;
-            var form = k + 1 < lines.length ? bdsFormOfHeadLine(lines[k + 1]) : null;
-            if (form) {
-              var end = -1;
-              for (var j = k + 2; j < lines.length; j++) {
-                if (isBdsOpenTagLine(lines[j], j)) break;
-                if (lines[j] === BDS_CLOSE_TAG || lines[j] === BDS_TRUNCATION_MARK) {
-                  end = j;
-                  break;
-                }
-              }
-              if (end === -1) {
-                if (diagRows) diagRows.push({ k, first: firstLine, pair: -1, last: lastLine, form: form.id, skip: "no-boundary" });
-                continue;
-              }
-              if (diagRows) diagRows.push({ k, first: firstLine, pair: end, last: lastLine, form: form.id, skip: "(\u043D\u0435\u0442)" });
-              for (var d = k; d <= end; d++) drop[d] = true;
-              forms.push(form.id);
-              k = end;
-              continue;
-            }
-            var pair = -1;
-            for (var p = k + 1; p < lines.length; p++) {
-              if (isBdsOpenTagLine(lines[p], p)) break;
-              if (lines[p] === BDS_CLOSE_TAG) {
-                pair = p;
-                break;
-              }
-            }
-            if (pair === -1) {
-              if (diagRows) diagRows.push({ k, first: firstLine, pair: -1, last: lastLine, form: "(\u043D\u0435\u0442)", skip: "unpaired-tag" });
-              continue;
-            }
-            if (diagRows) diagRows.push({ k, first: firstLine, pair, last: lastLine, form: BDS_WRAPPER_ID, skip: "(\u043D\u0435\u0442)" });
-            drop[k] = true;
-            drop[pair] = true;
-            forms.push(BDS_WRAPPER_ID);
-            k = pair;
-          }
-          var removedTotal = forms.length;
-          if (diagRows) {
-            for (var r = 0; r < diagRows.length; r++) {
-              bdsDiagLine("o40-bds-line", {
-                k: diagRows[r].k,
-                firstLine: diagRows[r].first,
-                pair: diagRows[r].pair,
-                lastLine: diagRows[r].last,
-                form: diagRows[r].form,
-                skip: diagRows[r].skip,
-                removed: removedTotal
-              });
-            }
-          }
-          if (!forms.length) return { text: s, removed: 0, forms: [] };
-          var kept = [];
-          for (var m = 0; m < lines.length; m++) {
-            if (!drop[m]) kept.push(lines[m]);
-          }
-          return { text: kept.join("\n"), removed: forms.length, forms };
-        }
-        var TC_LFR_OPEN = "<local_file_read>";
-        var TC_LFR_CLOSE = "</local_file_read>";
-        var TC_TASK_OPEN = "<original_task>";
-        var TC_TASK_CLOSE = "</original_task>";
-        var TC_RESULTS_OPEN = "<tool_results>";
-        var TC_RESULTS_CLOSE = "</tool_results>";
-        var TC_PROSE_ANCHOR = "These are the tool results just executed for the tool-continuation task.";
-        var TC_ENVELOPE_FORMS = [
-          {
-            id: "tc-local-file-read",
-            rule: "pair",
-            open: TC_LFR_OPEN,
-            close: TC_LFR_CLOSE,
-            boundary: "\u043E\u0442 \u0441\u0442\u0440\u043E\u043A\u0438 \u043E\u0442\u043A\u0440\u044B\u0432\u0430\u044E\u0449\u0435\u0433\u043E \u0442\u0435\u0433\u0430 \u0434\u043E \u0441\u0442\u0440\u043E\u043A\u0438 \u0437\u0430\u043A\u0440\u044B\u0432\u0430\u044E\u0449\u0435\u0433\u043E; \u0441\u043D\u0438\u043C\u0430\u0435\u0442\u0441\u044F, \u043A\u043E\u0433\u0434\u0430 \u043F\u0430\u0440\u0430 \u2014 \u0446\u0435\u043B\u043E\u0435 \u0441\u043E\u043E\u0431\u0449\u0435\u043D\u0438\u0435 (\u0441\u043F\u0430\u043D \u0432\u043D\u0443\u0442\u0440\u0438 \u0441\u043E\u043E\u0431\u0449\u0435\u043D\u0438\u044F \u2014 \u0431\u0430\u0439\u0442\u043E\u0432\u043E: \u0438\u0437\u043C\u0435\u0440\u0435\u043D\u0438\u044F \u0441\u043F\u0430\u043D\u0430 \u0432 \u0430\u0440\u0442\u0435\u0444\u0430\u043A\u0442\u0435 \u043D\u0435\u0442)",
-            scope: "tool-request",
-            basis: "artifact 10-19 msg 1/3/9/11/13 lines 1-3 (whole message, role=assistant)"
-          },
-          {
-            id: "tc-prose-continuation",
-            rule: "run",
-            openPrefix: TC_PROSE_ANCHOR,
-            boundary: "\u043E\u0442 \u0441\u0442\u0440\u043E\u043A\u0438-\u044F\u043A\u043E\u0440\u044F \u0434\u043E \u043F\u043E\u0441\u043B\u0435\u0434\u043D\u0435\u0439 \u043D\u0435\u043F\u0443\u0441\u0442\u043E\u0439 \u0441\u0442\u0440\u043E\u043A\u0438 \u043F\u0440\u043E\u0437\u044B (\u043F\u0435\u0440\u0435\u0434 \u043F\u0443\u0441\u0442\u043E\u0439 \u0441\u0442\u0440\u043E\u043A\u043E\u0439)",
-            scope: "envelope",
-            basis: "artifact 10-19 msg 2/4/7/8/10/12/14 lines 1-9"
-          },
-          {
-            id: "tc-original-task",
-            rule: "pair",
-            open: TC_TASK_OPEN,
-            close: TC_TASK_CLOSE,
-            boundary: "\u043E\u0442 <original_task> \u0434\u043E </original_task>; \u043F\u0443\u0441\u0442\u0430\u044F \u043F\u0430\u0440\u0430 11-12 \u2014 \u0442\u0430 \u0436\u0435 \u0433\u0440\u0430\u043D\u0438\u0446\u0430",
-            scope: "envelope",
-            basis: "artifact 10-19 msg 2/4 lines 11-12 (empty), msg 7/8/10/12/14 lines 11-17"
-          },
-          {
-            id: "tc-tool-results",
-            rule: "pair",
-            open: TC_RESULTS_OPEN,
-            close: TC_RESULTS_CLOSE,
-            boundary: "\u043E\u0442 <tool_results> \u0434\u043E </tool_results>; \u0432 \u0430\u0440\u0442\u0435\u0444\u0430\u043A\u0442\u0435 \u0437\u0430\u043A\u0440\u044B\u0432\u0430\u044E\u0449\u0438\u0439 \u0442\u0435\u0433 \u2014 \u043F\u043E\u0441\u043B\u0435\u0434\u043D\u044F\u044F \u0441\u0442\u0440\u043E\u043A\u0430 \u0441\u043E\u043E\u0431\u0449\u0435\u043D\u0438\u044F (7/7)",
-            scope: "envelope",
-            basis: "artifact 10-19 msg 2/4 lines 14-26 / 14-35, msg 7/8/10/12/14 lines 19-66"
-          }
-        ];
-        function tcPairAfter(lines, from, open, close) {
-          for (var i = Math.max(0, from); i < lines.length; i++) {
-            if (lines[i] !== open) continue;
-            for (var j = i + 1; j < lines.length; j++) {
-              if (lines[j] === close) return { open: i, close: j };
-            }
-            return null;
-          }
-          return null;
-        }
-        function tcIsWholeMessagePair(lines, pair) {
-          var i;
-          for (i = 0; i < pair.open; i++) {
-            if (String(lines[i]).trim() !== "") return false;
-          }
-          for (i = pair.close + 1; i < lines.length; i++) {
-            if (String(lines[i]).trim() !== "") return false;
-          }
-          return true;
-        }
-        function tcProseAnchorLine(lines) {
-          for (var i = 0; i < lines.length; i++) {
-            if (String(lines[i]).slice(0, TC_PROSE_ANCHOR.length) === TC_PROSE_ANCHOR) return i;
-          }
-          return -1;
-        }
-        function sanitizeToolContinuationText(text) {
-          var s = typeof text === "string" ? text : String(text == null ? "" : text);
-          if (s.indexOf(TC_LFR_OPEN) === -1 && s.indexOf(TC_TASK_OPEN) === -1 && s.indexOf(TC_RESULTS_OPEN) === -1 && s.indexOf(TC_PROSE_ANCHOR) === -1) {
-            return { text: s, removed: 0, forms: [] };
-          }
-          var lines = s.split("\n");
-          var drop = {};
-          var forms = [];
-          var anchor = tcProseAnchorLine(lines);
-          if (anchor !== -1) {
-            var runEnd = anchor;
-            for (var p = anchor + 1; p < lines.length; p++) {
-              if (String(lines[p]).trim() === "") break;
-              runEnd = p;
-            }
-            var spanEnd = runEnd;
-            var afterRun = runEnd + 1;
-            var task = tcPairAfter(lines, afterRun, TC_TASK_OPEN, TC_TASK_CLOSE);
-            if (task) {
-              spanEnd = task.close;
-              afterRun = task.close + 1;
-            }
-            var results = tcPairAfter(lines, afterRun, TC_RESULTS_OPEN, TC_RESULTS_CLOSE);
-            if (results) {
-              spanEnd = results.close;
-            }
-            for (var d = anchor; d <= spanEnd; d++) drop[d] = true;
-            forms.push("tc-prose-continuation");
-            if (task) forms.push("tc-original-task");
-            if (results) forms.push("tc-tool-results");
-          }
-          for (var k = 0; k < lines.length; k++) {
-            if (drop[k] || lines[k] !== TC_LFR_OPEN) continue;
-            var lfr = tcPairAfter(lines, k, TC_LFR_OPEN, TC_LFR_CLOSE);
-            if (!lfr) continue;
-            if (!tcIsWholeMessagePair(lines, lfr)) {
-              k = lfr.close;
-              continue;
-            }
-            for (var d2 = lfr.open; d2 <= lfr.close; d2++) drop[d2] = true;
-            forms.push("tc-local-file-read");
-            k = lfr.close;
-          }
-          if (!forms.length) return { text: s, removed: 0, forms: [] };
-          var kept = [];
-          for (var m = 0; m < lines.length; m++) {
-            if (!drop[m]) kept.push(lines[m]);
-          }
-          return { text: kept.join("\n"), removed: forms.length, forms };
-        }
-        var SECTION_REASONING_TAG = "[REASONING]";
-        var SECTION_ANSWER_TAG = "[ANSWER]";
-        function stripReasoningSections(text) {
-          var s = typeof text === "string" ? text : String(text == null ? "" : text);
-          if (s.indexOf(SECTION_REASONING_TAG) === -1 || s.indexOf(SECTION_ANSWER_TAG) === -1) return s;
-          var out = "";
-          var i = 0;
-          var changed = false;
-          while (i < s.length) {
-            var a = s.indexOf(SECTION_ANSWER_TAG, i);
-            if (a === -1) {
-              out += s.slice(i);
-              break;
-            }
-            var r = a > 0 ? s.lastIndexOf(SECTION_REASONING_TAG, a - 1) : -1;
-            if (r === -1 || r < i) {
-              out += s.slice(i, a + SECTION_ANSWER_TAG.length);
-              i = a + SECTION_ANSWER_TAG.length;
-              continue;
-            }
-            out += s.slice(i, r);
-            i = a + SECTION_ANSWER_TAG.length;
-            if (s.charAt(i) === "\r" && s.charAt(i + 1) === "\n") i += 2;
-            else if (s.charAt(i) === "\n") i += 1;
-            changed = true;
-          }
-          return changed ? out : s;
-        }
-        var REASONING_SECTION_PAIR_RE = /^\s*\[REASONING\]\r?\n([\s\S]*?)\r?\n\r?\n\[ANSWER\]\r?\n([\s\S]*)$/;
-        function diagTag(tag, fields) {
-          try {
-            if (typeof aiCmDiagLine2 !== "function") return false;
-            return aiCmDiagLine2(tag, fields) !== false;
-          } catch (eDiag) {
-            return false;
-          }
-        }
-        function splitReasoningSections(text) {
-          var s = typeof text === "string" ? text : String(text == null ? "" : text);
-          var m = REASONING_SECTION_PAIR_RE.exec(s);
-          if (m) return { reasoning: m[1].replace(/\s+$/, ""), answer: m[2] };
-          var r = s.indexOf(SECTION_REASONING_TAG);
-          var a = s.indexOf(SECTION_ANSWER_TAG);
-          if (r !== -1 && a !== -1) {
-            diagTag("reasoning-marker-in-prose", { len: s.length, r, a });
-          }
-          return { reasoning: "", answer: s };
-        }
-        function applyReasoningExportFields(messages, enabled) {
-          var changed = 0;
-          try {
-            if (enabled !== true || !Array.isArray(messages)) return { changed: 0 };
-            for (var i = 0; i < messages.length; i++) {
-              var m = messages[i];
-              if (!m || typeof m !== "object") continue;
-              var text = typeof m.text === "string" ? m.text : "";
-              var reasoning = typeof m.reasoning === "string" ? m.reasoning : "";
-              var captured = typeof m.hiddenReasoning === "string" ? m.hiddenReasoning : "";
-              if (!reasoning) reasoning = captured;
-              if (!reasoning && text && m.role !== "user") {
-                var pair = splitReasoningSections(text);
-                if (pair && pair.reasoning) {
-                  reasoning = pair.reasoning;
-                  text = pair.answer;
-                }
-              }
-              if (!reasoning) continue;
-              if (!captured && text === m.text) continue;
-              var next = {};
-              for (var k in m) {
-                if (Object.prototype.hasOwnProperty.call(m, k)) next[k] = m[k];
-              }
-              next.text = text;
-              next.reasoning = reasoning;
-              if (next.hiddenReasoning) delete next.hiddenReasoning;
-              messages[i] = next;
-              changed++;
-            }
-          } catch (eApply) {
-            return { changed };
-          }
-          return { changed };
-        }
-        var TOOL_RESULTS_OPEN = "[TOOL_RESULTS]";
-        var TOOL_RESULTS_CLOSE = "[/TOOL_RESULTS]";
-        var TOOL_RESULTS_TAIL = "Continue answering based on the tool results above.";
-        function isToolResultsOnlyText(text) {
-          try {
-            var s = typeof text === "string" ? text : String(text == null ? "" : text);
-            var t = s.trim();
-            if (t.indexOf(TOOL_RESULTS_OPEN) !== 0) return false;
-            var close = t.indexOf(TOOL_RESULTS_CLOSE);
-            if (close === -1) return false;
-            var rest = t.slice(close + TOOL_RESULTS_CLOSE.length).trim();
-            if (rest === TOOL_RESULTS_TAIL) rest = "";
-            return rest === "";
-          } catch (e) {
-            return false;
-          }
-        }
-        var TOOL_CALL_TAG_NAMES = [
-          "browser_navigate",
-          "browser_go_back",
-          "browser_go_forward",
-          "browser_refresh",
-          "browser_list_tabs",
-          "browser_select_tab",
-          "browser_close_tab",
-          "browser_snapshot",
-          "browser_click",
-          "browser_hover",
-          "browser_fill",
-          "browser_fill_form",
-          "browser_key",
-          "browser_type",
-          "browser_attach_file",
-          "browser_wait_for",
-          "browser_handle_dialog",
-          "browser_evaluate_script",
-          "memory_save",
-          "memory_update",
-          "memory_delete",
-          "web_search",
-          "web_fetch"
-        ];
-        var TOOL_CALL_TAG_ALT = "(?:" + TOOL_CALL_TAG_NAMES.join("|") + "|shell_\\w+|python_\\w+|skill_\\w+)";
-        var RE_TOOL_CALL_BLOCK = new RegExp(
-          "<(" + TOOL_CALL_TAG_ALT + ")(?:\\s[^>]*)?>[\\s\\S]*?<\\/\\1\\s*>\\s*",
-          "g"
-        );
-        function stripToolCallBlocks(text) {
-          var s = typeof text === "string" ? text : String(text == null ? "" : text);
-          if (s.indexOf("<") === -1) return s;
-          RE_TOOL_CALL_BLOCK.lastIndex = 0;
-          var out = s.replace(RE_TOOL_CALL_BLOCK, "");
-          if (out === s) return s;
-          return out.replace(/\s+$/, "");
-        }
-        function isEmptyExportText(text) {
-          try {
-            return String(text == null ? "" : text).trim() === "";
-          } catch (e) {
-            return false;
-          }
-        }
-        function copyMessageWithText(message, text) {
-          var keep = {};
-          for (var k in message) {
-            if (Object.prototype.hasOwnProperty.call(message, k)) keep[k] = message[k];
-          }
-          keep.text = text;
-          return keep;
-        }
-        function sanitizeEmitMessages(messages) {
-          var out = [];
-          var sanitized = 0;
-          var skipped = [];
-          var dropped = 0;
-          var bdsRemoved = 0;
-          var bdsForms = [];
-          var tcRemoved = 0;
-          var tcForms = [];
-          try {
-            var src = Array.isArray(messages) ? messages : [];
-            for (var i = 0; i < src.length; i++) {
-              var m = stripHiddenFields(src[i]);
-              if (!m || typeof m !== "object") {
-                bdsDiagLine("o40-emit-msg", { i, len: 0, head: bdsDiagSlice("", 0, 40), tail: bdsDiagSlice("", 1, 40), called: 0, removed: 0 });
-                out.push(m);
-                continue;
-              }
-              var raw = typeof m.text === "string" ? m.text : "";
-              if (typeof aiCmDiagOn === "function" && aiCmDiagOn() && m.role === "user" && isToolResultsOnlyText(raw)) {
-                bdsDiagLine("o40-emit-msg", { i, len: raw.length, head: bdsDiagSlice(raw, 0, 40), tail: bdsDiagSlice(raw, 1, 40), called: 0, removed: 0 });
-              }
-              if (m.role === "user" && isToolResultsOnlyText(raw)) {
-                dropped++;
-                continue;
-              }
-              var bare = stripReasoningSections(raw);
-              if (bare !== raw) m = copyMessageWithText(m, bare);
-              var bdsIn = typeof m.text === "string" ? m.text : "";
-              var bds = sanitizeBetterDeepSeekText(bdsIn);
-              bdsDiagLine("o40-emit-msg", { i, len: bdsIn.length, head: bdsDiagSlice(bdsIn, 0, 40), tail: bdsDiagSlice(bdsIn, 1, 40), called: 1, removed: bds.removed });
-              if (bds.removed > 0) {
-                m = copyMessageWithText(m, bds.text);
-                bdsRemoved += bds.removed;
-                for (var bf = 0; bf < bds.forms.length; bf++) bdsForms.push(bds.forms[bf]);
-              }
-              var tc = sanitizeToolContinuationText(typeof m.text === "string" ? m.text : "");
-              if (tc.removed > 0) {
-                m = copyMessageWithText(m, tc.text);
-                tcRemoved += tc.removed;
-                for (var tf = 0; tf < tc.forms.length; tf++) tcForms.push(tc.forms[tf]);
-              }
-              if (m.role !== "user") {
-                var cut = stripToolCallBlocks(typeof m.text === "string" ? m.text : "");
-                if (cut !== m.text) m = copyMessageWithText(m, cut);
-              } else {
-                var text = typeof m.text === "string" ? m.text : "";
-                var reason = injectedUserTextSkipReason(text);
-                if (reason !== null) {
-                  skipped.push(reason);
-                } else {
-                  m = copyMessageWithText(m, sanitizeInjectedUserText(text));
-                  sanitized++;
-                }
-              }
-              if (isEmptyExportText(typeof m.text === "string" ? m.text : "")) {
-                dropped++;
-                continue;
-              }
-              out.push(m);
-            }
-          } catch (e) {
-            return {
-              messages: Array.isArray(messages) ? messages : [],
-              sanitized: 0,
-              skipped: [],
-              dropped: 0,
-              bdsRemoved: 0,
-              bdsForms: [],
-              tcRemoved: 0,
-              tcForms: []
-            };
-          }
-          return {
-            messages: out,
-            sanitized,
-            skipped,
-            dropped,
-            bdsRemoved,
-            bdsForms,
-            tcRemoved,
-            tcForms
-          };
-        }
-        var HIDDEN_REASONING_TAG = SECTION_REASONING_TAG;
-        var HIDDEN_ANSWER_TAG = SECTION_ANSWER_TAG;
-        function hasHiddenFields(message) {
-          try {
-            if (!message || typeof message !== "object") return false;
-            return Object.prototype.hasOwnProperty.call(message, "hiddenReasoning") || Object.prototype.hasOwnProperty.call(message, "hiddenInjection");
-          } catch (e) {
-            return false;
-          }
-        }
-        function hiddenReasoningOf(message) {
-          try {
-            var r = message && typeof message.hiddenReasoning === "string" ? message.hiddenReasoning : "";
-            return r.trim();
-          } catch (e) {
-            return "";
-          }
-        }
-        function withoutHiddenFields(message) {
-          var keep = {};
-          for (var k in message) {
-            if (!Object.prototype.hasOwnProperty.call(message, k)) continue;
-            if (k === "hiddenReasoning" || k === "hiddenInjection") continue;
-            keep[k] = message[k];
-          }
-          return keep;
-        }
-        function stripHiddenFields(message) {
-          if (!message || typeof message !== "object") return message;
-          return hasHiddenFields(message) ? withoutHiddenFields(message) : message;
-        }
-        function hasReasoningInSource(messages) {
-          var src = Array.isArray(messages) ? messages : [];
-          for (var i = 0; i < src.length; i++) {
-            var m = src[i];
-            if (!m || typeof m !== "object") continue;
-            var reasoning = typeof m.reasoning === "string" ? m.reasoning : "";
-            if (reasoning.trim() !== "") return true;
-            var text = typeof m.text === "string" ? m.text : "";
-            if (text.indexOf(SECTION_REASONING_TAG) !== -1) return true;
-          }
-          return false;
-        }
-        function effectiveReasoningToggle(userToggle, sourceHasReasoning, site) {
-          if (userToggle === true) return true;
-          if (site === "qwen" || site === "deepseek") return false;
-          return sourceHasReasoning === true;
-        }
-        function includeHiddenExportBlocks(messages) {
-          var src = Array.isArray(messages) ? messages : [];
-          var out = [];
-          for (var i = 0; i < src.length; i++) {
-            var m = src[i];
-            if (!m || typeof m !== "object" || !hasHiddenFields(m)) {
-              out.push(m);
-              continue;
-            }
-            var keep = withoutHiddenFields(m);
-            var reasoning = hiddenReasoningOf(m);
-            var text = typeof keep.text === "string" ? keep.text : "";
-            if (reasoning && text.indexOf(reasoning) === -1) {
-              keep.text = HIDDEN_REASONING_TAG + "\n" + reasoning + "\n\n" + HIDDEN_ANSWER_TAG + "\n" + text;
-            }
-            out.push(keep);
-          }
-          return out;
-        }
-        function unionTurnsById(existing, incoming) {
-          var seen = {};
-          var out = [];
-          var i, t;
-          for (i = 0; existing && i < existing.length; i++) {
-            t = existing[i];
-            if (!t || t.id == null || seen[t.id]) continue;
-            seen[t.id] = true;
-            out.push(t);
-          }
-          for (i = 0; incoming && i < incoming.length; i++) {
-            t = incoming[i];
-            if (!t || t.id == null || seen[t.id]) continue;
-            seen[t.id] = true;
-            out.push(t);
-          }
-          return out;
-        }
-        var Api = {
-          buildAutoExportFileName,
-          disambiguateFileName,
-          isFileNameTaken,
-          buildExportFileName,
-          buildGsaExportFileName,
-          resolveAutoExportConvId,
-          notCompleteReason,
-          shouldSkipGsaPageGuard,
-          shouldSkipAutoExport,
-          shouldSkipBaseCompleteTrigger,
-          effectiveAutoExportThreshold,
-          pickExportSource,
-          resolveExportSource,
-          // Two-Tier (v89): метка достоверности источника файла — чистая функция наружу
-          // (её зовёт core/export-manager.js:aiCmGetSourceTier).
-          sourceTierOf,
-          markAutoExportFired,
-          getAutoExportFired,
-          resetAutoExportFired,
-          firedSessionKey,
-          isFiredInSession,
-          sessionFiredPatch,
-          extractConvIdFromUrl,
-          normalizeExportMessages,
-          coreText,
-          stripMarkerResidue,
-          dedupeMessages,
-          dedupeIntraMessage,
-          dedupeCrossRawCopies,
-          separateRawBlocks,
-          prepareExportMessages,
-          sanitizeInjectedUserText,
-          injectedUserTextSkipReason,
-          sanitizeEmitMessages,
-          // O-40: инъекции соседнего расширения Better DeepSeek — чистые функции и таблица
-          // измеренных форм наружу (пины D/R нового тест-файла читают формы из таблицы).
-          sanitizeBetterDeepSeekText,
-          betterDeepSeekForms: BDS_INJECTION_FORMS,
-          bdsWrapperFormId: BDS_WRAPPER_ID,
-          // O-42: агентный конверт Better DeepSeek (tool-continuation) — чистая функция и таблица
-          // измеренных дескрипторов конверта наружу (пины D/R нового тест-файла читают таблицу).
-          sanitizeToolContinuationText,
-          toolContinuationForms: TC_ENVELOPE_FORMS,
-          // O-7 (OFF): урезание секций reasoning на выходе экспорта — чистая функция наружу.
-          stripReasoningSections,
-          // O-37 (C): обратное преобразование пары [REASONING]/[ANSWER] в отдельные поля
-          // (reasoning/answer) — чистая функция наружу (переиспользуется точкой сбора экспорта).
-          splitReasoningSections,
-          // O-37 (C): нормализация размышления на выходе точки сбора экспорта (по месту, по флагу
-          // сайта) — чистая функция наружу; на боевом пути её зовёт core/export-manager.js.
-          applyReasoningExportFields,
-          // O-7 (OFF, S3/S4): служебный тул-мусор DeepSeek++ — чистые функции наружу.
-          isToolResultsOnlyText,
-          stripToolCallBlocks,
-          // O-7: hidden-блоки DeepSeek (сырой режим экспорта) — чистые функции наружу.
-          includeHiddenExportBlocks,
-          stripHiddenFields,
-          hiddenReasoningOf,
-          // D-O41: авто-ON тумблера при наличии reasoning в источнике — чистые функции наружу
-          // (пины S/D нового тест-файла; на боевом пути их зовёт core/export-manager.js).
-          hasReasoningInSource,
-          effectiveReasoningToggle,
-          unionTurnsById,
-          latchKey
-        };
-        if (typeof module !== "undefined" && module.exports) module.exports = Api;
-        if (typeof window !== "undefined") window.AiCmExportEmitPipeline = Api;
-      })();
       var currentAdapter = null;
       var observer = null;
       var isInitialized = false;
@@ -8307,8 +7020,8 @@
         });
       }
       (function() {
-        var Api = {};
-        Object.defineProperty(Api, "currentAdapter", {
+        const Api3 = {};
+        Object.defineProperty(Api3, "currentAdapter", {
           enumerable: true,
           get: function() {
             return currentAdapter;
@@ -8317,7 +7030,7 @@
             currentAdapter = value;
           }
         });
-        Object.defineProperty(Api, "observer", {
+        Object.defineProperty(Api3, "observer", {
           enumerable: true,
           get: function() {
             return observer;
@@ -8326,7 +7039,7 @@
             observer = value;
           }
         });
-        Object.defineProperty(Api, "isInitialized", {
+        Object.defineProperty(Api3, "isInitialized", {
           enumerable: true,
           get: function() {
             return isInitialized;
@@ -8335,7 +7048,7 @@
             isInitialized = value;
           }
         });
-        Object.defineProperty(Api, "lastPercentage", {
+        Object.defineProperty(Api3, "lastPercentage", {
           enumerable: true,
           get: function() {
             return lastPercentage;
@@ -8344,7 +7057,7 @@
             lastPercentage = value;
           }
         });
-        Object.defineProperty(Api, "updateTimer", {
+        Object.defineProperty(Api3, "updateTimer", {
           enumerable: true,
           get: function() {
             return updateTimer;
@@ -8353,7 +7066,7 @@
             updateTimer = value;
           }
         });
-        Object.defineProperty(Api, "widgetElement", {
+        Object.defineProperty(Api3, "widgetElement", {
           enumerable: true,
           get: function() {
             return widgetElement;
@@ -8362,7 +7075,7 @@
             widgetElement = value;
           }
         });
-        Object.defineProperty(Api, "lastWidgetData", {
+        Object.defineProperty(Api3, "lastWidgetData", {
           enumerable: true,
           get: function() {
             return lastWidgetData;
@@ -8371,7 +7084,7 @@
             lastWidgetData = value;
           }
         });
-        Object.defineProperty(Api, "badgeSuppressed", {
+        Object.defineProperty(Api3, "badgeSuppressed", {
           enumerable: true,
           get: function() {
             return badgeSuppressed;
@@ -8380,7 +7093,7 @@
             badgeSuppressed = value;
           }
         });
-        Object.defineProperty(Api, "maxTokenCount", {
+        Object.defineProperty(Api3, "maxTokenCount", {
           enumerable: true,
           get: function() {
             return maxTokenCount;
@@ -8389,7 +7102,7 @@
             maxTokenCount = value;
           }
         });
-        Object.defineProperty(Api, "restoredTapeLoaded", {
+        Object.defineProperty(Api3, "restoredTapeLoaded", {
           enumerable: true,
           get: function() {
             return restoredTapeLoaded;
@@ -8398,7 +7111,7 @@
             restoredTapeLoaded = value;
           }
         });
-        Object.defineProperty(Api, "restoreDone", {
+        Object.defineProperty(Api3, "restoreDone", {
           enumerable: true,
           get: function() {
             return restoreDone;
@@ -8407,7 +7120,7 @@
             restoreDone = value;
           }
         });
-        Object.defineProperty(Api, "cacheRefreshPlanned", {
+        Object.defineProperty(Api3, "cacheRefreshPlanned", {
           enumerable: true,
           get: function() {
             return cacheRefreshPlanned;
@@ -8416,7 +7129,7 @@
             cacheRefreshPlanned = value;
           }
         });
-        Object.defineProperty(Api, "tapeRestoreSeen", {
+        Object.defineProperty(Api3, "tapeRestoreSeen", {
           enumerable: true,
           get: function() {
             return tapeRestoreSeen;
@@ -8425,7 +7138,7 @@
             tapeRestoreSeen = value;
           }
         });
-        Object.defineProperty(Api, "aiCmTapeAccountIdx", {
+        Object.defineProperty(Api3, "aiCmTapeAccountIdx", {
           enumerable: true,
           get: function() {
             return aiCmTapeAccountIdx;
@@ -8434,7 +7147,7 @@
             aiCmTapeAccountIdx = value;
           }
         });
-        Object.defineProperty(Api, "aiCmRestoredDispatched", {
+        Object.defineProperty(Api3, "aiCmRestoredDispatched", {
           enumerable: true,
           get: function() {
             return aiCmRestoredDispatched;
@@ -8443,7 +7156,7 @@
             aiCmRestoredDispatched = value;
           }
         });
-        Object.defineProperty(Api, "baseText", {
+        Object.defineProperty(Api3, "baseText", {
           enumerable: true,
           get: function() {
             return baseText;
@@ -8452,7 +7165,7 @@
             baseText = value;
           }
         });
-        Object.defineProperty(Api, "baseCount", {
+        Object.defineProperty(Api3, "baseCount", {
           enumerable: true,
           get: function() {
             return baseCount;
@@ -8461,7 +7174,7 @@
             baseCount = value;
           }
         });
-        Object.defineProperty(Api, "baseSeen", {
+        Object.defineProperty(Api3, "baseSeen", {
           enumerable: true,
           get: function() {
             return baseSeen;
@@ -8470,7 +7183,7 @@
             baseSeen = value;
           }
         });
-        Object.defineProperty(Api, "baseComplete", {
+        Object.defineProperty(Api3, "baseComplete", {
           enumerable: true,
           get: function() {
             return baseComplete;
@@ -8479,7 +7192,7 @@
             baseComplete = value;
           }
         });
-        Object.defineProperty(Api, "lastBounded", {
+        Object.defineProperty(Api3, "lastBounded", {
           enumerable: true,
           get: function() {
             return lastBounded;
@@ -8488,7 +7201,7 @@
             lastBounded = value;
           }
         });
-        Object.defineProperty(Api, "lastTailSig", {
+        Object.defineProperty(Api3, "lastTailSig", {
           enumerable: true,
           get: function() {
             return lastTailSig;
@@ -8497,7 +7210,7 @@
             lastTailSig = value;
           }
         });
-        Object.defineProperty(Api, "lastBaseSig", {
+        Object.defineProperty(Api3, "lastBaseSig", {
           enumerable: true,
           get: function() {
             return lastBaseSig;
@@ -8506,7 +7219,7 @@
             lastBaseSig = value;
           }
         });
-        Object.defineProperty(Api, "lastEmitSig", {
+        Object.defineProperty(Api3, "lastEmitSig", {
           enumerable: true,
           get: function() {
             return lastEmitSig;
@@ -8515,7 +7228,7 @@
             lastEmitSig = value;
           }
         });
-        Object.defineProperty(Api, "lastDrawSig", {
+        Object.defineProperty(Api3, "lastDrawSig", {
           enumerable: true,
           get: function() {
             return lastDrawSig;
@@ -8524,7 +7237,7 @@
             lastDrawSig = value;
           }
         });
-        Object.defineProperty(Api, "lastHybridTailSig", {
+        Object.defineProperty(Api3, "lastHybridTailSig", {
           enumerable: true,
           get: function() {
             return lastHybridTailSig;
@@ -8533,7 +7246,7 @@
             lastHybridTailSig = value;
           }
         });
-        Object.defineProperty(Api, "lastMetricSig", {
+        Object.defineProperty(Api3, "lastMetricSig", {
           enumerable: true,
           get: function() {
             return lastMetricSig;
@@ -8542,7 +7255,7 @@
             lastMetricSig = value;
           }
         });
-        Object.defineProperty(Api, "notCompleteLogged", {
+        Object.defineProperty(Api3, "notCompleteLogged", {
           enumerable: true,
           get: function() {
             return notCompleteLogged;
@@ -8551,7 +7264,7 @@
             notCompleteLogged = value;
           }
         });
-        Object.defineProperty(Api, "aiCmLoaderFreeze", {
+        Object.defineProperty(Api3, "aiCmLoaderFreeze", {
           enumerable: true,
           get: function() {
             return aiCmLoaderFreeze;
@@ -8560,7 +7273,7 @@
             aiCmLoaderFreeze = value;
           }
         });
-        Object.defineProperty(Api, "baseIdSet", {
+        Object.defineProperty(Api3, "baseIdSet", {
           enumerable: true,
           get: function() {
             return baseIdSet;
@@ -8569,7 +7282,7 @@
             baseIdSet = value;
           }
         });
-        Object.defineProperty(Api, "lastBaseIds", {
+        Object.defineProperty(Api3, "lastBaseIds", {
           enumerable: true,
           get: function() {
             return lastBaseIds;
@@ -8578,7 +7291,7 @@
             lastBaseIds = value;
           }
         });
-        Object.defineProperty(Api, "lastBaseTexts", {
+        Object.defineProperty(Api3, "lastBaseTexts", {
           enumerable: true,
           get: function() {
             return lastBaseTexts;
@@ -8587,7 +7300,7 @@
             lastBaseTexts = value;
           }
         });
-        Object.defineProperty(Api, "baseSkelSet", {
+        Object.defineProperty(Api3, "baseSkelSet", {
           enumerable: true,
           get: function() {
             return baseSkelSet;
@@ -8596,7 +7309,7 @@
             baseSkelSet = value;
           }
         });
-        Object.defineProperty(Api, "baseAnchors", {
+        Object.defineProperty(Api3, "baseAnchors", {
           enumerable: true,
           get: function() {
             return baseAnchors;
@@ -8605,7 +7318,7 @@
             baseAnchors = value;
           }
         });
-        Object.defineProperty(Api, "ANCHOR_MIN", {
+        Object.defineProperty(Api3, "ANCHOR_MIN", {
           enumerable: true,
           get: function() {
             return ANCHOR_MIN;
@@ -8614,7 +7327,7 @@
             ANCHOR_MIN = value;
           }
         });
-        Object.defineProperty(Api, "stale", {
+        Object.defineProperty(Api3, "stale", {
           enumerable: true,
           get: function() {
             return stale;
@@ -8623,7 +7336,7 @@
             stale = value;
           }
         });
-        Object.defineProperty(Api, "staleTimer", {
+        Object.defineProperty(Api3, "staleTimer", {
           enumerable: true,
           get: function() {
             return staleTimer;
@@ -8632,7 +7345,7 @@
             staleTimer = value;
           }
         });
-        Object.defineProperty(Api, "lastDetailMessages", {
+        Object.defineProperty(Api3, "lastDetailMessages", {
           enumerable: true,
           get: function() {
             return lastDetailMessages;
@@ -8641,7 +7354,7 @@
             lastDetailMessages = value;
           }
         });
-        Object.defineProperty(Api, "lastHistoryWroteKey", {
+        Object.defineProperty(Api3, "lastHistoryWroteKey", {
           enumerable: true,
           get: function() {
             return lastHistoryWroteKey;
@@ -8650,7 +7363,7 @@
             lastHistoryWroteKey = value;
           }
         });
-        Object.defineProperty(Api, "lastThreadId", {
+        Object.defineProperty(Api3, "lastThreadId", {
           enumerable: true,
           get: function() {
             return lastThreadId;
@@ -8659,7 +7372,7 @@
             lastThreadId = value;
           }
         });
-        Object.defineProperty(Api, "detectedModelSlug", {
+        Object.defineProperty(Api3, "detectedModelSlug", {
           enumerable: true,
           get: function() {
             return detectedModelSlug;
@@ -8668,7 +7381,7 @@
             detectedModelSlug = value;
           }
         });
-        Object.defineProperty(Api, "lastResolvedModelId", {
+        Object.defineProperty(Api3, "lastResolvedModelId", {
           enumerable: true,
           get: function() {
             return lastResolvedModelId;
@@ -8677,7 +7390,7 @@
             lastResolvedModelId = value;
           }
         });
-        Object.defineProperty(Api, "lastSnapshotModelName", {
+        Object.defineProperty(Api3, "lastSnapshotModelName", {
           enumerable: true,
           get: function() {
             return lastSnapshotModelName;
@@ -8686,7 +7399,7 @@
             lastSnapshotModelName = value;
           }
         });
-        Object.defineProperty(Api, "netAttachTokens", {
+        Object.defineProperty(Api3, "netAttachTokens", {
           enumerable: true,
           get: function() {
             return netAttachTokens;
@@ -8695,7 +7408,7 @@
             netAttachTokens = value;
           }
         });
-        Object.defineProperty(Api, "netAttachBreak", {
+        Object.defineProperty(Api3, "netAttachBreak", {
           enumerable: true,
           get: function() {
             return netAttachBreak;
@@ -8704,7 +7417,7 @@
             netAttachBreak = value;
           }
         });
-        Object.defineProperty(Api, "netServerTokens", {
+        Object.defineProperty(Api3, "netServerTokens", {
           enumerable: true,
           get: function() {
             return netServerTokens;
@@ -8713,7 +7426,7 @@
             netServerTokens = value;
           }
         });
-        Object.defineProperty(Api, "netEffectiveLen", {
+        Object.defineProperty(Api3, "netEffectiveLen", {
           enumerable: true,
           get: function() {
             return netEffectiveLen;
@@ -8722,7 +7435,7 @@
             netEffectiveLen = value;
           }
         });
-        Object.defineProperty(Api, "exactCountEnabled", {
+        Object.defineProperty(Api3, "exactCountEnabled", {
           enumerable: true,
           get: function() {
             return exactCountEnabled;
@@ -8731,7 +7444,7 @@
             exactCountEnabled = value;
           }
         });
-        Object.defineProperty(Api, "geminiApiKey", {
+        Object.defineProperty(Api3, "geminiApiKey", {
           enumerable: true,
           get: function() {
             return geminiApiKey;
@@ -8740,7 +7453,7 @@
             geminiApiKey = value;
           }
         });
-        Object.defineProperty(Api, "lastCountTokensText", {
+        Object.defineProperty(Api3, "lastCountTokensText", {
           enumerable: true,
           get: function() {
             return lastCountTokensText;
@@ -8749,7 +7462,7 @@
             lastCountTokensText = value;
           }
         });
-        Object.defineProperty(Api, "lastCountTokensCache", {
+        Object.defineProperty(Api3, "lastCountTokensCache", {
           enumerable: true,
           get: function() {
             return lastCountTokensCache;
@@ -8758,7 +7471,7 @@
             lastCountTokensCache = value;
           }
         });
-        Object.defineProperty(Api, "lastCountTokensConvId", {
+        Object.defineProperty(Api3, "lastCountTokensConvId", {
           enumerable: true,
           get: function() {
             return lastCountTokensConvId;
@@ -8767,7 +7480,7 @@
             lastCountTokensConvId = value;
           }
         });
-        Object.defineProperty(Api, "lastCountTokensErrorText", {
+        Object.defineProperty(Api3, "lastCountTokensErrorText", {
           enumerable: true,
           get: function() {
             return lastCountTokensErrorText;
@@ -8776,7 +7489,7 @@
             lastCountTokensErrorText = value;
           }
         });
-        Object.defineProperty(Api, "countTokensTimer", {
+        Object.defineProperty(Api3, "countTokensTimer", {
           enumerable: true,
           get: function() {
             return countTokensTimer;
@@ -8785,7 +7498,7 @@
             countTokensTimer = value;
           }
         });
-        Object.defineProperty(Api, "countTokensPending", {
+        Object.defineProperty(Api3, "countTokensPending", {
           enumerable: true,
           get: function() {
             return countTokensPending;
@@ -8794,7 +7507,7 @@
             countTokensPending = value;
           }
         });
-        Object.defineProperty(Api, "safePct", {
+        Object.defineProperty(Api3, "safePct", {
           enumerable: true,
           get: function() {
             return safePct;
@@ -8803,7 +7516,7 @@
             safePct = value;
           }
         });
-        Object.defineProperty(Api, "popupRawModel", {
+        Object.defineProperty(Api3, "popupRawModel", {
           enumerable: true,
           get: function() {
             return popupRawModel;
@@ -8812,7 +7525,7 @@
             popupRawModel = value;
           }
         });
-        Object.defineProperty(Api, "popupRawPct", {
+        Object.defineProperty(Api3, "popupRawPct", {
           enumerable: true,
           get: function() {
             return popupRawPct;
@@ -8821,7 +7534,7 @@
             popupRawPct = value;
           }
         });
-        Object.defineProperty(Api, "popupModelId", {
+        Object.defineProperty(Api3, "popupModelId", {
           enumerable: true,
           get: function() {
             return popupModelId;
@@ -8830,7 +7543,7 @@
             popupModelId = value;
           }
         });
-        Object.defineProperty(Api, "popupLimitPct", {
+        Object.defineProperty(Api3, "popupLimitPct", {
           enumerable: true,
           get: function() {
             return popupLimitPct;
@@ -8839,7 +7552,7 @@
             popupLimitPct = value;
           }
         });
-        Object.defineProperty(Api, "aiCmLastDomEmitSig", {
+        Object.defineProperty(Api3, "aiCmLastDomEmitSig", {
           enumerable: true,
           get: function() {
             return aiCmLastDomEmitSig;
@@ -8848,7 +7561,7 @@
             aiCmLastDomEmitSig = value;
           }
         });
-        Object.defineProperty(Api, "aiCmLastDomEmitConvId", {
+        Object.defineProperty(Api3, "aiCmLastDomEmitConvId", {
           enumerable: true,
           get: function() {
             return aiCmLastDomEmitConvId;
@@ -8857,7 +7570,7 @@
             aiCmLastDomEmitConvId = value;
           }
         });
-        Object.defineProperty(Api, "lastEmitConvId", {
+        Object.defineProperty(Api3, "lastEmitConvId", {
           enumerable: true,
           get: function() {
             return lastEmitConvId;
@@ -8866,7 +7579,7 @@
             lastEmitConvId = value;
           }
         });
-        Object.defineProperty(Api, "lastSnapConvId", {
+        Object.defineProperty(Api3, "lastSnapConvId", {
           enumerable: true,
           get: function() {
             return lastSnapConvId;
@@ -8875,7 +7588,7 @@
             lastSnapConvId = value;
           }
         });
-        Object.defineProperty(Api, "aiCmConvSourceByConv", {
+        Object.defineProperty(Api3, "aiCmConvSourceByConv", {
           enumerable: true,
           get: function() {
             return aiCmConvSourceByConv;
@@ -8884,7 +7597,7 @@
             aiCmConvSourceByConv = value;
           }
         });
-        Object.defineProperty(Api, "aiCmArchiveLoadStarted", {
+        Object.defineProperty(Api3, "aiCmArchiveLoadStarted", {
           enumerable: true,
           get: function() {
             return aiCmArchiveLoadStarted;
@@ -8893,7 +7606,7 @@
             aiCmArchiveLoadStarted = value;
           }
         });
-        Object.defineProperty(Api, "aiCmArchiveRestoredDispatched", {
+        Object.defineProperty(Api3, "aiCmArchiveRestoredDispatched", {
           enumerable: true,
           get: function() {
             return aiCmArchiveRestoredDispatched;
@@ -8902,7 +7615,7 @@
             aiCmArchiveRestoredDispatched = value;
           }
         });
-        Object.defineProperty(Api, "aiCmArchiveCountByConv", {
+        Object.defineProperty(Api3, "aiCmArchiveCountByConv", {
           enumerable: true,
           get: function() {
             return aiCmArchiveCountByConv;
@@ -8911,7 +7624,7 @@
             aiCmArchiveCountByConv = value;
           }
         });
-        Object.defineProperty(Api, "aiCmSourceLabelNow", {
+        Object.defineProperty(Api3, "aiCmSourceLabelNow", {
           enumerable: true,
           get: function() {
             return aiCmSourceLabelNow;
@@ -8920,7 +7633,7 @@
             aiCmSourceLabelNow = value;
           }
         });
-        Object.defineProperty(Api, "autoExportSettings", {
+        Object.defineProperty(Api3, "autoExportSettings", {
           enumerable: true,
           get: function() {
             return autoExportSettings;
@@ -8929,7 +7642,7 @@
             autoExportSettings = value;
           }
         });
-        Object.defineProperty(Api, "aiCmAutoExportFlagMissingLogged", {
+        Object.defineProperty(Api3, "aiCmAutoExportFlagMissingLogged", {
           enumerable: true,
           get: function() {
             return aiCmAutoExportFlagMissingLogged;
@@ -8938,7 +7651,7 @@
             aiCmAutoExportFlagMissingLogged = value;
           }
         });
-        Object.defineProperty(Api, "autoExportFired", {
+        Object.defineProperty(Api3, "autoExportFired", {
           enumerable: true,
           get: function() {
             return autoExportFired;
@@ -8947,7 +7660,7 @@
             autoExportFired = value;
           }
         });
-        Object.defineProperty(Api, "aiCmAutoExportFiredOnce", {
+        Object.defineProperty(Api3, "aiCmAutoExportFiredOnce", {
           enumerable: true,
           get: function() {
             return aiCmAutoExportFiredOnce;
@@ -8956,7 +7669,7 @@
             aiCmAutoExportFiredOnce = value;
           }
         });
-        Object.defineProperty(Api, "aiCmAutoExportLastLogState", {
+        Object.defineProperty(Api3, "aiCmAutoExportLastLogState", {
           enumerable: true,
           get: function() {
             return aiCmAutoExportLastLogState;
@@ -8965,7 +7678,7 @@
             aiCmAutoExportLastLogState = value;
           }
         });
-        Object.defineProperty(Api, "autoExportPctBySite", {
+        Object.defineProperty(Api3, "autoExportPctBySite", {
           enumerable: true,
           get: function() {
             return autoExportPctBySite;
@@ -8974,7 +7687,7 @@
             autoExportPctBySite = value;
           }
         });
-        Object.defineProperty(Api, "aiCmGsaNetworkCompleteLatch", {
+        Object.defineProperty(Api3, "aiCmGsaNetworkCompleteLatch", {
           enumerable: true,
           get: function() {
             return aiCmGsaNetworkCompleteLatch;
@@ -8983,7 +7696,7 @@
             aiCmGsaNetworkCompleteLatch = value;
           }
         });
-        Object.defineProperty(Api, "aiCmGsaNetworkCompleteThreadId", {
+        Object.defineProperty(Api3, "aiCmGsaNetworkCompleteThreadId", {
           enumerable: true,
           get: function() {
             return aiCmGsaNetworkCompleteThreadId;
@@ -8992,7 +7705,7 @@
             aiCmGsaNetworkCompleteThreadId = value;
           }
         });
-        Object.defineProperty(Api, "autoExportLastConvId", {
+        Object.defineProperty(Api3, "autoExportLastConvId", {
           enumerable: true,
           get: function() {
             return autoExportLastConvId;
@@ -9001,7 +7714,7 @@
             autoExportLastConvId = value;
           }
         });
-        Object.defineProperty(Api, "aiCmLoaderRunningByConv", {
+        Object.defineProperty(Api3, "aiCmLoaderRunningByConv", {
           enumerable: true,
           get: function() {
             return aiCmLoaderRunningByConv;
@@ -9010,7 +7723,7 @@
             aiCmLoaderRunningByConv = value;
           }
         });
-        Object.defineProperty(Api, "autoExportLastPct", {
+        Object.defineProperty(Api3, "autoExportLastPct", {
           enumerable: true,
           get: function() {
             return autoExportLastPct;
@@ -9019,7 +7732,7 @@
             autoExportLastPct = value;
           }
         });
-        Object.defineProperty(Api, "aiCmPendingHistWrite", {
+        Object.defineProperty(Api3, "aiCmPendingHistWrite", {
           enumerable: true,
           get: function() {
             return aiCmPendingHistWrite;
@@ -9028,7 +7741,7 @@
             aiCmPendingHistWrite = value;
           }
         });
-        Object.defineProperty(Api, "aiCmCursorLiveByConv", {
+        Object.defineProperty(Api3, "aiCmCursorLiveByConv", {
           enumerable: true,
           get: function() {
             return aiCmCursorLiveByConv;
@@ -9037,7 +7750,7 @@
             aiCmCursorLiveByConv = value;
           }
         });
-        Object.defineProperty(Api, "aiCmBaseConfirmedByConv", {
+        Object.defineProperty(Api3, "aiCmBaseConfirmedByConv", {
           enumerable: true,
           get: function() {
             return aiCmBaseConfirmedByConv;
@@ -9046,7 +7759,7 @@
             aiCmBaseConfirmedByConv = value;
           }
         });
-        Object.defineProperty(Api, "aiCmLowConfidenceByConv", {
+        Object.defineProperty(Api3, "aiCmLowConfidenceByConv", {
           enumerable: true,
           get: function() {
             return aiCmLowConfidenceByConv;
@@ -9055,7 +7768,7 @@
             aiCmLowConfidenceByConv = value;
           }
         });
-        Object.defineProperty(Api, "aiCmPartialSoftByConv", {
+        Object.defineProperty(Api3, "aiCmPartialSoftByConv", {
           enumerable: true,
           get: function() {
             return aiCmPartialSoftByConv;
@@ -9064,7 +7777,7 @@
             aiCmPartialSoftByConv = value;
           }
         });
-        Object.defineProperty(Api, "aiCmLateCheckByConv", {
+        Object.defineProperty(Api3, "aiCmLateCheckByConv", {
           enumerable: true,
           get: function() {
             return aiCmLateCheckByConv;
@@ -9073,7 +7786,7 @@
             aiCmLateCheckByConv = value;
           }
         });
-        Object.defineProperty(Api, "trimProbe", {
+        Object.defineProperty(Api3, "trimProbe", {
           enumerable: true,
           get: function() {
             return trimProbe;
@@ -9082,7 +7795,7 @@
             trimProbe = value;
           }
         });
-        Object.defineProperty(Api, "preTrimExportFired", {
+        Object.defineProperty(Api3, "preTrimExportFired", {
           enumerable: true,
           get: function() {
             return preTrimExportFired;
@@ -9091,7 +7804,7 @@
             preTrimExportFired = value;
           }
         });
-        Object.defineProperty(Api, "trimRetryByConv", {
+        Object.defineProperty(Api3, "trimRetryByConv", {
           enumerable: true,
           get: function() {
             return trimRetryByConv;
@@ -9100,7 +7813,7 @@
             trimRetryByConv = value;
           }
         });
-        Object.defineProperty(Api, "TRIM_HEAD_IDS_N", {
+        Object.defineProperty(Api3, "TRIM_HEAD_IDS_N", {
           enumerable: true,
           get: function() {
             return TRIM_HEAD_IDS_N;
@@ -9109,31 +7822,31 @@
             TRIM_HEAD_IDS_N = value;
           }
         });
-        Object.defineProperty(Api, "aiCmSwAsk", {
+        Object.defineProperty(Api3, "aiCmSwAsk", {
           enumerable: true,
           get: function() {
             return aiCmSwAsk;
           }
         });
-        Object.defineProperty(Api, "aiCmLatchGetAll", {
+        Object.defineProperty(Api3, "aiCmLatchGetAll", {
           enumerable: true,
           get: function() {
             return aiCmLatchGetAll;
           }
         });
-        Object.defineProperty(Api, "aiCmLatchSet", {
+        Object.defineProperty(Api3, "aiCmLatchSet", {
           enumerable: true,
           get: function() {
             return aiCmLatchSet;
           }
         });
-        Object.defineProperty(Api, "aiCmLatchRemove", {
+        Object.defineProperty(Api3, "aiCmLatchRemove", {
           enumerable: true,
           get: function() {
             return aiCmLatchRemove;
           }
         });
-        Object.defineProperty(Api, "aiCmNetRawCount", {
+        Object.defineProperty(Api3, "aiCmNetRawCount", {
           enumerable: true,
           get: function() {
             return aiCmNetRawCount;
@@ -9142,7 +7855,7 @@
             aiCmNetRawCount = value;
           }
         });
-        Object.defineProperty(Api, "aiCmNetRawCountUsed", {
+        Object.defineProperty(Api3, "aiCmNetRawCountUsed", {
           enumerable: true,
           get: function() {
             return aiCmNetRawCountUsed;
@@ -9151,8 +7864,8 @@
             aiCmNetRawCountUsed = value;
           }
         });
-        if (typeof module !== "undefined" && module.exports) module.exports = Api;
-        if (typeof window !== "undefined") window.AiCmState = Api;
+        if (typeof module !== "undefined" && module.exports) module.exports = Api3;
+        if (typeof window !== "undefined") window.AiCmState = Api3;
       })();
       function safePctKey() {
         return "ai_cm_safe_pct_" + getServiceKey();
@@ -9212,7 +7925,7 @@
       }
       function updatePanel() {
         if (!widgetElement) return;
-        const i18n = typeof aiCmI18nMessage === "function" ? aiCmI18nMessage : function(key, fallback) {
+        const i18n = typeof aiCmI18nMessage2 === "function" ? aiCmI18nMessage2 : function(key, fallback) {
           return fallback;
         };
         const status = widgetElement.querySelector(".ai-cm-limit-text");
@@ -9418,7 +8131,7 @@
         autoExportLastPct = -1;
         try {
           var cidD14 = getCurrentConvId() || "";
-          var P14 = typeof window !== "undefined" && window.AiCmExportEmitPipeline ? window.AiCmExportEmitPipeline : null;
+          var P14 = typeof export_emit_pipeline_exports !== "undefined" && export_emit_pipeline_exports ? export_emit_pipeline_exports : typeof window !== "undefined" && window.AiCmExportEmitPipeline ? window.AiCmExportEmitPipeline : null;
           var siteD14 = currentAdapter && currentAdapter.siteName || "";
           if (siteD14 === "google_search") {
             var logCidD14 = cidD14 || (typeof aiCmDomThreadId === "function" ? aiCmDomThreadId() || "" : "");
@@ -9428,14 +8141,19 @@
               debugLog("log", "[AI CM][auto-export] site=google_search latch kept reason=spa-entry convId=" + (cidD14 || "(threadId)"));
             }
           } else if (P14 && typeof P14.resetAutoExportFired === "function") {
-            P14.resetAutoExportFired(autoExportFired, siteD14, cidD14);
-            try {
-              if (P14.firedSessionKey) {
-                aiCmLatchRemove(siteD14, cidD14);
-                var pkD14 = P14.firedSessionKey(siteD14, cidD14);
-                if (pkD14 && typeof sessionFiredCache === "object" && sessionFiredCache) delete sessionFiredCache[pkD14];
+            var alreadyExportedD14 = typeof aiCmSiteConvFired === "function" ? aiCmSiteConvFired() : 0;
+            if (alreadyExportedD14) {
+              debugLog("log", "[AI CM][auto-export] latch kept reason=already-exported convId=" + (cidD14 || "(threadId)"));
+            } else {
+              P14.resetAutoExportFired(autoExportFired, siteD14, cidD14);
+              try {
+                if (P14.firedSessionKey) {
+                  aiCmLatchRemove(siteD14, cidD14);
+                  var pkD14 = P14.firedSessionKey(siteD14, cidD14);
+                  if (pkD14 && typeof sessionFiredCache === "object" && sessionFiredCache) delete sessionFiredCache[pkD14];
+                }
+              } catch (eO3D14) {
               }
-            } catch (eO3D14) {
             }
           } else if (cidD14) {
             delete autoExportFired[cidD14];
@@ -9468,7 +8186,7 @@
           } catch (eQbReset) {
           }
           if (tt) {
-            const i18n = typeof aiCmI18nMessage === "function" ? aiCmI18nMessage : function(key, fallback) {
+            const i18n = typeof aiCmI18nMessage2 === "function" ? aiCmI18nMessage2 : function(key, fallback) {
               return fallback;
             };
             tt.textContent = i18n("content_widget_loading", "\u0417\u0430\u0433\u0440\u0443\u0437\u043A\u0430 \u043A\u043E\u043D\u0442\u0435\u043A\u0441\u0442\u0430...");
@@ -9655,10 +8373,7 @@
         if (typeof document !== "undefined" && document && typeof document.querySelectorAll === "function") {
           const controls = document.querySelectorAll(AI_CM_BOTTOM_CONTROL_SELECTOR);
           for (let i = 0; i < controls.length; i++) {
-            const el = (
-              /** @type {HTMLElement} */
-              controls[i]
-            );
+            const el = controls[i];
             if (host && el !== host && host.contains && host.contains(el)) continue;
             if (!el.offsetParent) continue;
             const rect = typeof el.getBoundingClientRect === "function" ? el.getBoundingClientRect() : null;
@@ -9776,18 +8491,14 @@
         circle.setAttribute("aria-expanded", isOpen ? "true" : "false");
         if (isOpen) {
           updatePanel();
-          const input = typeof widgetElement.querySelector === "function" ? (
-            /** @type {HTMLInputElement} */
-            widgetElement.querySelector(".ai-cm-input")
-          ) : null;
+          const input = typeof widgetElement.querySelector === "function" ? widgetElement.querySelector(".ai-cm-input") : null;
           if (input && typeof input.focus === "function") {
             try {
               input.focus();
             } catch (eA11yFocusIn) {
             }
           }
-        } else if (restoreFocus === true && typeof /** @type {HTMLElement} */
-        circle.focus === "function") {
+        } else if (restoreFocus === true && typeof circle.focus === "function") {
           try {
             circle.focus();
           } catch (eA11yFocusOut) {
@@ -9825,7 +8536,7 @@
       }
       function aiCmSetWidgetA11yLabel(circleEl, percentage) {
         if (!circleEl || typeof circleEl.setAttribute !== "function") return;
-        const i18n = typeof aiCmI18nMessage === "function" ? aiCmI18nMessage : function(key, fallback) {
+        const i18n = typeof aiCmI18nMessage2 === "function" ? aiCmI18nMessage2 : function(key, fallback) {
           return fallback;
         };
         const pct = typeof percentage === "number" && isFinite(percentage) ? percentage : 0;
@@ -9872,7 +8583,7 @@
       }
       function createWidget() {
         if (document.getElementById("ai-context-widget")) return;
-        const t = typeof aiCmI18nMessage === "function" ? aiCmI18nMessage : function(key, fallback) {
+        const t = typeof aiCmI18nMessage2 === "function" ? aiCmI18nMessage2 : function(key, fallback) {
           return fallback;
         };
         const container = document.createElement("div");
@@ -9915,10 +8626,7 @@
         }
         if (snapBtn) snapBtn.addEventListener("click", snapCurrentPct);
         if (autoBtn) autoBtn.addEventListener("click", resetSafePct);
-        if (inputEl) inputEl.addEventListener("change", (e) => setSafePctFromInput(
-          /** @type {HTMLInputElement} */
-          e.target.value
-        ));
+        if (inputEl) inputEl.addEventListener("change", (e) => setSafePctFromInput(e.target.value));
         if (upBtn) upBtn.addEventListener("click", () => stepSafePct(1));
         if (dnBtn) dnBtn.addEventListener("click", () => stepSafePct(-1));
         updatePanel();
@@ -9945,10 +8653,7 @@
         }
         aiCmRefreshThemeIfNeeded();
         debugLog("log", "[AI CM][trace] badge-update pct=" + percentage + "% tokens=" + tokens + " model=" + modelName);
-        const circle = (
-          /** @type {SVGElement} */
-          widgetElement.querySelector(".ai-widget-fill")
-        );
+        const circle = widgetElement.querySelector(".ai-widget-fill");
         const percentText = widgetElement.querySelector(".ai-widget-text");
         const tooltip = widgetElement.querySelector(".ai-widget-tooltip");
         if (!circle || !percentText) return;
@@ -9982,7 +8687,7 @@
         } catch (eQbStale) {
         }
         if (tooltip) {
-          const i18n = typeof aiCmI18nMessage === "function" ? aiCmI18nMessage : function(key, fallback) {
+          const i18n = typeof aiCmI18nMessage2 === "function" ? aiCmI18nMessage2 : function(key, fallback) {
             return fallback;
           };
           const limPct = aiCmActivePct();
@@ -10036,54 +8741,54 @@
         }
       }
       (function() {
-        var Api = {};
-        Api.safePctKey = safePctKey;
-        Api.zoneColor = zoneColor;
-        Api.aiCmRingBounds = aiCmRingBounds;
-        Api.aiCmSetRingThresholds = function(raw) {
+        const Api3 = {};
+        Api3.safePctKey = safePctKey;
+        Api3.zoneColor = zoneColor;
+        Api3.aiCmRingBounds = aiCmRingBounds;
+        Api3.aiCmSetRingThresholds = function(raw) {
           aiCmRingThresholds = raw === void 0 ? null : raw;
         };
-        Api.aiCmRepaintRing = aiCmRepaintRing;
-        Api.aiCmLoadRingThresholds = aiCmLoadRingThresholds;
-        Api.aiCmActivePct = aiCmActivePct;
-        Api.computeEffectiveLimit = computeEffectiveLimit;
-        Api.aiCmSetPopupOverrides = aiCmSetPopupOverrides;
-        Api.aiCmRefreshPopupOverrides = aiCmRefreshPopupOverrides;
-        Api.aiCmLoadPopupOverrides = aiCmLoadPopupOverrides;
-        Api.updatePanel = updatePanel;
-        Api.snapCurrentPct = snapCurrentPct;
-        Api.setSafePctFromInput = setSafePctFromInput;
-        Api.resetSafePct = resetSafePct;
-        Api.stepSafePct = stepSafePct;
-        Api.AI_CM_SAFE_PCT_MIGRATIONS = AI_CM_SAFE_PCT_MIGRATIONS;
-        Api.aiCmSafePctMigrationSource = aiCmSafePctMigrationSource;
-        Api.aiCmSafePctMigrationValue = aiCmSafePctMigrationValue;
-        Api.aiCmMigrateSafePct = aiCmMigrateSafePct;
-        Api.resetConversationState = resetConversationState;
-        Api.THEME_CONFIGS = THEME_CONFIGS;
-        Api.getServiceKey = getServiceKey;
-        Api.aiCmInAppTheme = aiCmInAppTheme;
-        Api.isDarkMode = isDarkMode;
-        Api.aiCmWidgetAppliedTheme = aiCmWidgetAppliedTheme;
-        Api.aiCmThemePollTimer = aiCmThemePollTimer;
-        Api.AI_CM_THEME_POLL_MS = AI_CM_THEME_POLL_MS;
-        Api.applyNativeStyles = applyNativeStyles;
-        Api.aiCmRefreshThemeIfNeeded = aiCmRefreshThemeIfNeeded;
-        Api.aiCmStartThemePoll = aiCmStartThemePoll;
-        Api.aiCmStopThemePoll = aiCmStopThemePoll;
-        Api.aiCmComputeWidgetSafeBottom = aiCmComputeWidgetSafeBottom;
-        Api.aiCmUpdateWidgetSafeBottom = aiCmUpdateWidgetSafeBottom;
-        Api.aiCmStartWidgetSafeBottomWatch = aiCmStartWidgetSafeBottomWatch;
-        Api.aiCmStopWidgetSafeBottomWatch = aiCmStopWidgetSafeBottomWatch;
-        Api.aiCmRestartWidgetSafeBottomWatch = aiCmRestartWidgetSafeBottomWatch;
-        Api.aiCmSetWidgetA11yLabel = aiCmSetWidgetA11yLabel;
-        Api.aiCmSetWidgetPanelOpen = aiCmSetWidgetPanelOpen;
-        Api.aiCmToggleWidgetPanel = aiCmToggleWidgetPanel;
-        Api.createWidget = createWidget;
-        Api.aiCmRevealWidget = aiCmRevealWidget;
-        Api.updateWidget = updateWidget;
-        if (typeof module !== "undefined" && module.exports) module.exports = Api;
-        if (typeof window !== "undefined") window.AiCmWidget = Api;
+        Api3.aiCmRepaintRing = aiCmRepaintRing;
+        Api3.aiCmLoadRingThresholds = aiCmLoadRingThresholds;
+        Api3.aiCmActivePct = aiCmActivePct;
+        Api3.computeEffectiveLimit = computeEffectiveLimit;
+        Api3.aiCmSetPopupOverrides = aiCmSetPopupOverrides;
+        Api3.aiCmRefreshPopupOverrides = aiCmRefreshPopupOverrides;
+        Api3.aiCmLoadPopupOverrides = aiCmLoadPopupOverrides;
+        Api3.updatePanel = updatePanel;
+        Api3.snapCurrentPct = snapCurrentPct;
+        Api3.setSafePctFromInput = setSafePctFromInput;
+        Api3.resetSafePct = resetSafePct;
+        Api3.stepSafePct = stepSafePct;
+        Api3.AI_CM_SAFE_PCT_MIGRATIONS = AI_CM_SAFE_PCT_MIGRATIONS;
+        Api3.aiCmSafePctMigrationSource = aiCmSafePctMigrationSource;
+        Api3.aiCmSafePctMigrationValue = aiCmSafePctMigrationValue;
+        Api3.aiCmMigrateSafePct = aiCmMigrateSafePct;
+        Api3.resetConversationState = resetConversationState;
+        Api3.THEME_CONFIGS = THEME_CONFIGS;
+        Api3.getServiceKey = getServiceKey;
+        Api3.aiCmInAppTheme = aiCmInAppTheme;
+        Api3.isDarkMode = isDarkMode;
+        Api3.aiCmWidgetAppliedTheme = aiCmWidgetAppliedTheme;
+        Api3.aiCmThemePollTimer = aiCmThemePollTimer;
+        Api3.AI_CM_THEME_POLL_MS = AI_CM_THEME_POLL_MS;
+        Api3.applyNativeStyles = applyNativeStyles;
+        Api3.aiCmRefreshThemeIfNeeded = aiCmRefreshThemeIfNeeded;
+        Api3.aiCmStartThemePoll = aiCmStartThemePoll;
+        Api3.aiCmStopThemePoll = aiCmStopThemePoll;
+        Api3.aiCmComputeWidgetSafeBottom = aiCmComputeWidgetSafeBottom;
+        Api3.aiCmUpdateWidgetSafeBottom = aiCmUpdateWidgetSafeBottom;
+        Api3.aiCmStartWidgetSafeBottomWatch = aiCmStartWidgetSafeBottomWatch;
+        Api3.aiCmStopWidgetSafeBottomWatch = aiCmStopWidgetSafeBottomWatch;
+        Api3.aiCmRestartWidgetSafeBottomWatch = aiCmRestartWidgetSafeBottomWatch;
+        Api3.aiCmSetWidgetA11yLabel = aiCmSetWidgetA11yLabel;
+        Api3.aiCmSetWidgetPanelOpen = aiCmSetWidgetPanelOpen;
+        Api3.aiCmToggleWidgetPanel = aiCmToggleWidgetPanel;
+        Api3.createWidget = createWidget;
+        Api3.aiCmRevealWidget = aiCmRevealWidget;
+        Api3.updateWidget = updateWidget;
+        if (typeof module !== "undefined" && module.exports) module.exports = Api3;
+        if (typeof window !== "undefined") window.AiCmWidget = Api3;
       })();
       function aiCmHostHistoryRecord(snapshot) {
         var rec = Object.assign({}, snapshot);
@@ -10101,7 +8806,7 @@
         try {
           var site = currentAdapter && currentAdapter.siteName || "";
           if (site === "google_search") {
-            var Pgsa = typeof window !== "undefined" && window.AiCmExportEmitPipeline ? window.AiCmExportEmitPipeline : null;
+            var Pgsa = typeof export_emit_pipeline_exports !== "undefined" && export_emit_pipeline_exports ? export_emit_pipeline_exports : typeof window !== "undefined" && window.AiCmExportEmitPipeline ? window.AiCmExportEmitPipeline : null;
             if (Pgsa && typeof Pgsa.prepareExportMessages === "function") {
               var resGsa = Pgsa.prepareExportMessages(messages, aiCmLogIntraDedupe);
               var outGsa = Array.isArray(resGsa.messages) ? resGsa.messages : messages;
@@ -10125,7 +8830,7 @@
             }
             return { messages: keep, removed: 0 };
           }
-          var P = typeof window !== "undefined" && window.AiCmExportEmitPipeline ? window.AiCmExportEmitPipeline : null;
+          var P = typeof export_emit_pipeline_exports !== "undefined" && export_emit_pipeline_exports ? export_emit_pipeline_exports : typeof window !== "undefined" && window.AiCmExportEmitPipeline ? window.AiCmExportEmitPipeline : null;
           if (!P) return { messages, removed: 0 };
           if (typeof P.prepareExportMessages === "function") {
             var res18 = P.prepareExportMessages(messages, aiCmLogIntraDedupe);
@@ -10133,7 +8838,7 @@
           }
           if (typeof P.dedupeMessages === "function") return P.dedupeMessages(messages);
         } catch (eDed) {
-          swallow(eDed, "base-handler:dedupeExportSource");
+          swallow2(eDed, "base-handler:dedupeExportSource");
         }
         return { messages, removed: 0 };
       }
@@ -10429,31 +9134,93 @@
           next();
         }, 2e3);
       }
+      var AI_CM_AISTUDIO_DRAIN_STEP_MS = 500;
+      var AI_CM_AISTUDIO_DRAIN_CAP_MS = 5e3;
+      var aiCmAistudioDrainTimers = /* @__PURE__ */ Object.create(null);
+      var aiCmAistudioDrainDeadlines = /* @__PURE__ */ Object.create(null);
+      function aiCmAistudioFilesApi() {
+        try {
+          if (typeof window === "undefined") return null;
+          var w = window;
+          return w.AiCmAiStudioFiles || w.AiCmAistudioFiles || null;
+        } catch (e) {
+          return null;
+        }
+      }
+      function aiCmAistudioFilesPending() {
+        var api2 = aiCmAistudioFilesApi();
+        if (!api2 || typeof api2.pending !== "function") return 0;
+        try {
+          var n = api2.pending();
+          return typeof n === "number" && n > 0 ? n : 0;
+        } catch (e) {
+          return 0;
+        }
+      }
+      function aiCmFilesDrainDefer(cid, percentage, reason, netSynced) {
+        try {
+          if (typeof currentAdapter === "undefined" || !currentAdapter || currentAdapter.siteName !== "aistudio") return false;
+          var pending = aiCmAistudioFilesPending();
+          var key = String(cid || "");
+          if (pending <= 0) {
+            delete aiCmAistudioDrainDeadlines[key];
+            return false;
+          }
+          var now = Date.now();
+          if (!aiCmAistudioDrainDeadlines[key]) aiCmAistudioDrainDeadlines[key] = now + AI_CM_AISTUDIO_DRAIN_CAP_MS;
+          if (aiCmAistudioDrainTimers[key]) {
+            debugLog("log", "[AI CM][auto-export] files-drain: \u0444\u0430\u0439\u0440 \u0443\u0436\u0435 \u0436\u0434\u0451\u0442 \u043E\u0447\u0435\u0440\u0435\u0434\u044C \u0444\u0430\u0439\u043B\u043E\u0432 convId=" + key + " pending=" + pending);
+            return true;
+          }
+          if (now >= aiCmAistudioDrainDeadlines[key]) {
+            delete aiCmAistudioDrainDeadlines[key];
+            debugLog("log", "[AI CM][auto-export] files-drain: \u043F\u043E\u0442\u043E\u043B\u043E\u043A \u043E\u0436\u0438\u0434\u0430\u043D\u0438\u044F \u2014 \u043F\u0438\u0448\u0435\u043C \u0444\u0430\u0439\u043B convId=" + key + " pending=" + pending);
+            return false;
+          }
+          debugLog("log", "[AI CM][auto-export] files-drain: \u0436\u0434\u0451\u043C \u043E\u0447\u0435\u0440\u0435\u0434\u044C \u0444\u0430\u0439\u043B\u043E\u0432 convId=" + key + " pending=" + pending + " step=" + AI_CM_AISTUDIO_DRAIN_STEP_MS + "ms");
+          aiCmAistudioDrainTimers[key] = setTimeout(function() {
+            delete aiCmAistudioDrainTimers[key];
+            try {
+              var redo = typeof doAutoExportDownload === "function" ? (
+                /** @type {any} */
+                doAutoExportDownload
+              ) : null;
+              if (redo) redo(cid, percentage, reason, netSynced);
+            } catch (eRe) {
+              debugLog("log", "[AI CM][auto-export] files-drain: \u043F\u043E\u0432\u0442\u043E\u0440\u043D\u044B\u0439 \u0432\u0445\u043E\u0434 \u0443\u043F\u0430\u043B: " + (eRe && eRe.message || eRe));
+            }
+          }, AI_CM_AISTUDIO_DRAIN_STEP_MS);
+          return true;
+        } catch (e) {
+          return false;
+        }
+      }
       (function() {
-        var Api = {};
-        Api.aiCmHostHistoryRecord = aiCmHostHistoryRecord;
-        Api.aiCmLogIntraDedupe = aiCmLogIntraDedupe;
-        Api.aiCmDedupeExportSource = aiCmDedupeExportSource;
-        Api.lastDedupeLogSig = lastDedupeLogSig;
-        Api.aiCmLogDedupeRemoved = aiCmLogDedupeRemoved;
-        Api.buildHistoryMessages = buildHistoryMessages;
-        Api.aiCmBasePrepared = aiCmBasePrepared;
-        Api.aiCmPreparedText = aiCmPreparedText;
-        Api.aiCmMetricBaseText = aiCmMetricBaseText;
-        Api.aiCmDiagHash6 = aiCmDiagHash6;
-        Api.aiCmGeminiTurnsSnapshotSync = aiCmGeminiTurnsSnapshotSync;
-        Api.aiCmExportNetSyncSite = aiCmExportNetSyncSite;
-        Api.aiCmFilesDrainSite = aiCmFilesDrainSite;
-        Api.aiCmExportNetSyncThen = aiCmExportNetSyncThen;
-        Api.aiCmLogNetSyncResult = aiCmLogNetSyncResult;
-        Api.aiCmFilesQueuePending = aiCmFilesQueuePending;
-        Api.aiCmLogFilesDrain = aiCmLogFilesDrain;
-        Api.aiCmExportFilesDrainThen = aiCmExportFilesDrainThen;
-        Api.aiCmExportFilesThenNetSync = aiCmExportFilesThenNetSync;
-        Api.aiCmDumpTurnsSnapshot = aiCmDumpTurnsSnapshot;
-        Api.scheduleStaleCheck = scheduleStaleCheck;
-        if (typeof module !== "undefined" && module.exports) module.exports = Api;
-        if (typeof window !== "undefined") window.AiCmBaseHandler = Api;
+        var Api3 = {};
+        Api3.aiCmHostHistoryRecord = aiCmHostHistoryRecord;
+        Api3.aiCmLogIntraDedupe = aiCmLogIntraDedupe;
+        Api3.aiCmDedupeExportSource = aiCmDedupeExportSource;
+        Api3.lastDedupeLogSig = lastDedupeLogSig;
+        Api3.aiCmLogDedupeRemoved = aiCmLogDedupeRemoved;
+        Api3.buildHistoryMessages = buildHistoryMessages;
+        Api3.aiCmBasePrepared = aiCmBasePrepared;
+        Api3.aiCmPreparedText = aiCmPreparedText;
+        Api3.aiCmMetricBaseText = aiCmMetricBaseText;
+        Api3.aiCmDiagHash6 = aiCmDiagHash6;
+        Api3.aiCmGeminiTurnsSnapshotSync = aiCmGeminiTurnsSnapshotSync;
+        Api3.aiCmExportNetSyncSite = aiCmExportNetSyncSite;
+        Api3.aiCmFilesDrainSite = aiCmFilesDrainSite;
+        Api3.aiCmExportNetSyncThen = aiCmExportNetSyncThen;
+        Api3.aiCmLogNetSyncResult = aiCmLogNetSyncResult;
+        Api3.aiCmFilesQueuePending = aiCmFilesQueuePending;
+        Api3.aiCmLogFilesDrain = aiCmLogFilesDrain;
+        Api3.aiCmExportFilesDrainThen = aiCmExportFilesDrainThen;
+        Api3.aiCmExportFilesThenNetSync = aiCmExportFilesThenNetSync;
+        Api3.aiCmFilesDrainDefer = aiCmFilesDrainDefer;
+        Api3.aiCmDumpTurnsSnapshot = aiCmDumpTurnsSnapshot;
+        Api3.scheduleStaleCheck = scheduleStaleCheck;
+        if (typeof module !== "undefined" && module.exports) module.exports = Api3;
+        if (typeof window !== "undefined") window.AiCmBaseHandler = Api3;
       })();
       function normalize(s) {
         return (s || "").toLowerCase().replace(/[^a-zа-яё0-9]+/g, "");
@@ -10525,7 +9292,7 @@
           var txt = "";
           if (shouldUseGeminiDomParser()) {
             try {
-              txt = typeof GeminiDomParser !== "undefined" && GeminiDomParser ? GeminiDomParser.extractGeminiResponse(tailNodes[j]).text : "";
+              txt = typeof extractGeminiResponse !== "undefined" && extractGeminiResponse ? extractGeminiResponse(tailNodes[j]).text : "";
             } catch (e) {
               txt = (tailNodes[j].innerText || tailNodes[j].textContent || "").trim();
             }
@@ -10547,10 +9314,6 @@
       }
       function getEffectiveText() {
         if (baseSeen && baseText) {
-          if (baseComplete) {
-            lastBounded = true;
-            return aiCmTailMetricBase(baseText);
-          }
           var tail = computeTailFromDom();
           var sig = (tail.sel || "") + "|" + (tail.bounded ? "1" : "0");
           if (sig !== lastTailSig) {
@@ -10560,7 +9323,7 @@
               debugLog("log", "[hybrid-tail] " + tail.diag);
             }
           }
-          lastBounded = tail.bounded;
+          lastBounded = baseComplete ? true : tail.bounded;
           if (!tail.text) return aiCmTailMetricBase(baseText);
           if (tail.bounded) return aiCmTailMetricBase(baseText) + "\n" + tail.text;
           return aiCmTailMetricBase(baseText);
@@ -10569,7 +9332,6 @@
       }
       function getEffectiveCount(fallbackCount) {
         if (baseSeen && baseText) {
-          if (baseComplete) return baseCount;
           var tail = computeTailFromDom();
           if (!tail.count) return baseCount;
           if (tail.bounded) return baseCount + tail.count;
@@ -10578,21 +9340,21 @@
         return fallbackCount;
       }
       (function() {
-        var Api = {};
-        Api.normalize = normalize;
-        Api.stripMd = stripMd;
-        Api.MSG_SELECTORS = MSG_SELECTORS;
-        Api.findMessageNodes = findMessageNodes;
-        Api.nodeIsBase = nodeIsBase;
-        Api.shouldUseGeminiDomParser = shouldUseGeminiDomParser;
-        Api.computeTailFromDom = computeTailFromDom;
-        Api.aiCmTailMetricBase = aiCmTailMetricBase;
-        Api.getEffectiveText = getEffectiveText;
-        Api.getEffectiveCount = getEffectiveCount;
-        if (typeof module !== "undefined" && module.exports) module.exports = Api;
-        if (typeof window !== "undefined") window.AiCmHybridTail = Api;
+        var Api3 = {};
+        Api3.normalize = normalize;
+        Api3.stripMd = stripMd;
+        Api3.MSG_SELECTORS = MSG_SELECTORS;
+        Api3.findMessageNodes = findMessageNodes;
+        Api3.nodeIsBase = nodeIsBase;
+        Api3.shouldUseGeminiDomParser = shouldUseGeminiDomParser;
+        Api3.computeTailFromDom = computeTailFromDom;
+        Api3.aiCmTailMetricBase = aiCmTailMetricBase;
+        Api3.getEffectiveText = getEffectiveText;
+        Api3.getEffectiveCount = getEffectiveCount;
+        if (typeof module !== "undefined" && module.exports) module.exports = Api3;
+        if (typeof window !== "undefined") window.AiCmHybridTail = Api3;
       })();
-      function sanitizeGeminiText(s) {
+      function sanitizeGeminiText2(s) {
         if (typeof window !== "undefined" && window.GeminiBatchexecuteParser && window.GeminiBatchexecuteParser.sanitizeGeminiText) {
           return window.GeminiBatchexecuteParser.sanitizeGeminiText(s);
         }
@@ -10638,7 +9400,7 @@
       function aiCmHiddenExportEffectiveOn(messages) {
         var userOn = typeof aiCmIncludeHiddenInExport !== "undefined" && aiCmIncludeHiddenInExport === true;
         try {
-          var P = typeof window !== "undefined" && window.AiCmExportEmitPipeline ? window.AiCmExportEmitPipeline : null;
+          var P = typeof export_emit_pipeline_exports !== "undefined" && export_emit_pipeline_exports ? export_emit_pipeline_exports : typeof window !== "undefined" && window.AiCmExportEmitPipeline ? window.AiCmExportEmitPipeline : null;
           if (!P || typeof P.hasReasoningInSource !== "function" || typeof P.effectiveReasoningToggle !== "function") return userOn;
           var site = typeof currentAdapter !== "undefined" && currentAdapter && currentAdapter.siteName ? currentAdapter.siteName : "";
           return P.effectiveReasoningToggle(userOn, P.hasReasoningInSource(messages) === true, site) === true;
@@ -10648,7 +9410,7 @@
       }
       function aiCmSanitizeEmitUserTexts(messages) {
         try {
-          var P = typeof window !== "undefined" && window.AiCmExportEmitPipeline ? window.AiCmExportEmitPipeline : null;
+          var P = typeof export_emit_pipeline_exports !== "undefined" && export_emit_pipeline_exports ? export_emit_pipeline_exports : typeof window !== "undefined" && window.AiCmExportEmitPipeline ? window.AiCmExportEmitPipeline : null;
           if (!P || typeof P.sanitizeEmitMessages !== "function") {
             if (typeof aiCmEmitEntryDiag === "function") aiCmEmitEntryDiag("no-pipeline", messages, messages);
             return messages;
@@ -10683,7 +9445,7 @@
       }
       function aiCmPrepareReasoningForExport(messages) {
         try {
-          var P = typeof window !== "undefined" && window.AiCmExportEmitPipeline ? window.AiCmExportEmitPipeline : null;
+          var P = typeof export_emit_pipeline_exports !== "undefined" && export_emit_pipeline_exports ? export_emit_pipeline_exports : typeof window !== "undefined" && window.AiCmExportEmitPipeline ? window.AiCmExportEmitPipeline : null;
           if (!P || typeof P.applyReasoningExportFields !== "function") return messages;
           P.applyReasoningExportFields(messages, aiCmReasoningExportSite());
         } catch (ePrep) {
@@ -10692,12 +9454,12 @@
         return messages;
       }
       function aiCmCollectExportSource() {
-        var P = typeof window !== "undefined" && window.AiCmExportEmitPipeline ? window.AiCmExportEmitPipeline : null;
+        var P = typeof export_emit_pipeline_exports !== "undefined" && export_emit_pipeline_exports ? export_emit_pipeline_exports : typeof window !== "undefined" && window.AiCmExportEmitPipeline ? window.AiCmExportEmitPipeline : null;
         var texts = lastBaseTexts || [];
         var prepareReasoning = typeof aiCmPrepareReasoningForExport === "function" ? aiCmPrepareReasoningForExport : null;
         var source = P && typeof P.pickExportSource === "function" ? P.pickExportSource(baseSeen === true, texts.length > 0) : baseSeen && texts.length > 0 ? "network" : "adapter";
         try {
-          if (typeof aiCmDiagLine2 === "function" && typeof aiCmDiagOn === "function" && aiCmDiagOn() && typeof currentAdapter !== "undefined" && currentAdapter && currentAdapter.siteName === "deepseek") {
+          if (typeof aiCmDiagLine2 === "function" && typeof aiCmDiagOn2 === "function" && aiCmDiagOn2() && typeof currentAdapter !== "undefined" && currentAdapter && currentAdapter.siteName === "deepseek") {
             var o21DomMsgs = typeof currentAdapter.extractMessages === "function" ? currentAdapter.extractMessages().length : 0;
             var o21Reason = baseSeen === true ? texts.length > 0 ? "baseSeen+networkTexts" : "baseSeen-no-networkTexts" : "no-baseSeen";
             aiCmDiagLine2("o21-source-select", {
@@ -10716,7 +9478,7 @@
             for (var i = 0; i < texts.length; i++) {
               var dm = lastDetailMessages[i] || {};
               var r = dm.role || "";
-              var msg = { role: r === "user" || r === "human" ? "user" : "assistant", text: sanitizeGeminiText(texts[i]) };
+              var msg = { role: r === "user" || r === "human" ? "user" : "assistant", text: sanitizeGeminiText2(texts[i]) };
               if (typeof aiCmDiagLine2 === "function" && typeof currentAdapter !== "undefined" && currentAdapter && currentAdapter.siteName === "claude") {
                 aiCmDiagLine2("claude-role-network", { r, normalizedRole: msg.role });
               }
@@ -10725,7 +9487,7 @@
             }
           } else {
             for (var j = 0; j < texts.length; j++) {
-              out.push({ role: j % 2 === 0 ? "user" : "assistant", text: sanitizeGeminiText(texts[j]) });
+              out.push({ role: j % 2 === 0 ? "user" : "assistant", text: sanitizeGeminiText2(texts[j]) });
             }
           }
           if (prepareReasoning) prepareReasoning(out);
@@ -10772,7 +9534,7 @@
             }
           }
         } catch (eA) {
-          swallow(eA, "export:aiCmCollectExportSource-dom-adapter");
+          swallow2(eA, "export:aiCmCollectExportSource-dom-adapter");
         }
         if (prepareReasoning) prepareReasoning(out);
         return aiCmSanitizeEmitUserTexts(out);
@@ -10780,7 +9542,7 @@
       function aiCmExportBaseSource(convId, localMsgs) {
         try {
           var site = currentAdapter && currentAdapter.siteName || "";
-          var P = typeof window !== "undefined" && window.AiCmExportEmitPipeline ? window.AiCmExportEmitPipeline : null;
+          var P = typeof export_emit_pipeline_exports !== "undefined" && export_emit_pipeline_exports ? export_emit_pipeline_exports : typeof window !== "undefined" && window.AiCmExportEmitPipeline ? window.AiCmExportEmitPipeline : null;
           if (!P || typeof P.resolveExportSource !== "function") return null;
           if (site !== "gemini") return null;
           var snap = (
@@ -10831,7 +9593,7 @@
         try {
           if (!(currentAdapter && currentAdapter.siteName === "gemini")) return void 0;
           if (typeof aiCmGeminiTurnsSnapshotSync !== "function") return void 0;
-          var P = typeof window !== "undefined" && window.AiCmExportEmitPipeline ? window.AiCmExportEmitPipeline : null;
+          var P = typeof export_emit_pipeline_exports !== "undefined" && export_emit_pipeline_exports ? export_emit_pipeline_exports : typeof window !== "undefined" && window.AiCmExportEmitPipeline ? window.AiCmExportEmitPipeline : null;
           if (!P || typeof P.sourceTierOf !== "function") return void 0;
           var snap = (
             /** @type {{archiveCount?: number, liveCount?: number}|null} */
@@ -10843,7 +9605,7 @@
             liveCount: typeof snap.liveCount === "number" ? snap.liveCount : 0
           });
         } catch (eTier) {
-          swallow(eTier, "export:aiCmGetSourceTier");
+          swallow2(eTier, "export:aiCmGetSourceTier");
         }
       }
       function autoExportPerSiteKey(siteName) {
@@ -10958,7 +9720,7 @@
           res.suspect = true;
           res.confirmed = !!prevProbe.suspectPending;
         } catch (e) {
-          swallow(e, "export:detectTrimStateFallback");
+          swallow2(e, "export:detectTrimStateFallback");
         }
         return res;
       }
@@ -10992,7 +9754,7 @@
             maybeTrimExport(cid);
           }
         } catch (e) {
-          swallow(e, "export:geminiDetectTrim");
+          swallow2(e, "export:geminiDetectTrim");
         }
       }
       function maybeTrimExport(cid) {
@@ -11013,7 +9775,7 @@
                 preTrimExportFired[cid] = 0;
                 maybeTrimExport(cid);
               } catch (eRetry) {
-                swallow(eRetry, "export:maybeTrimExport-retry");
+                swallow2(eRetry, "export:maybeTrimExport-retry");
               }
             }, 2e3);
             return;
@@ -11258,7 +10020,7 @@
         try {
           var urlCid = getCurrentConvId() || "";
           var site = currentAdapter && currentAdapter.siteName || "";
-          var P = typeof window !== "undefined" && window.AiCmExportEmitPipeline ? window.AiCmExportEmitPipeline : null;
+          var P = typeof export_emit_pipeline_exports !== "undefined" && export_emit_pipeline_exports ? export_emit_pipeline_exports : typeof window !== "undefined" && window.AiCmExportEmitPipeline ? window.AiCmExportEmitPipeline : null;
           if (P && typeof P.resolveAutoExportConvId === "function") {
             return P.resolveAutoExportConvId(site, urlCid, lastThreadId || "") || "";
           }
@@ -11327,10 +10089,7 @@
         }
       }
       function aiCmAutoExportLogOnChange(family, key) {
-        var self = (
-          /** @type {any} */
-          aiCmAutoExportLogOnChange
-        );
+        var self = aiCmAutoExportLogOnChange;
         try {
           var f = String(family || "");
           var k = key === void 0 || key === null ? "" : String(key);
@@ -11484,7 +10243,7 @@
           var netLatchNow = typeof aiCmGsaNetworkCompleteIs === "function" ? aiCmGsaNetworkCompleteIs(site, aiCmAutoExportConvId() || "") === true : false;
           var fileSource;
           try {
-            var P = typeof window !== "undefined" && window.AiCmExportEmitPipeline ? window.AiCmExportEmitPipeline : null;
+            var P = typeof export_emit_pipeline_exports !== "undefined" && export_emit_pipeline_exports ? export_emit_pipeline_exports : typeof window !== "undefined" && window.AiCmExportEmitPipeline ? window.AiCmExportEmitPipeline : null;
             if (P && typeof P.pickExportSource === "function") {
               fileSource = P.pickExportSource(baseSeen === true, memMsgs > 0);
             }
@@ -11527,7 +10286,7 @@
             notCompleteLogged = {};
             autoExportLastConvId = cid;
           }
-          var P = typeof window !== "undefined" && window.AiCmExportEmitPipeline ? window.AiCmExportEmitPipeline : null;
+          var P = typeof export_emit_pipeline_exports !== "undefined" && export_emit_pipeline_exports ? export_emit_pipeline_exports : typeof window !== "undefined" && window.AiCmExportEmitPipeline ? window.AiCmExportEmitPipeline : null;
           var siteName = currentAdapter && currentAdapter.siteName || "";
           var perSiteThr = typeof autoExportPctBySite === "object" && autoExportPctBySite ? autoExportPctBySite[siteName] : void 0;
           var threshold = P && typeof P.effectiveAutoExportThreshold === "function" ? P.effectiveAutoExportThreshold(s.pct, perSiteThr) : typeof s.pct === "number" && s.pct >= 1 && s.pct <= 100 ? s.pct : 90;
@@ -11716,7 +10475,7 @@
       }
       function aiCmEffectiveAutoExportThreshold(siteName) {
         try {
-          var P = typeof window !== "undefined" && window.AiCmExportEmitPipeline ? window.AiCmExportEmitPipeline : null;
+          var P = typeof export_emit_pipeline_exports !== "undefined" && export_emit_pipeline_exports ? export_emit_pipeline_exports : typeof window !== "undefined" && window.AiCmExportEmitPipeline ? window.AiCmExportEmitPipeline : null;
           var s = typeof autoExportSettings === "object" && autoExportSettings ? autoExportSettings : null;
           var globalPct = s && typeof s.pct === "number" ? s.pct : void 0;
           var perSitePct = typeof autoExportPctBySite === "object" && autoExportPctBySite ? autoExportPctBySite[siteName || ""] : void 0;
@@ -11730,7 +10489,7 @@
       }
       var aiCmAutoExportNamesUsed = /* @__PURE__ */ Object.create(null);
       function aiCmAutoExportStartDownload(content, file, fmt) {
-        var Pdl = typeof window !== "undefined" && window.AiCmExportEmitPipeline ? window.AiCmExportEmitPipeline : null;
+        var Pdl = typeof export_emit_pipeline_exports !== "undefined" && export_emit_pipeline_exports ? export_emit_pipeline_exports : typeof window !== "undefined" && window.AiCmExportEmitPipeline ? window.AiCmExportEmitPipeline : null;
         var used = typeof aiCmAutoExportNamesUsed === "object" && aiCmAutoExportNamesUsed ? aiCmAutoExportNamesUsed : null;
         if (used && file && Pdl && typeof Pdl.isFileNameTaken === "function" && Pdl.isFileNameTaken(used, file) && typeof Pdl.disambiguateFileName === "function") {
           file = Pdl.disambiguateFileName(file, used);
@@ -11739,7 +10498,7 @@
           if (used && file) used[file] = 1;
         } catch (eNameReserve) {
         }
-        var Bdl = typeof window !== "undefined" && window.AiCmExportBuilders ? window.AiCmExportBuilders : null;
+        var Bdl = typeof export_text_builders_default !== "undefined" ? export_text_builders_default : null;
         if (!Bdl || typeof Bdl.downloadBlob !== "function") throw new Error("utils/export-text-builders.js \u043D\u0435 \u0437\u0430\u0433\u0440\u0443\u0436\u0435\u043D");
         Bdl.downloadBlob(content, file, fmt === "md" ? "text/markdown" : fmt === "json" ? "application/json" : "text/plain;charset=utf-8", "autoexport");
         return file;
@@ -11785,7 +10544,7 @@
               }
               if (fmt === "txt" && content.charAt(0) !== "\uFEFF") content = "\uFEFF" + content;
               if (reason !== "pre-trim") {
-                var PDl = typeof window !== "undefined" && window.AiCmExportEmitPipeline ? window.AiCmExportEmitPipeline : null;
+                var PDl = typeof export_emit_pipeline_exports !== "undefined" && export_emit_pipeline_exports ? export_emit_pipeline_exports : typeof window !== "undefined" && window.AiCmExportEmitPipeline ? window.AiCmExportEmitPipeline : null;
                 if (PDl && typeof PDl.markAutoExportFired === "function") {
                   PDl.markAutoExportFired(autoExportFired, currentAdapter && currentAdapter.siteName || "", cid);
                   try {
@@ -11820,7 +10579,7 @@
               }
               aiCmCancelDeferredHistWrite(cid);
               try {
-                var BdiagDl = typeof window !== "undefined" && window && window.AiCmExportBuilders ? window.AiCmExportBuilders : null;
+                var BdiagDl = typeof export_text_builders_default !== "undefined" ? export_text_builders_default : null;
                 if (BdiagDl && typeof BdiagDl.aiCmDiagDownload === "function") {
                   BdiagDl.aiCmDiagDownload("autoexport", content, file, {
                     reason,
@@ -11856,6 +10615,8 @@
               debugLog("error", "[AI CM][auto-export] error:", eInner);
             }
           };
+          var filesApiD = typeof window !== "undefined" && window.AiCmBaseHandler ? window.AiCmBaseHandler : null;
+          if (filesApiD && typeof filesApiD.aiCmFilesDrainDefer === "function" && filesApiD.aiCmFilesDrainDefer(cid, percentage, reason, netSynced)) return;
           if (typeof aiCmDeferAutoExportOnLiveStream === "function" && aiCmDeferAutoExportOnLiveStream(cid, percentage)) return;
           var filesApiD = typeof window !== "undefined" && window.AiCmBaseHandler ? window.AiCmBaseHandler : null;
           var filesDrainSiteD = filesApiD && typeof filesApiD.aiCmFilesDrainSite === "function" ? filesApiD.aiCmFilesDrainSite() === true : false;
@@ -11886,10 +10647,10 @@
             debugLog("log", "[AI CM][auto-export] net-sync \u0443\u0436\u0435 \u0432\u044B\u043F\u043E\u043B\u043D\u044F\u0435\u0442\u0441\u044F convId=" + cid);
             return;
           }
-          var B = typeof window !== "undefined" && window.AiCmExportBuilders ? window.AiCmExportBuilders : null;
+          var B = typeof export_text_builders_default !== "undefined" ? export_text_builders_default : null;
           if (!B) throw new Error("utils/export-text-builders.js \u043D\u0435 \u0437\u0430\u0433\u0440\u0443\u0436\u0435\u043D");
           var fmt = autoExportSettings.fmt === "md" ? "md" : autoExportSettings.fmt === "json" ? "json" : "txt";
-          var P = typeof window !== "undefined" && window.AiCmExportEmitPipeline ? window.AiCmExportEmitPipeline : null;
+          var P = typeof export_emit_pipeline_exports !== "undefined" && export_emit_pipeline_exports ? export_emit_pipeline_exports : typeof window !== "undefined" && window.AiCmExportEmitPipeline ? window.AiCmExportEmitPipeline : null;
           var siteNameD = currentAdapter && currentAdapter.siteName || "";
           var lowConfD = siteNameD === "gemini" ? aiCmLowConfidenceByConv[cid] === true : siteNameD === "google_search" ? baseComplete !== true : siteNameD === "qwen" ? baseComplete !== true && typeof aiCmPartialSoftByConv === "object" && aiCmPartialSoftByConv && aiCmPartialSoftByConv[cid] === true : false;
           var gsaModelD = siteNameD === "google_search" && typeof lastSnapshotModelName === "string" ? lastSnapshotModelName : "";
@@ -12009,12 +10770,12 @@
           try {
             if (cid && cid === d.convId && autoExportSettings.enabled === true && baseComplete === true && !aiCmCursorLiveByConv[cid] && !(function() {
               var siteBc = currentAdapter && currentAdapter.siteName || "";
-              var Pbc = typeof window !== "undefined" && window.AiCmExportEmitPipeline ? window.AiCmExportEmitPipeline : null;
+              var Pbc = typeof export_emit_pipeline_exports !== "undefined" && export_emit_pipeline_exports ? export_emit_pipeline_exports : typeof window !== "undefined" && window.AiCmExportEmitPipeline ? window.AiCmExportEmitPipeline : null;
               return Pbc.getAutoExportFired(autoExportFired, siteBc, cid) || (typeof Pbc.isFiredInSession === "function" ? Pbc.isFiredInSession(sessionFiredCache, siteBc, cid) : false) || typeof aiCmAutoExportFiredOnce === "object" && aiCmAutoExportFiredOnce && aiCmAutoExportFiredOnce[siteBc + "|" + cid] === 1 || typeof aiCmAutoExportFiredInStorage === "function" && aiCmAutoExportFiredInStorage(cid);
             })() && (baseCount || 0) > 0) {
               var pctBc64 = typeof autoExportLastPct === "number" && autoExportLastPct >= 0 ? autoExportLastPct : 0;
               var thrBc64 = aiCmEffectiveAutoExportThreshold(typeof currentAdapter !== "undefined" && currentAdapter && currentAdapter.siteName || "");
-              var Pbc64 = typeof window !== "undefined" && window.AiCmExportEmitPipeline ? window.AiCmExportEmitPipeline : null;
+              var Pbc64 = typeof export_emit_pipeline_exports !== "undefined" && export_emit_pipeline_exports ? export_emit_pipeline_exports : typeof window !== "undefined" && window.AiCmExportEmitPipeline ? window.AiCmExportEmitPipeline : null;
               var gateBc64 = Pbc64 && typeof Pbc64.shouldSkipBaseCompleteTrigger === "function" ? Pbc64.shouldSkipBaseCompleteTrigger({ percentage: pctBc64, threshold: thrBc64 }) : { skip: pctBc64 < thrBc64, reason: "below-threshold-base-complete", threshold: thrBc64 };
               if (gateBc64.skip) {
                 debugLog("log", "[AI CM][auto-export] skip reason=" + gateBc64.reason + " convId=" + cid + " pct=" + pctBc64 + " threshold=" + gateBc64.threshold + " trigger=base-complete");
@@ -12055,42 +10816,42 @@
         }
       }
       (function() {
-        var Api = {};
-        Api.sanitizeGeminiText = sanitizeGeminiText;
-        Api.aiCmCollectExportSource = aiCmCollectExportSource;
-        Api.aiCmExportBaseSource = aiCmExportBaseSource;
-        Api.aiCmGetSourceTier = aiCmGetSourceTier;
-        Api.aiCmUnionFileMessages = aiCmUnionFileMessages;
-        Api.autoExportPerSiteKey = autoExportPerSiteKey;
-        Api.loadAutoExportPerSitePct = loadAutoExportPerSitePct;
-        Api.sessionFiredCache = sessionFiredCache;
-        Api.aiCmTryLateAutoExport = aiCmTryLateAutoExport;
-        Api.aiCmScheduleLateAutoExportRetry = aiCmScheduleLateAutoExportRetry;
-        Api.aiCmLateRetryByConv = aiCmLateRetryByConv;
-        Api.aiCmCurrentBaseSnapshot = aiCmCurrentBaseSnapshot;
-        Api.detectTrimStateFallback = detectTrimStateFallback;
-        Api.geminiDetectTrim = geminiDetectTrim;
-        Api.maybeTrimExport = maybeTrimExport;
-        Api.aiCmCancelDeferredHistWrite = aiCmCancelDeferredHistWrite;
-        Api.aiCmWriteCurrentHistory = aiCmWriteCurrentHistory;
-        Api.aiCmFlushDeferredHistWrite = aiCmFlushDeferredHistWrite;
-        Api.aiCmScheduleDeferredHistWrite = aiCmScheduleDeferredHistWrite;
-        Api.loadAutoExportSettings = loadAutoExportSettings;
-        Api.aiCmAutoExportConvId = aiCmAutoExportConvId;
-        Api.aiCmGsaProbeByThread = aiCmGsaProbeByThread;
-        Api.aiCmGsaProbeRunning = aiCmGsaProbeRunning;
-        Api.aiCmGsaProbeRunningFor = aiCmGsaProbeRunningFor;
-        Api.aiCmGsaAutoExportSkipLog = aiCmGsaAutoExportSkipLog;
-        Api.maybeAutoExport = maybeAutoExport;
-        Api.aiCmEffectiveAutoExportThreshold = aiCmEffectiveAutoExportThreshold;
-        Api.doAutoExportDownload = doAutoExportDownload;
-        Api.aiCmDeepseekStreamProbe = aiCmDeepseekStreamProbe;
-        Api.aiCmDeepseekStreamActiveFor = aiCmDeepseekStreamActiveFor;
-        Api.aiCmFlushLiveStreamForExport = aiCmFlushLiveStreamForExport;
-        Api.aiCmDeferAutoExportOnLiveStream = aiCmDeferAutoExportOnLiveStream;
-        Api.AI_CM_DS_STREAM_DEFER_MS = AI_CM_DS_STREAM_DEFER_MS;
-        if (typeof module !== "undefined" && module.exports) module.exports = Api;
-        if (typeof window !== "undefined") window.AiCmExportManager = Api;
+        var Api3 = {};
+        Api3.sanitizeGeminiText = sanitizeGeminiText2;
+        Api3.aiCmCollectExportSource = aiCmCollectExportSource;
+        Api3.aiCmExportBaseSource = aiCmExportBaseSource;
+        Api3.aiCmGetSourceTier = aiCmGetSourceTier;
+        Api3.aiCmUnionFileMessages = aiCmUnionFileMessages;
+        Api3.autoExportPerSiteKey = autoExportPerSiteKey;
+        Api3.loadAutoExportPerSitePct = loadAutoExportPerSitePct;
+        Api3.sessionFiredCache = sessionFiredCache;
+        Api3.aiCmTryLateAutoExport = aiCmTryLateAutoExport;
+        Api3.aiCmScheduleLateAutoExportRetry = aiCmScheduleLateAutoExportRetry;
+        Api3.aiCmLateRetryByConv = aiCmLateRetryByConv;
+        Api3.aiCmCurrentBaseSnapshot = aiCmCurrentBaseSnapshot;
+        Api3.detectTrimStateFallback = detectTrimStateFallback;
+        Api3.geminiDetectTrim = geminiDetectTrim;
+        Api3.maybeTrimExport = maybeTrimExport;
+        Api3.aiCmCancelDeferredHistWrite = aiCmCancelDeferredHistWrite;
+        Api3.aiCmWriteCurrentHistory = aiCmWriteCurrentHistory;
+        Api3.aiCmFlushDeferredHistWrite = aiCmFlushDeferredHistWrite;
+        Api3.aiCmScheduleDeferredHistWrite = aiCmScheduleDeferredHistWrite;
+        Api3.loadAutoExportSettings = loadAutoExportSettings;
+        Api3.aiCmAutoExportConvId = aiCmAutoExportConvId;
+        Api3.aiCmGsaProbeByThread = aiCmGsaProbeByThread;
+        Api3.aiCmGsaProbeRunning = aiCmGsaProbeRunning;
+        Api3.aiCmGsaProbeRunningFor = aiCmGsaProbeRunningFor;
+        Api3.aiCmGsaAutoExportSkipLog = aiCmGsaAutoExportSkipLog;
+        Api3.maybeAutoExport = maybeAutoExport;
+        Api3.aiCmEffectiveAutoExportThreshold = aiCmEffectiveAutoExportThreshold;
+        Api3.doAutoExportDownload = doAutoExportDownload;
+        Api3.aiCmDeepseekStreamProbe = aiCmDeepseekStreamProbe;
+        Api3.aiCmDeepseekStreamActiveFor = aiCmDeepseekStreamActiveFor;
+        Api3.aiCmFlushLiveStreamForExport = aiCmFlushLiveStreamForExport;
+        Api3.aiCmDeferAutoExportOnLiveStream = aiCmDeferAutoExportOnLiveStream;
+        Api3.AI_CM_DS_STREAM_DEFER_MS = AI_CM_DS_STREAM_DEFER_MS;
+        if (typeof module !== "undefined" && module.exports) module.exports = Api3;
+        if (typeof window !== "undefined") window.AiCmExportManager = Api3;
       })();
       (function() {
         let v = "unknown";
@@ -12108,7 +10869,7 @@
           return false;
         }
       }
-      function aiCmI18nMessage(key, fallback, substitutions) {
+      function aiCmI18nMessage2(key, fallback, substitutions) {
         try {
           if (typeof chrome !== "undefined" && chrome.i18n && typeof chrome.i18n.getMessage === "function") {
             var message = substitutions ? chrome.i18n.getMessage(key, substitutions) : chrome.i18n.getMessage(key);
@@ -12173,7 +10934,7 @@
             self.load(convId).then(function(entry) {
               var existing = entry && entry.turns || [];
               var unionTurns = turns;
-              var P = typeof window !== "undefined" && window.AiCmExportEmitPipeline ? window.AiCmExportEmitPipeline : null;
+              var P = typeof export_emit_pipeline_exports !== "undefined" && export_emit_pipeline_exports ? export_emit_pipeline_exports : typeof window !== "undefined" && window.AiCmExportEmitPipeline ? window.AiCmExportEmitPipeline : null;
               if (P && typeof P.unionTurnsById === "function") {
                 var u = P.unionTurnsById(existing, turns);
                 if (u.length > turns.length) unionTurns = u;
@@ -12482,7 +11243,7 @@
           var cyr = (t.match(/[а-яёА-ЯЁ]/g) || []).length;
           result = Math.ceil(cyr / 3.3) + Math.round((t.length - cyr) / 4) + attach;
         }
-        if (typeof aiCmDiagOn === "function" && aiCmDiagOn()) {
+        if (typeof aiCmDiagOn2 === "function" && aiCmDiagOn2()) {
           try {
             var cyrDiag = (t.match(/[а-яёА-ЯЁ]/g) || []).length;
             var cyrillicPct = t.length ? (cyrDiag / t.length * 100).toFixed(1) : "0.0";
@@ -12513,15 +11274,15 @@
         var pool = typeof attachTokens === "number" && attachTokens > 0 ? attachTokens : 0;
         if (pool <= 0) return 0;
         var text = typeof fullText === "string" ? fullText : "";
-        var imgRendered = (text.match(/\[IMAGE: /g) || []).length;
-        var docRendered = (text.match(/\[FILE: /g) || []).length;
-        if (imgRendered === 0 && docRendered === 0) return pool;
+        var hasSections = text.indexOf("[FILE: ") !== -1 || text.indexOf("[IMAGE: ") !== -1;
+        if (!hasSections) return pool;
         var br = attachBreak && typeof attachBreak === "object" ? attachBreak : {};
         var imgTotal = typeof br.imgCount === "number" && br.imgCount > 0 ? br.imgCount : 0;
         var docTotal = typeof br.docCount === "number" && br.docCount > 0 ? br.docCount : 0;
         var total = imgTotal + docTotal;
         if (total <= 0) return 0;
-        var done = Math.min(imgRendered, imgTotal) + Math.min(docRendered, docTotal);
+        var docRendered = (text.match(/(?:^|\n\n)\[FILE: (?!.* — )(?!.* \([\d.,]+ ?(?:B|KB|MB|GB|Б)\)\])[^\]\n]*\]/g) || []).length;
+        var done = Math.min(docRendered, docTotal);
         if (done >= total) return 0;
         return Math.round(pool * (total - done) / total);
       }
@@ -12578,7 +11339,7 @@
         try {
           if (!window.__aiCmEmitChannelSeen) {
             window.__aiCmEmitChannelSeen = true;
-            var P1 = typeof window !== "undefined" && window.AiCmExportEmitPipeline ? window.AiCmExportEmitPipeline : null;
+            var P1 = typeof export_emit_pipeline_exports !== "undefined" && export_emit_pipeline_exports ? export_emit_pipeline_exports : typeof window !== "undefined" && window.AiCmExportEmitPipeline ? window.AiCmExportEmitPipeline : null;
             debugLog("log", "[AI CM][svc-emit-trace] site=" + (currentAdapter && currentAdapter.siteName || "?") + " emit-channel=received convId=" + (P1 && P1.extractConvIdFromUrl(location.pathname) || ""));
           }
         } catch (eEmit1) {
@@ -12628,6 +11389,7 @@
         badgeSuppressed = false;
         if (emitConvId && emitConvId !== lastSnapConvId) {
           maxTokenCount = 0;
+          lastPercentage = -1;
           lastSnapConvId = emitConvId;
           debugLog("log", "[content-trace] v37: \u043D\u043E\u0432\u044B\u0439 convId \u0441\u043D\u0438\u043C\u043A\u0430 \u2192 maxTokenCount=0 (" + emitConvId.slice(0, 8) + ")");
         }
@@ -12703,7 +11465,7 @@
               // (core/base-handler.js:54, core/export-manager.js:178 — те уже знают 'human', но
               // получали готовый 'assistant') и все ходы Claude шли под '## Ассистент'.
               role: r18 === "user" || r18 === "human" ? "user" : "assistant",
-              text: sanitizeGeminiText(texts[d18]),
+              text: sanitizeGeminiText2(texts[d18]),
               id: rawMsgs18 && rawMsgs18[d18] && rawMsgs18[d18].id != null ? String(rawMsgs18[d18].id) : String(ids[d18])
             });
           }
@@ -12873,7 +11635,7 @@
       }
       function getCurrentConvId() {
         try {
-          var P = typeof window !== "undefined" && window.AiCmExportEmitPipeline ? window.AiCmExportEmitPipeline : null;
+          var P = typeof export_emit_pipeline_exports !== "undefined" && export_emit_pipeline_exports ? export_emit_pipeline_exports : typeof window !== "undefined" && window.AiCmExportEmitPipeline ? window.AiCmExportEmitPipeline : null;
           if (P && typeof P.extractConvIdFromUrl === "function") return P.extractConvIdFromUrl(location.pathname) || "";
           var m = location.pathname.match(/\/app\/(?!prompts(?:\/|$)|new(?:\/|$)|apikey(?:\/|$))([A-Za-z0-9_-]+)/);
           if (m) return m[1];
@@ -13552,10 +12314,10 @@
         if (rec && rec.kind === "archive") {
           var fmt = rec.format || "?";
           var cnt = String(rec.count || 0);
-          return { kind: "archive", label: rec.label || aiCmI18nMessage("content_source_archive", "\u0430\u0440\u0445\u0438\u0432: " + fmt + " \xB7 " + cnt + " \u0441\u043E\u043E\u0431\u0449.", [fmt, cnt]) };
+          return { kind: "archive", label: rec.label || aiCmI18nMessage2("content_source_archive", "\u0430\u0440\u0445\u0438\u0432: " + fmt + " \xB7 " + cnt + " \u0441\u043E\u043E\u0431\u0449.", [fmt, cnt]) };
         }
-        if (baseSeen) return { kind: "live", label: aiCmI18nMessage("content_source_live", "live (\u0441\u0435\u0442\u044C/DOM)") };
-        if (aiCmAdapterBaseSeen()) return { kind: "live", label: aiCmI18nMessage("content_source_live", "live (\u0441\u0435\u0442\u044C/DOM)") };
+        if (baseSeen) return { kind: "live", label: aiCmI18nMessage2("content_source_live", "live (\u0441\u0435\u0442\u044C/DOM)") };
+        if (aiCmAdapterBaseSeen()) return { kind: "live", label: aiCmI18nMessage2("content_source_live", "live (\u0441\u0435\u0442\u044C/DOM)") };
         return null;
       }
       function aiCmLoadArchiveTier(convId, reason) {
@@ -13617,7 +12379,7 @@
             /** @type {HTMLElement|null} */
             panel.querySelector(".ai-cm-source")
           );
-          var want = aiCmSourceLabelNow ? aiCmI18nMessage("content_source_label", "\u0418\u0441\u0442\u043E\u0447\u043D\u0438\u043A: " + aiCmSourceLabelNow, [aiCmSourceLabelNow]) : "";
+          var want = aiCmSourceLabelNow ? aiCmI18nMessage2("content_source_label", "\u0418\u0441\u0442\u043E\u0447\u043D\u0438\u043A: " + aiCmSourceLabelNow, [aiCmSourceLabelNow]) : "";
           if (el && el.textContent === want && el.style.display === (want ? "block" : "none")) return;
           if (!want) {
             if (el) {
@@ -14048,6 +12810,7 @@
             }
           } catch (eMetricSrc) {
           }
+          var aiCmRatchetResetByDom = false;
           if (metricServerTokens > 0) {
             maxTokenCount = tokenEstimate;
           } else if (byokHeuristicHold) {
@@ -14056,10 +12819,19 @@
           } else if (typeof baseSeen !== "undefined" && baseSeen === true && typeof baseCount === "number" && baseCount > 0 && typeof aiCmDomListS1 !== "undefined" && aiCmDomListS1 && aiCmDomListS1.length > 0 && baseCount > aiCmDomListS1.length && tokenEstimate < maxTokenCount) {
             maxTokenCount = tokenEstimate;
             lastBounded = false;
+            aiCmRatchetResetByDom = true;
           } else if (useMonotonic) {
             if (tokenEstimate > maxTokenCount) maxTokenCount = tokenEstimate;
           } else {
             maxTokenCount = tokenEstimate;
+          }
+          if (typeof aiCmRatchetResetByDom === "boolean" && aiCmRatchetResetByDom === false && baseComplete !== true && metricServerTokens === 0 && typeof lastPercentage === "number" && lastPercentage > 0 && displayLimit > 0) {
+            var strictHoldTokens = Math.ceil(lastPercentage * displayLimit / 100);
+            if (maxTokenCount < strictHoldTokens) {
+              var strictNewPct = Math.round(maxTokenCount / displayLimit * 1e3) / 10;
+              debugLog("log", "[content-trace] badge-strict-hold: baseComplete=0, \u043F\u0440\u043E\u0448\u043B\u044B\u0439 pct=" + lastPercentage + " > \u043D\u043E\u0432\u044B\u0439 " + strictNewPct + " \u2014 \u0431\u0435\u0439\u0434\u0436 \u0434\u0435\u0440\u0436\u0438\u0442 " + lastPercentage + "% (\u0431\u0430\u0437\u0430 \u043D\u0435 \u0434\u043E\u0441\u043E\u0431\u0440\u0430\u043D\u0430)");
+              maxTokenCount = strictHoldTokens;
+            }
           }
           const percentage = displayLimit > 0 ? Math.round(maxTokenCount / displayLimit * 1e3) / 10 : 0;
           const hasChanged = percentage !== lastPercentage;
@@ -14664,7 +13436,7 @@
           };
           var dumpFile = "ai-cm-history-" + Date.now() + ".json";
           try {
-            var BdiagHot = typeof window !== "undefined" && window && window.AiCmExportBuilders ? window.AiCmExportBuilders : null;
+            var BdiagHot = typeof export_text_builders_default !== "undefined" ? export_text_builders_default : null;
             if (BdiagHot && typeof BdiagHot.aiCmDiagDownload === "function") {
               BdiagHot.aiCmDiagDownload("hotkey-json-dump", JSON.stringify(payload, null, 2), dumpFile, {
                 site: typeof currentAdapter !== "undefined" && currentAdapter && currentAdapter.siteName || "",

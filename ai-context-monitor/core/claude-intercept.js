@@ -1,5 +1,5 @@
 (() => {
-  // utils/debug.js
+  // utils/debug.ts
   var DEBUG = false;
   var __aiCmLogRing = [];
   var __aiCmLogRingMax = 200;
@@ -21,7 +21,7 @@
     } catch (e) {
     }
   }
-  function debugLog2(level) {
+  function debugLog2(level, ...rest) {
     var args = Array.prototype.slice.call(arguments, 1);
     try {
       var line = args.map(__aiCmStringifyArg).join(" ");
@@ -104,7 +104,7 @@
     __aiCmPushLogRing("[swallow-soft-export] " + eSoftExport);
   }
 
-  // utils/intercept-common.js
+  // utils/intercept-common.ts
   function setIntervalVisible(fn, ms, opts) {
     var id = setInterval(function() {
       try {
@@ -118,6 +118,28 @@
       }
     }, ms);
     return id;
+  }
+  var ONFREEZE_ERROR_RE = /Only fetch keepalive is allowed during onfreeze/i;
+  function isOnFreezeError(error) {
+    try {
+      var message = error && typeof error.message !== "undefined" ? String(error.message) : String(error);
+      return ONFREEZE_ERROR_RE.test(message);
+    } catch (eText) {
+      return false;
+    }
+  }
+  function fetchGuarded(fetchFn, thisArg, args) {
+    try {
+      var list = Array.prototype.slice.call(args);
+      return Reflect.apply(fetchFn, thisArg, list);
+    } catch (eCall) {
+      if (!isOnFreezeError(eCall)) throw eCall;
+      swallowSoft(eCall, "intercept-common:onfreeze-fetch");
+      var rejected = Promise.reject(eCall);
+      rejected.catch(function() {
+      });
+      return rejected;
+    }
   }
 
   // core/claude-intercept.js
@@ -532,10 +554,15 @@
           try {
             var mSend = String(url).match(/\/chat_conversations\/([0-9a-fA-F-]{8,})/);
             if (mSend) sendConvId = mSend[1];
+            var orgAt = String(url).indexOf("/api/organizations/");
+            if (orgAt !== -1) {
+              var convAt = String(url).indexOf("/chat_conversations/", orgAt);
+              if (convAt !== -1) lastOrgPrefix = String(url).slice(orgAt, convAt + "/chat_conversations/".length);
+            }
           } catch (eM3) {
             swallow(eM3, "claude:capturePostBody-convid");
           }
-          traceLog("post-send state convIdUrl=" + String(sendConvId || "-").slice(0, 8) + " lastHistoryConvId=" + String(currentConvId || "-").slice(0, 8));
+          traceLog("post-send state convIdUrl=" + String(sendConvId || "-").slice(0, 8) + " lastHistoryConvId=" + String(currentConvId || "-").slice(0, 8) + " orgPrefix=" + (lastOrgPrefix ? 1 : 0));
           if (sendConvId && !postSendTimer) {
             var urlConvAtSched = sendConvId;
             settle_target_uuid = "";
@@ -547,7 +574,7 @@
                   traceLog("post-send refresh=skipped(reason=convId-changed)");
                   return;
                 }
-                if (refreshBusy || !lastHistoryUrl) {
+                if (refreshBusy || !lastHistoryUrl && !lastOrgPrefix) {
                   traceLog("post-send refresh=skipped(reason=" + (refreshBusy ? "busy" : "no-url") + ")");
                   return;
                 }
@@ -1434,7 +1461,7 @@
         if (lastHistoryUrl && urlConv === currentConvId) {
           baseUrl = lastHistoryUrl;
         } else if (lastOrgPrefix) {
-          baseUrl = lastOrgPrefix + currentConvId + "?tree=True";
+          baseUrl = lastOrgPrefix + currentConvId + "?tree=True&rendering_mode=messages&render_all_tools=true&consistency=eventual";
           lastHistoryUrl = baseUrl;
           refreshSource = "built";
         } else {
@@ -1632,7 +1659,7 @@
       var m = makeUrlMatcher(input);
       try {
         if (m.full && internalFetchUrls[m.full]) {
-          return originalFetch.call(this, input, init);
+          return fetchGuarded(originalFetch, this, [input, init]);
         }
       } catch (e) {
       }
@@ -1671,7 +1698,7 @@
         traceLog("intercept " + _mth + " " + String(m.full || "").slice(0, _uClip));
       }
       if (!isHistory && !isCompletion) {
-        var p = originalFetch.call(this, input, init);
+        var p = fetchGuarded(originalFetch, this, [input, init]);
         observeUpload(_mth, m.full, p);
         if (p && typeof p.catch === "function") p.catch(function() {
         });
@@ -1694,7 +1721,7 @@
           swallow(eOrg, "claude:fetch-org-prefix");
         }
       }
-      var fetchPromise = originalFetch.call(this, input, init);
+      var fetchPromise = fetchGuarded(originalFetch, this, [input, init]);
       observeUpload(_mth, m.full, fetchPromise);
       if (isHistory) {
         fetchPromise.then(function(resp) {
@@ -1911,7 +1938,7 @@
           return;
         }
         traceLog("settle attempt=" + att + "/" + SETTLE_DELAYS.length + " at=+" + SETTLE_DELAYS[att - 1] + " target=" + settleShort(settle_target_uuid) + " convId=" + settleShort(settle_conv_id));
-        if (refreshBusy || !lastHistoryUrl) {
+        if (refreshBusy || !lastHistoryUrl && !lastOrgPrefix) {
           traceLog("settle attempt=" + att + " refresh=skipped reason=" + (refreshBusy ? "busy" : "no-url"));
         } else {
           activeRefresh("settle-" + att);

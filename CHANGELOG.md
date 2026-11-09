@@ -3,6 +3,11 @@
 Все заметные изменения проекта. Формат — [Keep a Changelog](https://keepachangelog.com/ru/1.1.0/),
 версионирование — [Semantic Versioning](https://semver.org/lang/ru/).
 
+## [1.1.7] - 2026-11-09
+
+Обновление поставки встроенного расширения **AI Context Monitor** (2.1.0).
+Полная миграция на TypeScript, исправление багов Claude и Gemini.
+
 ## [1.1.6] - 2026-11-07
 
 Обновление поставки встроенного расширения **AI Context Monitor** (2.0.40 → 2.0.41).

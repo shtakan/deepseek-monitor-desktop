@@ -20,15 +20,18 @@
  *   • FIFO-очередь, concurrency 2, дедуп convId|name|size|token (v2.4, Фикс B):
  *     токен различает разные загрузки с одинаковыми именами и размерами, а
  *     уникальный файл приходит только из своего хода — парсер отдаёт дельту
- *     пула (utils/gemini-batchexecute-parser.js), поэтому секции не дублируются;
+ *     пула (utils/gemini-batchexecute-parser.ts), поэтому секции не дублируются;
  *   • готовый текст складывается в карту <convId>\u0000<msgId> и дописывается
  *     к тексту пользовательского хода в emitBaseSnapshot;
  *   • после прихода текста — дебаунс 250 мс и повторный снимок базы;
  *   • пока очередь не пуста, gfPendingCount()>0 и база не объявляется полной.
  *
  * Лимиты: 200 000 символов текста на файл (A3: жёсткого лимита 200 КБ по
- * content-length больше нет — тело читается потоком до капа), 2 000 000 на чат,
- * таймаут запроса 15 с.
+ * content-length больше нет — тело читается потоком до капа), 2 000 символов
+ * текста на файл в СЕКЦИИ экспорта (v2.8: крупный файл не вшивается вовсе —
+ * остаётся метка `[FILE: имя (размер KB/MB)]` без текста и без маркера обрезки,
+ * чтобы повторно приложенная выгрузка не раздувала следующую), 2 000 000 на
+ * чат, таймаут запроса 15 с.
  *
  * Контракт связки: только __bind(deps) из core/gemini-intercept.js.
  *   emitSnapshot — форвардер emitBaseSnapshot;
@@ -47,6 +50,13 @@
   var GF_CONCURRENCY = 2;
   var GF_TEXT_CAP = 200000;
   var GF_TOTAL_CAP = 2000000;
+  // v2.8 (живая приёмка 2026-11-09): текст, который вшивается в ТЕКСТ СООБЩЕНИЯ
+  // (и дальше в экспорт), ограничен 2 000 символов на файл. Крупный файл в
+  // секцию не попадает вовсе: вместо текста и маркера `…[обрезано N]` остаётся
+  // только метка `[FILE: имя (размер KB/MB)]`. Повторно приложенная выгрузка
+  // (сотни КБ markdown) больше не раздувает следующую — в тексте остаётся одна
+  // строка с именем и размером, и потеря содержимого видна сразу.
+  var GF_SECTION_TEXT_CAP = 2000;
   var GF_TIMEOUT_MS = 15000;
   var GF_EMIT_DEBOUNCE_MS = 250;
   var GF_DRAIN_TIMEOUT_MS = 6000;
@@ -135,6 +145,34 @@
   function gfBytes(n) {
     var v = gfNum(n);
     return (v > 0) ? (String(v) + ' Б') : 'размер неизвестен';
+  }
+
+  // Байты строки в UTF-8: запасной источник размера, когда узел/заголовок
+  // размер не отдали (у текстовых вложений content-length бывает пуст).
+  function gfUtf8Bytes(s) {
+    var n = 0;
+    for (var i = 0; i < s.length; i++) {
+      var c = s.charCodeAt(i);
+      if (c < 0x80) { n += 1; continue; }
+      if (c < 0x800) { n += 2; continue; }
+      if (c >= 0xd800 && c <= 0xdbff && i + 1 < s.length) {
+        var c2 = s.charCodeAt(i + 1);
+        if (c2 >= 0xdc00 && c2 <= 0xdfff) { n += 4; i++; continue; }
+      }
+      n += 3;
+    }
+    return n;
+  }
+
+  // Размер для метки крупного вложения: KB/MB (v2.8). Приоритет — байты из
+  // узла/заголовка (rec.size), иначе оценка по прочитанному тексту.
+  function gfFileSizeLabel(size, body) {
+    var bytes = gfNum(size);
+    if (!(bytes > 0)) bytes = gfUtf8Bytes(gfStr(body));
+    if (!(bytes > 0)) return 'размер неизвестен';
+    if (bytes >= 1024 * 1024) return (Math.round(bytes / (1024 * 1024) * 10) / 10) + ' MB';
+    if (bytes >= 1024) return (Math.round(bytes / 1024 * 10) / 10) + ' KB';
+    return String(bytes) + ' Б';
   }
 
   // ===== СЕКЦИЯ 3: НОРМАЛИЗАЦИЯ ВЛОЖЕНИЙ =====
@@ -246,7 +284,13 @@
       return '\n\n[IMAGE: ' + name + ']' + (url ? ' ' + url : '');
     }
     if (rec && rec.ok === true && gfStr(rec.text)) {
-      return '\n\n[FILE: ' + name + ']\n' + rec.text;
+      var body = gfStr(rec.text);
+      if (body.length > GF_SECTION_TEXT_CAP) {
+        // v2.8: крупный файл не вшивается в секцию — только имя и размер.
+        // Ни текста, ни маркера «обрезано N»: одна метка, потеря видна сразу.
+        return '\n\n[FILE: ' + name + ' (' + gfFileSizeLabel(rec.size, body) + ')]';
+      }
+      return '\n\n[FILE: ' + name + ']\n' + body;
     }
     if (rec && gfStr(rec.note)) {
       // v2.0.37 (fix A): note содержит «текст не получен», но без reason метка не
@@ -493,7 +537,10 @@
           if (!step || step.done) { finish(false); return; }
           try { out += dec.decode(step.value, { stream: true }); } catch (eDec) { gfDiag('text-decode-error', {}); }
           if (out.length >= GF_TEXT_CAP) {
-            truncated = out.length > GF_TEXT_CAP;
+            // v2.7 (граница капа): чанк, попавший РОВНО на GF_TEXT_CAP, раньше
+            // оставлял truncated=false, хотя reader уже отменён и хвост тела
+            // потерян (живой ди-агностик: chars=200000 truncated=false).
+            truncated = true;
             out = out.slice(0, GF_TEXT_CAP);
             try { if (typeof reader.cancel === 'function') reader.cancel(); } catch (eCancel) { gfDiag('reader-cancel-error', {}); }
             finish(false);
@@ -697,7 +744,10 @@
             var u8 = new Uint8Array(buf || new ArrayBuffer(0));
             if (u8.length > GF_BODY_MAX) { done({ ok: false, reason: 'too-large', text: '' }); return; }
             gfDocxText(u8).then(function (parsed) {
-              done(parsed);
+              // v2.8: размер контейнера нужен метке крупного вложения.
+              var p = parsed || {};
+              if (!gfNum(p.size)) p.size = gfNum(gfHeader(res, 'content-length'));
+              done(p);
             }, function (eDocx) {
               gfWarn('gemini:files:docx', '[gemini-files] DOCX не разобран:', eDocx);
               done({ ok: false, reason: 'docx-error', text: '' });
@@ -712,7 +762,7 @@
         return gfReadTextCapped(res).then(function (rr) {
           var text = gfStr(rr && rr.text);
           if (!text) { done({ ok: false, reason: (rr && rr.error) ? 'body-error' : 'empty-body', text: '' }); return; }
-          done({ ok: true, text: text, truncated: (rr && rr.truncated) === true });
+          done({ ok: true, text: text, truncated: (rr && rr.truncated) === true, size: gfNum(gfHeader(res, 'content-length')) || 0 });
         }, function (eBody) {
           gfWarn('gemini:files:body', '[gemini-files] тело вложения не прочитано:', eBody);
           done({ ok: false, reason: 'body-error', text: '' });
@@ -889,6 +939,7 @@
           text: pdfCap.text,
           note: '',
           reason: '',
+          size: gfNum(r.size) || gfNum(item.ref && item.ref.size),
           truncated: pdfCap.truncated === true || r.truncated === true,
           chars: pdfCap.text.length,
           at: item.doneAt || 0
@@ -901,6 +952,7 @@
         text: '',
         note: gfNote(item.ref, r.size),
         reason: gfStr(r.reason) || 'pdf-no-text',
+        size: gfNum(r.size) || gfNum(item.ref && item.ref.size),
         truncated: false,
         chars: 0,
         at: item.doneAt || 0
@@ -914,6 +966,7 @@
       text: ok ? gfStr(r.text) : '',
       note: '',
       reason: ok ? '' : (gfStr(r.reason) || 'empty'),
+      size: gfNum(r.size) || gfNum(item.ref && item.ref.size),
       truncated: ok ? (r.truncated === true) : false,
       chars: ok ? gfStr(r.text).length : 0,
       at: item.doneAt || 0
@@ -1090,7 +1143,8 @@
         if (gfIsPdf(r) && !r.dl) {
           var pdfRec = {
             name: r.name, isImage: false, ok: false, text: '',
-            note: gfNote(r, 0), reason: 'pdf-no-url', truncated: false, chars: 0, at: 0
+            note: gfNote(r, 0), reason: 'pdf-no-url', size: gfNum(r.size),
+            truncated: false, chars: 0, at: 0
           };
           gfRecsByKey[r.dk] = pdfRec;
           m.recs[r.dk] = pdfRec;
@@ -1106,7 +1160,8 @@
         if (!gfIsPdf(r) && !gfIsDocx(r) && !gfIsText(r)) {
           var noteRec = {
             name: r.name, isImage: false, ok: false, text: '',
-            note: gfNote(r, 0), reason: 'unsupported-mime', truncated: false, chars: 0, at: 0
+            note: gfNote(r, 0), reason: 'unsupported-mime', size: gfNum(r.size),
+            truncated: false, chars: 0, at: 0
           };
           gfRecsByKey[r.dk] = noteRec;
           m.recs[r.dk] = noteRec;
@@ -1210,6 +1265,7 @@
   Fn.constants = {
     concurrency: GF_CONCURRENCY,
     textCap: GF_TEXT_CAP,
+    sectionTextCap: GF_SECTION_TEXT_CAP,
     totalCap: GF_TOTAL_CAP,
     timeoutMs: GF_TIMEOUT_MS,
     emitDebounceMs: GF_EMIT_DEBOUNCE_MS,

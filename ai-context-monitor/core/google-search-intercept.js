@@ -1,5 +1,5 @@
 (() => {
-  // utils/debug.js
+  // utils/debug.ts
   var DEBUG = false;
   var __aiCmLogRing = [];
   var __aiCmLogRingMax = 200;
@@ -21,7 +21,7 @@
     } catch (e) {
     }
   }
-  function debugLog2(level) {
+  function debugLog2(level, ...rest) {
     var args = Array.prototype.slice.call(arguments, 1);
     try {
       var line = args.map(__aiCmStringifyArg).join(" ");
@@ -104,7 +104,7 @@
     __aiCmPushLogRing("[swallow-soft-export] " + eSoftExport);
   }
 
-  // utils/intercept-common.js
+  // utils/intercept-common.ts
   function setIntervalVisible(fn, ms, opts) {
     var id = setInterval(function() {
       try {
@@ -118,6 +118,28 @@
       }
     }, ms);
     return id;
+  }
+  var ONFREEZE_ERROR_RE = /Only fetch keepalive is allowed during onfreeze/i;
+  function isOnFreezeError(error) {
+    try {
+      var message = error && typeof error.message !== "undefined" ? String(error.message) : String(error);
+      return ONFREEZE_ERROR_RE.test(message);
+    } catch (eText) {
+      return false;
+    }
+  }
+  function fetchGuarded(fetchFn, thisArg, args) {
+    try {
+      var list = Array.prototype.slice.call(args);
+      return Reflect.apply(fetchFn, thisArg, list);
+    } catch (eCall) {
+      if (!isOnFreezeError(eCall)) throw eCall;
+      swallowSoft(eCall, "intercept-common:onfreeze-fetch");
+      var rejected = Promise.reject(eCall);
+      rejected.catch(function() {
+      });
+      return rejected;
+    }
   }
 
   // core/google-search-intercept.js
@@ -1402,7 +1424,7 @@
       var isOpenFolwr = url.indexOf("/async/folwr") !== -1;
       var promise;
       try {
-        promise = origFetch.apply(this, arguments);
+        promise = fetchGuarded(origFetch, this, arguments);
       } catch (e) {
         return Promise.reject(e);
       }

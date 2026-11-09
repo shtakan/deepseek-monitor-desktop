@@ -1,5 +1,5 @@
 (() => {
-  // utils/debug.js
+  // utils/debug.ts
   var DEBUG = false;
   var __aiCmLogRing = [];
   var __aiCmLogRingMax = 200;
@@ -21,7 +21,7 @@
     } catch (e) {
     }
   }
-  function debugLog2(level) {
+  function debugLog2(level, ...rest) {
     var args = Array.prototype.slice.call(arguments, 1);
     try {
       var line = args.map(__aiCmStringifyArg).join(" ");
@@ -104,7 +104,7 @@
     __aiCmPushLogRing("[swallow-soft-export] " + eSoftExport);
   }
 
-  // utils/intercept-common.js
+  // utils/intercept-common.ts
   function setIntervalVisible(fn, ms, opts) {
     var id = setInterval(function() {
       try {
@@ -119,6 +119,276 @@
     }, ms);
     return id;
   }
+  var ONFREEZE_ERROR_RE = /Only fetch keepalive is allowed during onfreeze/i;
+  function isOnFreezeError(error) {
+    try {
+      var message = error && typeof error.message !== "undefined" ? String(error.message) : String(error);
+      return ONFREEZE_ERROR_RE.test(message);
+    } catch (eText) {
+      return false;
+    }
+  }
+  function fetchGuarded(fetchFn, thisArg, args) {
+    try {
+      var list = Array.prototype.slice.call(args);
+      return Reflect.apply(fetchFn, thisArg, list);
+    } catch (eCall) {
+      if (!isOnFreezeError(eCall)) throw eCall;
+      swallowSoft(eCall, "intercept-common:onfreeze-fetch");
+      var rejected = Promise.reject(eCall);
+      rejected.catch(function() {
+      });
+      return rejected;
+    }
+  }
+
+  // utils/perplexity-parser.ts
+  function parsePerplexityThread(json) {
+    function getTrim(obj, name) {
+      if (!obj || typeof obj !== "object") return void 0;
+      var rec = obj;
+      var keys = Object.keys(rec);
+      for (var i2 = 0; i2 < keys.length; i2++) {
+        if (keys[i2].trim() === name) return rec[keys[i2]];
+      }
+      return void 0;
+    }
+    function isAttachmentUrl(url) {
+      if (typeof url !== "string" || !url) return false;
+      return url.indexOf("ppl-ai-file-upload") !== -1 && url.indexOf("/attachments/") !== -1;
+    }
+    function isImageAttachment(url) {
+      if (!isAttachmentUrl(url)) return false;
+      var path = String(url).split("#")[0].split("?")[0];
+      return /\.(jpe?g|png|gif|webp|bmp|svg|avif)$/i.test(path);
+    }
+    function stripUrlQuery(url) {
+      return String(url).split("#")[0].split("?")[0];
+    }
+    function collectEntryImages(entry2) {
+      var out = [];
+      var atts = getTrim(entry2, "attachments");
+      if (!Array.isArray(atts)) return out;
+      for (var a = 0; a < atts.length; a++) {
+        var att = atts[a];
+        var url = "";
+        if (typeof att === "string") url = att;
+        else if (att && typeof att === "object") url = getTrim(att, "url") || getTrim(att, "src") || "";
+        if (!isImageAttachment(url)) continue;
+        var clean = stripUrlQuery(url);
+        if (out.indexOf(clean) === -1) out.push(clean);
+      }
+      return out;
+    }
+    function basenameOf(url) {
+      var parts = String(url || "").split("/");
+      return parts[parts.length - 1] || "";
+    }
+    var model = "";
+    var pieces = [];
+    var ids = [];
+    var count = 0;
+    var lastText = "";
+    var messages = [];
+    try {
+      var entries = getTrim(json, "entries");
+      if (!Array.isArray(entries)) entries = [];
+      for (var i = 0; i < entries.length; i++) {
+        var entry = entries[i];
+        if (!entry || typeof entry !== "object") continue;
+        var queryStr = getTrim(entry, "query_str") || "";
+        var displayModel = getTrim(entry, "display_model") || "";
+        var userSelectedModel = getTrim(entry, "user_selected_model") || "";
+        var threadUrlSlug = getTrim(entry, "thread_url_slug") || "";
+        var entryModel = displayModel || userSelectedModel || "";
+        if (entryModel) model = entryModel;
+        var entryId = threadUrlSlug || "entry" + i;
+        var entryImages = collectEntryImages(entry);
+        if (queryStr && typeof queryStr === "string" && queryStr.trim()) {
+          var userText = queryStr.trim();
+          for (var im = 0; im < entryImages.length; im++) {
+            userText += "\n[Image: " + entryImages[im] + "]";
+          }
+          pieces.push(userText);
+          ids.push(entryId + "_user");
+          count++;
+          lastText = userText;
+          messages.push({ role: "user", text: userText });
+        }
+        var entryImageNames = [];
+        for (var inm = 0; inm < entryImages.length; inm++) {
+          entryImageNames.push(basenameOf(entryImages[inm]));
+        }
+        var blocks = getTrim(entry, "blocks");
+        var assistantPushed = false;
+        if (Array.isArray(blocks)) {
+          var assistantTextParts = [];
+          for (var j = 0; j < blocks.length; j++) {
+            var block = blocks[j];
+            if (!block || typeof block !== "object") continue;
+            var wfBlock = getTrim(block, "workflow_block");
+            if (wfBlock && typeof wfBlock === "object") {
+              var steps = getTrim(wfBlock, "steps");
+              if (Array.isArray(steps)) {
+                for (var s = 0; s < steps.length; s++) {
+                  var step = steps[s];
+                  if (!step || typeof step !== "object") continue;
+                  var items = getTrim(step, "items");
+                  if (Array.isArray(items)) {
+                    for (var it = 0; it < items.length; it++) {
+                      var item = items[it];
+                      if (!item || typeof item !== "object") continue;
+                      if (getTrim(item, "type") === "WORKFLOW_ITEM_TEXT") {
+                        var payload = getTrim(item, "payload");
+                        if (payload && typeof payload === "object") {
+                          var textPayload = getTrim(payload, "text_payload");
+                          if (textPayload && typeof textPayload === "object") {
+                            var text = getTrim(textPayload, "text");
+                            if (typeof text === "string" && text.trim()) {
+                              assistantTextParts.push(text.trim());
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+            var wrBlock = getTrim(block, "web_result_block");
+            if (wrBlock && typeof wrBlock === "object") {
+              var webResults = getTrim(wrBlock, "web_results");
+              if (Array.isArray(webResults)) {
+                for (var w = 0; w < webResults.length; w++) {
+                  var wr = webResults[w];
+                  if (!wr || typeof wr !== "object") continue;
+                  var wrName = getTrim(wr, "name") || "";
+                  var wrSnippet = getTrim(wr, "snippet") || "";
+                  var wrUrl = getTrim(wr, "url");
+                  if (isAttachmentUrl(wrUrl)) continue;
+                  if (!wrUrl && wrName && !wrSnippet && entryImageNames.indexOf(basenameOf(String(wrName))) !== -1) continue;
+                  if (wrName || wrSnippet) {
+                    var wrText = (wrName ? wrName + ": " : "") + (wrSnippet || "");
+                    if (wrText.trim()) assistantTextParts.push("[source] " + wrText.trim());
+                  }
+                }
+              }
+            }
+          }
+          if (assistantTextParts.length > 0) {
+            var assistantText = assistantTextParts.join("\n").trim();
+            if (assistantText) {
+              pieces.push(assistantText);
+              ids.push(entryId + "_assistant");
+              count++;
+              lastText = assistantText;
+              messages.push({ role: "assistant", text: assistantText });
+              assistantPushed = true;
+            }
+          }
+        }
+        if (!assistantPushed) {
+          var entryText = getTrim(entry, "text");
+          if (typeof entryText === "string" && entryText.trim()) {
+            var stepsJson = null;
+            try {
+              stepsJson = JSON.parse(entryText);
+            } catch (e1) {
+              stepsJson = null;
+            }
+            var stepItems = null;
+            if (Array.isArray(stepsJson)) stepItems = stepsJson;
+            else if (stepsJson && typeof stepsJson === "object") {
+              stepItems = Object.keys(stepsJson).map(function(k) {
+                return stepsJson[k];
+              });
+            }
+            var answerText = "";
+            if (stepItems) {
+              for (var si = 0; si < stepItems.length; si++) {
+                var stepItem = stepItems[si];
+                if (!stepItem || typeof stepItem !== "object") continue;
+                if (getTrim(stepItem, "step_type") !== "FINAL") continue;
+                var stepContent = getTrim(stepItem, "content");
+                var contentObj = null;
+                if (typeof stepContent === "string") {
+                  try {
+                    contentObj = JSON.parse(stepContent);
+                  } catch (e2) {
+                    contentObj = null;
+                  }
+                } else if (stepContent && typeof stepContent === "object") {
+                  contentObj = stepContent;
+                }
+                if (!contentObj) continue;
+                var answerRaw = getTrim(contentObj, "answer");
+                if (typeof answerRaw === "string" && answerRaw.trim()) {
+                  var answerObj = null;
+                  try {
+                    answerObj = JSON.parse(answerRaw);
+                  } catch (e3) {
+                    answerObj = null;
+                  }
+                  if (answerObj && typeof answerObj === "object") {
+                    var answerField = getTrim(answerObj, "answer");
+                    if (typeof answerField === "string") answerText = answerField;
+                  } else if (typeof answerObj === "string") {
+                    answerText = answerObj;
+                  }
+                } else if (answerRaw && typeof answerRaw === "object") {
+                  var answerField2 = getTrim(answerRaw, "answer");
+                  if (typeof answerField2 === "string") answerText = answerField2;
+                }
+                if (answerText) break;
+              }
+            }
+            answerText = answerText.trim();
+            if (answerText) {
+              pieces.push(answerText);
+              ids.push(entryId + "_assistant");
+              count++;
+              lastText = answerText;
+              messages.push({ role: "assistant", text: answerText });
+            }
+          }
+        }
+      }
+    } catch (e) {
+      swallowSoft(e, "perplexity-utils:parsePerplexityThread");
+    }
+    return {
+      text: pieces.join("\n"),
+      count,
+      lastText,
+      modelSlug: model,
+      pieces,
+      ids,
+      messages,
+      model
+    };
+  }
+  function stripPerplexityHistoryTruncation(urlStr) {
+    var src = String(urlStr || "");
+    if (!src) return src;
+    var hash = "";
+    var h = src.indexOf("#");
+    if (h !== -1) {
+      hash = src.slice(h);
+      src = src.slice(0, h);
+    }
+    var q = src.indexOf("?");
+    if (q === -1) return src + hash;
+    var base = src.slice(0, q);
+    var parts = src.slice(q + 1).split("&");
+    var kept = [];
+    for (var i = 0; i < parts.length; i++) {
+      if (!parts[i]) continue;
+      var name = parts[i].split("=")[0];
+      if (name === "limit" || name === "offset" || name === "from_first") continue;
+      kept.push(parts[i]);
+    }
+    return base + (kept.length ? "?" + kept.join("&") : "") + hash;
+  }
 
   // core/perplexity-intercept.js
   (function() {
@@ -130,7 +400,7 @@
       });
     } catch (e) {
     }
-    console.log("[perplexity-intercept] parser available: " + typeof window.parsePerplexityThread);
+    console.log("[perplexity-intercept] parser available: " + typeof parsePerplexityThread);
     var originalFetch = window.fetch;
     if (typeof originalFetch !== "function") return;
     var lastHistoryUrl = null;
@@ -256,7 +526,7 @@
         var parts = location.pathname.split("/");
         if (parts.length >= 3) {
           var type = parts[1];
-          if (type === "search" || type === "thread") return parts.slice(2).join("/");
+          if (type === "search" || type === "thread" || type === "session") return parts.slice(2).join("/");
         }
         return "";
       } catch (e) {
@@ -273,7 +543,7 @@
         } catch (eU) {
           path = String(urlStr);
         }
-        var m = path.match(/\/(?:search|thread|rest\/thread|api\/thread)\/([^\/?#]+)/);
+        var m = path.match(/\/(?:search|thread|session|rest\/thread|rest\/session|api\/thread)\/([^\/?#]+)/);
         if (!m) return "";
         var raw = m[1];
         try {
@@ -328,20 +598,13 @@
       return false;
     }
     function normalizeHistoryUrl(urlStr) {
-      var u = String(urlStr || "");
-      try {
-        if (typeof window !== "undefined" && typeof window.stripPerplexityHistoryTruncation === "function") {
-          return window.stripPerplexityHistoryTruncation(u);
-        }
-      } catch (eNorm) {
-      }
-      return u;
+      return stripPerplexityHistoryTruncation(String(urlStr || ""));
     }
     function learnTemplateFromRejectedUrl(urlStr) {
       if (historyUrlTemplate) return false;
       var url = String(urlStr || "");
       if (!hasFullHistoryParams(url)) return false;
-      var m = url.match(/\/(?:search|thread|rest\/thread|api\/thread)\/([^\/?#]+)/);
+      var m = url.match(/\/(?:search|thread|session|rest\/thread|rest\/session|api\/thread)\/([^\/?#]+)/);
       if (!m) return false;
       historyUrlTemplate = normalizeHistoryUrl(url.slice(0, m.index) + m[0].slice(0, m[0].length - m[1].length) + "{slug}" + url.slice(m.index + m[0].length));
       debugLog("log", "[perplexity-intercept] \u0433\u0435\u0439\u0442 M-12: \u0448\u0430\u0431\u043B\u043E\u043D \u0432\u044B\u0443\u0447\u0435\u043D \u0438\u0437 URL \u043E\u0442\u043A\u043B\u043E\u043D\u0451\u043D\u043D\u043E\u0433\u043E \u0441\u043D\u0438\u043C\u043A\u0430: " + historyUrlTemplate);
@@ -491,7 +754,7 @@
     function emitSnapshot(data, when) {
       var parsed = { text: "", count: 0 };
       try {
-        parsed = window.parsePerplexityThread ? window.parsePerplexityThread(data) : { text: "", count: 0 };
+        parsed = parsePerplexityThread(data) || { text: "", count: 0 };
       } catch (e) {
         console.log("[perplexity-intercept] \u043E\u0448\u0438\u0431\u043A\u0430 emitSnapshot:", e && e.message);
         return;
@@ -553,18 +816,47 @@
         }
       }
     }
+    var PERPLEXITY_DOM_MESSAGE_SELECTORS = [
+      '[data-testid="answer"]',
+      '[data-testid="copilot-answer"]',
+      '[class*="prose"]'
+    ];
+    function aiCmPerplexityDomMessageCount() {
+      try {
+        if (typeof document === "undefined" || !document || typeof document.querySelectorAll !== "function") return 0;
+        var best = 0;
+        for (var i = 0; i < PERPLEXITY_DOM_MESSAGE_SELECTORS.length; i++) {
+          var n = 0;
+          try {
+            n = document.querySelectorAll(PERPLEXITY_DOM_MESSAGE_SELECTORS[i]).length;
+          } catch (eQ) {
+            n = 0;
+          }
+          if (n > best) best = n;
+        }
+        return best;
+      } catch (e) {
+        return 0;
+      }
+    }
     function processHistoryData(data, url, source) {
       if (!data) return;
-      if (!currentConvId) {
+      var domMsgs = aiCmPerplexityDomMessageCount();
+      if (!currentConvId && domMsgs <= 0) {
         debugLog("log", "[perplexity-intercept] \u0441\u043D\u0438\u0444\u0444\u0438\u043D\u0433 (" + source + "): \u043D\u0435\u0442 slug \u0441\u0442\u0440\u0430\u043D\u0438\u0446\u044B \u2014 \u043D\u0435 \u0442\u0440\u0435\u0434, \u0441\u043D\u0438\u043C\u043E\u043A \u043D\u0435 \u044D\u043C\u0438\u0442\u0438\u043C (" + url + ")");
         learnTemplateFromRejectedUrl(url);
         return;
       }
-      var sniffSlug = snapshotSlug(data, url);
-      if (sniffSlug !== currentConvId) {
-        debugLog("log", "[perplexity-intercept] \u0441\u043D\u0438\u0444\u0444\u0438\u043D\u0433 (" + source + "): \u0447\u0443\u0436\u043E\u0439 \u0441\u043D\u0438\u043C\u043E\u043A (slug=" + (sniffSlug || "(\u043D\u0435 \u043E\u043F\u0440\u0435\u0434\u0435\u043B\u0451\u043D)") + " != slug \u0441\u0442\u0440\u0430\u043D\u0438\u0446\u044B " + currentConvId + ") \u2014 \u043F\u0440\u043E\u043F\u0443\u0441\u043A, URL: " + url);
-        learnTemplateFromRejectedUrl(url);
-        return;
+      if (!currentConvId) {
+        debugLog("log", "[perplexity-intercept] \u0441\u043D\u0438\u0444\u0444\u0438\u043D\u0433 (" + source + "): \u043D\u0435\u0442 slug \u0441\u0442\u0440\u0430\u043D\u0438\u0446\u044B, \u043D\u043E \u0432 DOM " + domMsgs + " \u0441\u043E\u043E\u0431\u0449. \u2014 \u044D\u043C\u0438\u0442 \u0440\u0430\u0437\u0440\u0435\u0448\u0451\u043D (M-12 fallback)");
+      }
+      if (currentConvId) {
+        var sniffSlug = snapshotSlug(data, url);
+        if (sniffSlug !== currentConvId) {
+          debugLog("log", "[perplexity-intercept] \u0441\u043D\u0438\u0444\u0444\u0438\u043D\u0433 (" + source + "): \u0447\u0443\u0436\u043E\u0439 \u0441\u043D\u0438\u043C\u043E\u043A (slug=" + (sniffSlug || "(\u043D\u0435 \u043E\u043F\u0440\u0435\u0434\u0435\u043B\u0451\u043D)") + " != slug \u0441\u0442\u0440\u0430\u043D\u0438\u0446\u044B " + currentConvId + ") \u2014 \u043F\u0440\u043E\u043F\u0443\u0441\u043A, URL: " + url);
+          learnTemplateFromRejectedUrl(url);
+          return;
+        }
       }
       console.log("[perplexity-intercept] \u0441\u043D\u0438\u0444\u0444\u0438\u043D\u0433: \u0441\u043D\u0438\u043C\u043E\u043A \u0438\u0441\u0442\u043E\u0440\u0438\u0438 \u043F\u043E\u0439\u043C\u0430\u043D (" + source + "), URL: " + url);
       if (bootstrapTimer) {
@@ -696,7 +988,7 @@
       if (isSameHost && !isExcluded && !isGuard) {
         console.log("[perplexity-intercept] diag: same-host GET", url.slice(0, 140));
       }
-      var fetchPromise = originalFetch.apply(this, arguments);
+      var fetchPromise = fetchGuarded(originalFetch, this, arguments);
       if (shouldSniff) {
         fetchPromise.then(function(resp) {
           if (!resp || !resp.ok) return;
@@ -737,6 +1029,6 @@
     bootstrapTimer = setTimeout(function() {
       bootstrapSnapshot();
     }, 1500);
-    console.log("[perplexity-intercept] \u043F\u0435\u0440\u0435\u0445\u0432\u0430\u0442\u0447\u0438\u043A Perplexity \u0443\u0441\u0442\u0430\u043D\u043E\u0432\u043B\u0435\u043D (window.parsePerplexityThread + extractUrl + \u0441\u043D\u0438\u0444\u0444\u0438\u043D\u0433, MAIN world, document_start)");
+    console.log("[perplexity-intercept] \u043F\u0435\u0440\u0435\u0445\u0432\u0430\u0442\u0447\u0438\u043A Perplexity \u0443\u0441\u0442\u0430\u043D\u043E\u0432\u043B\u0435\u043D (parsePerplexityThread + extractUrl + \u0441\u043D\u0438\u0444\u0444\u0438\u043D\u0433, MAIN world, document_start)");
   })();
 })();
