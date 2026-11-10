@@ -3,6 +3,10 @@
 Все заметные изменения проекта. Формат — [Keep a Changelog](https://keepachangelog.com/ru/1.1.0/),
 версионирование — [Semantic Versioning](https://semver.org/lang/ru/).
 
+## [1.1.8] - 2026-11-10
+
+Обновление поставки встроенного расширения AI Context Monitor (2.1.1). Исправление петли определения модели Gemini, чистка ESLint.
+
 ## [1.1.7] - 2026-11-09
 
 Обновление поставки встроенного расширения **AI Context Monitor** (2.1.0).

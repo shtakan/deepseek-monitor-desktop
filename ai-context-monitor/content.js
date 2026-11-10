@@ -3464,13 +3464,17 @@
     }
     return "";
   }
+  function looksLikeFileOrDate(s) {
+    return /\.(?:md|pdf|txt|json)$/i.test(s) || /-20\d\d-/.test(s);
+  }
   function extractModelName(node) {
     var found = null;
     (function walk(n) {
       if (found) return;
       if (typeof n === "string") {
-        if (n.length < 60 && n.indexOf("\n") < 0 && MODEL_NAME_RE.test(n)) {
-          found = n.trim();
+        var s = n.trim();
+        if (s.length < 60 && s.indexOf("\n") < 0 && !looksLikeFileOrDate(s) && MODEL_NAME_RE.test(s)) {
+          found = s;
           return;
         }
       } else if (Array.isArray(n)) {
@@ -4022,7 +4026,7 @@
       THINKING_BODY_EXTRA_RE = /^(I'm (?:currently|now|also|still) (?:focused|zeroing|analyzing|integrating|identifying|assessing|refining|evaluating|structuring|addressing|considering|formulating|prioritizing|parsing)|I've (?:been|now) (?:analyzing|noted|shifted|outlined|fleshed)|My (?:focus|goal) is|Specifically, I've)\b/i;
       THINKING_GERUND_RE = /^(Assessing|Defining|Refining|Outlining|Constructing|Uncovering|Tracing|Confirming|Reassuring|Clarifying|Deepening|Integrating|Evaluating|Formulating|Focusing|Prioritizing|Solidifying|Exploring|Analyzing|Reviewing|Validating|Synthesizing|Considering|Identifying|Structuring|Addressing|Reconstructing)\b/;
       FILE_ATTACHMENT_RE = /File attachment was not previously registered/;
-      MODEL_NAME_RE = /^\s*(?:Gemini\s*[\d.]?|\d+(?:\.\d+)?\s+(?:Flash|Pro|Ultra|Gemini))/i;
+      MODEL_NAME_RE = /^\s*(?:Gemini\s+(?:\d+(?:\.\d+)*\s+)?|\d+(?:\.\d+)*\s+)(?:Flash|Pro|Ultra)(?:\s+(?:Lite|Расширенн[а-яё]*|Extended))?\s*$/i;
       filePoolsByConv = {};
       THINKING_ASSISTANT_RE = /^([A-Z][a-z]+ing\b|I'm\b|I've\b|My (?:focus|goal)\b|sr |Ev )/;
       LEADING_THINKING_RE = /^\s*\*?\*?([A-Z][a-z]+ing\b|I'm|I've|My (focus|goal)|sr |Ev )/;
@@ -4947,6 +4951,110 @@
     }
   });
 
+  // ../utils/gemini-ui-model.ts
+  function modelFamilyOf(name) {
+    const m = String(name || "").match(/ultra|pro|flash/i);
+    return m ? m[0].toLowerCase() : "";
+  }
+  function normalizeUiModelText(text) {
+    return String(text || "").replace(/([a-zа-яё])([A-ZА-ЯЁ])/g, "$1 $2").replace(/\s+/g, " ").trim();
+  }
+  function extractUiModelText(text) {
+    const t = String(text || "").replace(/\s+/g, " ").trim();
+    if (!t || t.length > 60) return "";
+    const m = t.match(GEMINI_UI_MODEL_RE);
+    if (!m) return "";
+    if (!m[1] && !/gemini/i.test(t)) return "";
+    return m[0].trim();
+  }
+  function isAutoUiModelText(text) {
+    return GEMINI_UI_AUTO_RE.test(String(text || ""));
+  }
+  function probeGeminiUiPickerPrimaryText(deps, snapModelId) {
+    const nodes = deps.document.querySelectorAll(".picker-primary-text");
+    for (let i = 0; i < nodes.length; i++) {
+      const text = normalizeUiModelText(nodes[i].textContent);
+      if (!text || text.length > 60) continue;
+      if (isAutoUiModelText(text)) return GEMINI_UI_AUTO_NAME;
+      const name = extractUiModelText(text);
+      const m = (name || text).match(GEMINI_UI_MODEL_RE);
+      const fam = m ? modelFamilyOf(m[0]) : "";
+      if (m && fam) {
+        if (m[1]) {
+          deps.cache[fam] = m[0].trim();
+          return m[0].trim();
+        }
+        const varM = m[0].match(/lite|расширенн[а-яё]*|extended|fast/i);
+        return resolveFamilyVariantId(deps, fam, varM ? varM[0] : "", snapModelId) || "";
+      }
+      if (/gemini/i.test(text)) return GEMINI_UI_AUTO_NAME;
+    }
+    return "";
+  }
+  function probeGeminiUiMenuChecked(doc) {
+    const items = doc.querySelectorAll('[role="menuitemradio"], [role="menuitem"], [role="option"]');
+    for (let i = 0; i < items.length; i++) {
+      const it = items[i];
+      if (it.getAttribute("aria-checked") !== "true" && !it.querySelector('[aria-checked="true"]')) continue;
+      if (isAutoUiModelText(normalizeUiModelText(it.textContent))) return GEMINI_UI_AUTO_NAME;
+      const name = extractUiModelText(it.textContent);
+      if (name) return name;
+    }
+    return "";
+  }
+  function resolveFamilyVariantId(deps, fam, variant, snapModelId) {
+    const modelConfig = deps.modelConfig;
+    const cached = deps.cache[fam];
+    if (cached) {
+      const cachedId = modelConfig.resolveModelId(cached);
+      if (cachedId) return cachedId;
+    }
+    if (snapModelId) {
+      const snap = modelConfig.getModel(snapModelId);
+      const snapName = snap && snap.name || "";
+      const snapFam = snapName.match(/ultra|pro|flash/i);
+      if (snapFam && snapFam[0].toLowerCase() === fam) return snapModelId;
+    }
+    const defId = modelConfig.getFamilyDefaultModelId(fam, variant);
+    if (defId) return defId;
+    return snapModelId || "";
+  }
+  function probeGeminiUiButton(deps, snapModelId) {
+    const btn = deps.document.querySelector("button.input-area-switch");
+    if (!btn || !btn.textContent) return "";
+    const text = normalizeUiModelText(btn.textContent);
+    const m = text.match(GEMINI_UI_MODEL_RE);
+    if (!m) return "";
+    const fam = modelFamilyOf(m[0]);
+    if (!fam) return "";
+    if (m[1]) {
+      deps.cache[fam] = m[0].trim();
+      return m[0].trim();
+    }
+    const varM = m[0].match(/lite|расширенн[а-яё]*|extended|fast/i);
+    const variant = varM ? varM[0] : "";
+    return resolveFamilyVariantId(deps, fam, variant, snapModelId);
+  }
+  function detectSelectedModelFromDom(deps, snapModelId) {
+    const fromMenu = probeGeminiUiMenuChecked(deps.document);
+    if (fromMenu) {
+      const fam = modelFamilyOf(fromMenu);
+      if (fam) deps.cache[fam] = fromMenu;
+      return fromMenu;
+    }
+    const fromPicker = probeGeminiUiPickerPrimaryText(deps, snapModelId);
+    if (fromPicker) return fromPicker;
+    return probeGeminiUiButton(deps, snapModelId) || "";
+  }
+  var GEMINI_UI_MODEL_RE, GEMINI_UI_AUTO_NAME, GEMINI_UI_AUTO_RE;
+  var init_gemini_ui_model = __esm({
+    "../utils/gemini-ui-model.ts"() {
+      GEMINI_UI_MODEL_RE = /(?:gemini\s*)?(\d+(?:[.,]\d+)?)?\s*(ultra|pro|flash)(?:\s+(?:lite|расширенн[аяый]|extended|fast))?/i;
+      GEMINI_UI_AUTO_NAME = "Gemini (\u0410\u0432\u0442\u043E)";
+      GEMINI_UI_AUTO_RE = /(?:^|[^a-zа-яё])(?:авто|auto)(?:[^a-zа-яё]|$)/i;
+    }
+  });
+
   // entry-content.js
   var require_entry_content = __commonJS({
     "entry-content.js"(exports, module) {
@@ -4959,6 +5067,7 @@
       init_export_emit_pipeline();
       init_gemini_batchexecute_parser();
       init_google_search_folwr_parser();
+      init_gemini_ui_model();
       var BaseAdapter = class {
         constructor() {
           this.siteName = "base";
@@ -10618,10 +10727,10 @@
           var filesApiD = typeof window !== "undefined" && window.AiCmBaseHandler ? window.AiCmBaseHandler : null;
           if (filesApiD && typeof filesApiD.aiCmFilesDrainDefer === "function" && filesApiD.aiCmFilesDrainDefer(cid, percentage, reason, netSynced)) return;
           if (typeof aiCmDeferAutoExportOnLiveStream === "function" && aiCmDeferAutoExportOnLiveStream(cid, percentage)) return;
-          var filesApiD = typeof window !== "undefined" && window.AiCmBaseHandler ? window.AiCmBaseHandler : null;
-          var filesDrainSiteD = filesApiD && typeof filesApiD.aiCmFilesDrainSite === "function" ? filesApiD.aiCmFilesDrainSite() === true : false;
+          var filesApiD2 = typeof window !== "undefined" && window.AiCmBaseHandler ? window.AiCmBaseHandler : null;
+          var filesDrainSiteD = filesApiD2 && typeof filesApiD2.aiCmFilesDrainSite === "function" ? filesApiD2.aiCmFilesDrainSite() === true : false;
           var netSyncSiteD = typeof aiCmExportNetSyncSite === "function" ? aiCmExportNetSyncSite() : false;
-          if (netSynced !== true && (filesDrainSiteD || netSyncSiteD) && (typeof aiCmExportFilesThenNetSync === "function" || typeof aiCmExportNetSyncThen === "function" || filesApiD && typeof filesApiD.aiCmExportFilesDrainThen === "function")) {
+          if (netSynced !== true && (filesDrainSiteD || netSyncSiteD) && (typeof aiCmExportFilesThenNetSync === "function" || typeof aiCmExportNetSyncThen === "function" || filesApiD2 && typeof filesApiD2.aiCmExportFilesDrainThen === "function")) {
             if (!aiCmNetSyncInFlight[cid]) {
               aiCmNetSyncInFlight[cid] = 1;
               var selfSync = function() {
@@ -10633,8 +10742,8 @@
                   aiCmExportFilesThenNetSync(cid, selfSync);
                 } else if (netSyncSiteD && typeof aiCmExportNetSyncThen === "function") {
                   aiCmExportNetSyncThen(cid, selfSync);
-                } else if (filesApiD && typeof filesApiD.aiCmExportFilesDrainThen === "function") {
-                  filesApiD.aiCmExportFilesDrainThen(cid, selfSync, 6e3);
+                } else if (filesApiD2 && typeof filesApiD2.aiCmExportFilesDrainThen === "function") {
+                  filesApiD2.aiCmExportFilesDrainThen(cid, selfSync, 6e3);
                 } else {
                   selfSync();
                 }
@@ -12043,77 +12152,19 @@
           attributes: false
         });
       }
-      var GEMINI_UI_MODEL_RE = /(?:gemini\s*)?(\d+(?:[.,]\d+)?)?\s*(ultra|pro|flash)(?:\s+(?:lite|расширенн[аяый]|extended|fast))?/i;
       var geminiUiModelByFamily = {};
       var lastModelSourceSig = "";
-      function extractUiModelText(text) {
-        const t = String(text || "").replace(/\s+/g, " ").trim();
-        if (!t || t.length > 60) return "";
-        const m = t.match(GEMINI_UI_MODEL_RE);
-        if (!m) return "";
-        if (!m[1] && !/gemini/i.test(t)) return "";
-        return m[0].trim();
-      }
-      function probeGeminiUiMenuChecked() {
-        const items = document.querySelectorAll('[role="menuitemradio"], [role="menuitem"], [role="option"]');
-        for (var i = 0; i < items.length; i++) {
-          var it = items[i];
-          if (it.getAttribute("aria-checked") !== "true" && !it.querySelector('[aria-checked="true"]')) continue;
-          const name = extractUiModelText(it.textContent);
-          if (name) return name;
-        }
-        return "";
-      }
-      function normalizeUiModelText(text) {
-        return String(text || "").replace(/([a-zа-яё])([A-ZА-ЯЁ])/g, "$1 $2").replace(/\s+/g, " ").trim();
-      }
-      function resolveFamilyVariantId(fam, variant, snapModelId) {
-        const cached = geminiUiModelByFamily[fam];
-        if (cached) {
-          const cachedId = ModelConfig.resolveModelId(cached);
-          if (cachedId) return cachedId;
-        }
-        if (snapModelId) {
-          const snapName = ModelConfig.getModel(snapModelId) && ModelConfig.getModel(snapModelId).name || "";
-          const snapFam = snapName.match(/ultra|pro|flash/i);
-          if (snapFam && snapFam[0].toLowerCase() === fam) return snapModelId;
-        }
-        const defId = ModelConfig.getFamilyDefaultModelId && ModelConfig.getFamilyDefaultModelId(fam, variant);
-        if (defId) return defId;
-        return snapModelId || "";
-      }
-      function probeGeminiUiButton(snapModelId) {
-        const btn = document.querySelector("button.input-area-switch");
-        if (!btn || !btn.textContent) return "";
-        const text = normalizeUiModelText(btn.textContent);
-        const m = text.match(GEMINI_UI_MODEL_RE);
-        if (!m) return "";
-        const famM = m[0].match(/ultra|pro|flash/i);
-        if (!famM) return "";
-        const fam = famM[0].toLowerCase();
-        if (m[1]) {
-          geminiUiModelByFamily[fam] = m[0].trim();
-          return m[0].trim();
-        }
-        const varM = m[0].match(/lite|расширенн[а-яё]*|extended|fast/i);
-        return resolveFamilyVariantId(fam, varM ? varM[0] : "", snapModelId);
-      }
-      function detectSelectedModelFromDom(snapModelId) {
-        const fromMenu = probeGeminiUiMenuChecked();
-        if (fromMenu) {
-          const famM = fromMenu.match(/ultra|pro|flash/i);
-          if (famM) geminiUiModelByFamily[famM[0].toLowerCase()] = fromMenu;
-          return fromMenu;
-        }
-        return probeGeminiUiButton(snapModelId) || "";
-      }
       function resolveCurrentModel() {
         const rawFromNet = detectedModelSlug || "";
         const snapNetId = rawFromNet ? ModelConfig.resolveModelId(rawFromNet) : null;
         let uiRaw = "";
         try {
           if ((window.location.hostname || "").indexOf("gemini.google.com") !== -1) {
-            uiRaw = detectSelectedModelFromDom(snapNetId) || "";
+            uiRaw = detectSelectedModelFromDom({
+              document,
+              modelConfig: ModelConfig,
+              cache: geminiUiModelByFamily
+            }, snapNetId) || "";
           }
         } catch (e) {
           uiRaw = "";
@@ -12126,8 +12177,8 @@
         if (snapModelId) {
           lastSnapshotModelName = ModelConfig.getModel(snapModelId)?.name || snapModelId;
         }
-        const raw = popupModelId || rawSnapshot || uiRaw || "";
-        const rawSrc = popupModelId ? "\u043F\u043E\u043F\u0430\u043F" : rawSnapshot ? rawFromNet ? "\u0441\u0435\u0442\u044C" : "DOM" : uiRaw ? "dom" : "";
+        const raw = popupModelId || uiRaw || rawSnapshot || "";
+        const rawSrc = popupModelId ? "\u043F\u043E\u043F\u0430\u043F" : uiRaw ? "dom" : rawSnapshot ? rawFromNet ? "\u0441\u0435\u0442\u044C" : "DOM" : "";
         let modelId = raw ? ModelConfig.resolveModelId(raw) : null;
         let path;
         if (modelId) {

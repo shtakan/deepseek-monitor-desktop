@@ -126,14 +126,18 @@
     }
     return "";
   }
-  var MODEL_NAME_RE = /^\s*(?:Gemini\s*[\d.]?|\d+(?:\.\d+)?\s+(?:Flash|Pro|Ultra|Gemini))/i;
+  var MODEL_NAME_RE = /^\s*(?:Gemini\s+(?:\d+(?:\.\d+)*\s+)?|\d+(?:\.\d+)*\s+)(?:Flash|Pro|Ultra)(?:\s+(?:Lite|Расширенн[а-яё]*|Extended))?\s*$/i;
+  function looksLikeFileOrDate(s) {
+    return /\.(?:md|pdf|txt|json)$/i.test(s) || /-20\d\d-/.test(s);
+  }
   function extractModelName(node) {
     var found = null;
     (function walk(n) {
       if (found) return;
       if (typeof n === "string") {
-        if (n.length < 60 && n.indexOf("\n") < 0 && MODEL_NAME_RE.test(n)) {
-          found = n.trim();
+        var s = n.trim();
+        if (s.length < 60 && s.indexOf("\n") < 0 && !looksLikeFileOrDate(s) && MODEL_NAME_RE.test(s)) {
+          found = s;
           return;
         }
       } else if (Array.isArray(n)) {
