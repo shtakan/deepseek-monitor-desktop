@@ -3,6 +3,25 @@
 Все заметные изменения проекта. Формат — [Keep a Changelog](https://keepachangelog.com/ru/1.1.0/),
 версионирование — [Semantic Versioning](https://semver.org/lang/ru/).
 
+## [1.2.0] - 2026-11-24
+
+Обновление поставки встроенного расширения AI Context Monitor (**2.1.1 → 2.2.0**):
+единая модель сообщений, LimitModel (окно/порог/лимит аккаунта), токенизатор v3,
+активное обновление ChatGPT и context-full, фиксы Gemini/Qwen/GSA, надёжный ручной
+экспорт; `gpt-6-mini` закрыт как not-separable.
+
+### Изменено
+
+- Встроенное расширение: 2.1.1 → 2.2.0.
+- `pake-bundle.deepseek.js` пересобран из 2.2.0.
+- MSI пересобран с `--app-version 1.2.0`.
+
+### Проверено
+
+- `node scripts/check-version-sync.mjs` — 10 проверок, app 1.2.0 / ext 2.2.0.
+- `node --check ai-context-monitor/pake-bundle.deepseek.js` — без ошибок.
+- `npx eslint . --ext .js` — без новых ошибок.
+
 ## [1.1.8] - 2026-11-10
 
 Обновление поставки встроенного расширения AI Context Monitor (2.1.1). Исправление петли определения модели Gemini, чистка ESLint.
