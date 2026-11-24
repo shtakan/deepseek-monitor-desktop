@@ -68,6 +68,9 @@
   "content_tooltip_window": {
     "message": "Окно модели: $1"
   },
+  "content_tooltip_saturated": {
+    "message": "Контекст заполнен платформой"
+  },
   "content_source_label": {
     "message": "Источник: $1"
   },
@@ -101,8 +104,17 @@
   "options_stat_tokens": {
     "message": "Токены:"
   },
+  "options_stat_window": {
+    "message": "Окно модели:"
+  },
   "options_stat_limit": {
-    "message": "Лимит:"
+    "message": "Порог показа:"
+  },
+  "options_stat_account": {
+    "message": "Лимит аккаунта:"
+  },
+  "options_account_unknown": {
+    "message": "неизвестен"
   },
   "options_stat_fill": {
     "message": "Заполнение:"
@@ -115,6 +127,15 @@
   },
   "options_model_auto": {
     "message": "Автоопределение"
+  },
+  "options_plan_label": {
+    "message": "Тариф Gemini:"
+  },
+  "options_plan_auto": {
+    "message": "Авто (не знаю)"
+  },
+  "options_plan_hint": {
+    "message": "Окно модели — 1M. Тариф задаёт лимит аккаунта; «Авто» = лимит неизвестен."
   },
   "options_limit_label": {
     "message": "Лимит контекста:"
@@ -283,6 +304,12 @@
   },
   "options_open_supported_site": {
     "message": "Откройте поддерживаемый сайт"
+  },
+  "options_context_not_quota": {
+    "message": "Лимит контекста модели. Квота поиска Perplexity — не заполнение контекста."
+  },
+  "options_context_saturated": {
+    "message": "Платформа сообщает: контекст заполнен. Начните новый чат."
   },
   "options_reload_page": {
     "message": "Обновите страницу"
@@ -684,13 +711,16 @@
     "message": "AI Context Monitor"
   },
   "docs_subtitle": {
-    "message": "Chrome-расширение для мониторинга заполнения контекстного окна ИИ-моделей"
+    "message": "Браузерное расширение для мониторинга заполнения контекстного окна ИИ-моделей"
   },
   "docs_btn_download": {
     "message": "Скачать расширение (ZIP)"
   },
   "docs_btn_github": {
     "message": "Проект на GitHub"
+  },
+  "docs_btn_firefox": {
+    "message": "Установить для Firefox"
   },
   "docs_section_how": {
     "message": "Как это работает"

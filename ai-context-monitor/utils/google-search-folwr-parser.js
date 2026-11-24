@@ -68,7 +68,7 @@
     return lines.join("\n");
   }
   function isQuestionHeading(el) {
-    return el.tagName === "H2" && el.className && String(el.className).indexOf("iMqumd") !== -1;
+    return el.tagName === "H2" && Boolean(el.className) && String(el.className).indexOf("iMqumd") !== -1;
   }
   var CODE_CONTAINER_SEL = 'pre, code, [class*="code-block"], [class*="codeBlock"], [class*="codeblock"]';
   var CODE_LANG_RE = /^[A-Za-z][A-Za-z0-9+#._-]{0,19}$/;
@@ -457,6 +457,26 @@
         turns.push({ id: "folif_" + Date.now(), userText: folifQuestion, assistantText: folifAnswer });
       }
     }
+    if (turns.length > 1) {
+      var domOrder = "no-evidence";
+      try {
+        var liveDoc = typeof document !== "undefined" ? document : null;
+        if (liveDoc && typeof liveDoc.querySelectorAll === "function") {
+          var domTid = readThreadId(liveDoc);
+          if (!threadId || !domTid || threadId === domTid) {
+            var domTurns = extractTurnsFromDocument(liveDoc);
+            if (domTurns.length > 0) {
+              var ordered = orderTurnsByDom(turns, domTurns);
+              domOrder = ordered.verdict;
+              if (ordered.verdict !== "no-evidence") turns = ordered.turns;
+            }
+          }
+        }
+      } catch (e) {
+        swallowSoft(e, "gsa-utils:parseGoogleFolwrOpen-order");
+      }
+      if (domOrder === "no-evidence") turns.reverse();
+    }
     for (var t = 0; t < turns.length; t++) {
       var t2 = turns[t];
       if (t2.userText) messages.push({ role: "user", text: stripTags(decodeEntities(t2.userText)) });
@@ -492,6 +512,8 @@
           var raw = (h2.textContent || "").trim();
           var m = raw.match(/^Вы сказали:\s*"([\s\S]*)"$/);
           q = m ? m[1].trim() : raw;
+        } else {
+          q = resolveUserQuestionForTurn(doc, turnsArr[i]);
         }
         questions.push(q);
       }
@@ -527,6 +549,55 @@
     }
     return turns;
   }
+  function isSyntheticTurnId(id) {
+    var s = String(id == null ? "" : id);
+    if (!s) return true;
+    return s.indexOf("idx") === 0 || s.indexOf("folif_") === 0;
+  }
+  function domRankOfTurn(turn, domTurns) {
+    if (!turn) return -1;
+    var i;
+    var id = String(turn.id == null ? "" : turn.id);
+    if (!isSyntheticTurnId(id)) {
+      for (i = 0; i < domTurns.length; i++) {
+        if (domTurns[i] && String(domTurns[i].id == null ? "" : domTurns[i].id) === id) return i;
+      }
+    }
+    var key = canonicalTurnKeyOf(turn);
+    if (key && key !== "||") {
+      for (i = 0; i < domTurns.length; i++) {
+        if (canonicalTurnKeyOf(domTurns[i]) === key) return i;
+      }
+    }
+    var body = turnIdentityParts(turn).a;
+    if (body) {
+      for (i = 0; i < domTurns.length; i++) {
+        var other = turnIdentityParts(domTurns[i]).a;
+        if (other && bodiesPrefixCompatible(body, other)) return i;
+      }
+    }
+    return -1;
+  }
+  function orderTurnsByDom(turns, domTurns) {
+    var list = Array.isArray(turns) ? turns : [];
+    var dom = Array.isArray(domTurns) ? domTurns : [];
+    var ranks = [];
+    var i;
+    for (i = 0; i < list.length; i++) {
+      var rank = domRankOfTurn(list[i], dom);
+      if (rank >= 0) ranks.push(rank);
+    }
+    var matched = ranks.length;
+    if (matched < 2) return { turns: list, verdict: "no-evidence", matched };
+    var up = 0;
+    var down = 0;
+    for (i = 1; i < ranks.length; i++) {
+      if (ranks[i] > ranks[i - 1]) up++;
+      else if (ranks[i] < ranks[i - 1]) down++;
+    }
+    if (down > up) return { turns: list.slice().reverse(), verdict: "reversed", matched };
+    return { turns: list, verdict: "kept", matched };
+  }
   function extractContinuationToken(htmlText) {
     if (!htmlText || typeof htmlText !== "string") return null;
     try {
@@ -541,6 +612,11 @@
     } catch (e) {
       return null;
     }
+  }
+  var HISTORY_CURSOR_RE = /^AUtEx/i;
+  function isHistoryCursor(token) {
+    if (!token || typeof token !== "string") return false;
+    return HISTORY_CURSOR_RE.test(token.trim());
   }
   function normalizeTurnKeyPart(s) {
     return String(s == null ? "" : s).toLowerCase().replace(/\u00a0/g, " ").replace(/[^a-zа-яё0-9]+/g, "");
@@ -576,6 +652,101 @@
     if (!body) return null;
     return { question, body };
   }
+  function stripGsaUserEcho(text) {
+    var t = String(text == null ? "" : text).trim();
+    if (!t) return t;
+    var m = /^Вы\s+отправили[\s\S]*?запрос\s*:?\s*"/i.exec(t.slice(0, 240));
+    if (!m) return t;
+    var rest = t.slice(m[0].length);
+    var close = rest.lastIndexOf('"');
+    if (close === -1) return t;
+    if (rest.slice(close + 1).trim()) return t;
+    var q = rest.slice(0, close).trim();
+    return q || t;
+  }
+  function gsaAnswerEchoParts(text) {
+    var m = /^Ответ\s+в\s+режиме\s+ИИ(?:[\s,]|$)[\s\S]*?запрос\s*:?\s*"/i.exec(text.slice(0, 300));
+    if (!m) return null;
+    var rest = text.slice(m[0].length);
+    var close = -1;
+    for (var i = 0; i < rest.length; i++) {
+      if (rest.charAt(i) !== '"') continue;
+      var tail = rest.slice(i + 1);
+      if (/^[\r\n]/.test(tail) && isAnswerWrapperTail(tail)) {
+        close = i;
+        break;
+      }
+    }
+    if (close === -1) {
+      for (var j = 0; j < rest.length; j++) {
+        if (rest.charAt(j) !== '"') continue;
+        if (isAnswerWrapperTail(rest.slice(j + 1))) {
+          close = j;
+          break;
+        }
+      }
+    }
+    if (close === -1) {
+      var last = rest.lastIndexOf('"');
+      if (last !== -1 && !rest.slice(last + 1).trim()) close = last;
+    }
+    if (close === -1) return null;
+    var body = rest.slice(close + 1).replace(/^["»”']{0,2}/, "").replace(/^[\s.,:;-]+/, "");
+    return { question: rest.slice(0, close).trim(), body };
+  }
+  function stripGsaAssistantEcho(text) {
+    var t = String(text == null ? "" : text).trim();
+    if (!t) return t;
+    var wrapper = gsaAnswerEchoParts(t);
+    if (wrapper) return wrapper.body;
+    if (/^Ответ\s+в\s+режиме\s+ИИ(?:[\s,]|$)/i.test(t) && wrapperPrefix(t)) return "";
+    return t;
+  }
+  function extractEchoQuestion(turnEl) {
+    try {
+      if (!turnEl || typeof turnEl.querySelector !== "function") return null;
+      var h3 = turnEl.querySelector("h3.iMqumd");
+      if (!h3) return null;
+      var raw = String(h3.textContent == null ? "" : h3.textContent).trim();
+      var prefix = wrapperPrefix(raw);
+      if (!prefix) return null;
+      var rest = raw.slice(prefix.length);
+      var close = rest.lastIndexOf('"');
+      if (close === -1) return null;
+      if (rest.slice(close + 1).replace(/\s+/g, "").length > 0) return null;
+      var q = rest.slice(0, close).trim();
+      return q || null;
+    } catch (e) {
+      return null;
+    }
+  }
+  function stripBubbleQuotes(text) {
+    return String(text == null ? "" : text).trim().replace(/^["'«»„“”‘’]+/, "").replace(/["'«»„“”‘’]+$/, "").trim();
+  }
+  function resolveUserQuestionForTurn(doc, turnEl) {
+    try {
+      if (!doc || typeof doc.querySelectorAll !== "function") return null;
+      var echoQ = extractEchoQuestion(turnEl);
+      if (!echoQ) return null;
+      var want = normalizeTurnKeyPart(echoQ);
+      if (!want) return null;
+      var spans = doc.querySelectorAll("span");
+      var found = null;
+      for (var i = 0; i < spans.length; i++) {
+        var el = spans[i];
+        if (!el || !el.textContent) continue;
+        if (el.children && el.children.length > 0) continue;
+        if (typeof el.closest === "function" && el.closest('[data-scope-id="turn"]')) continue;
+        var text = stripBubbleQuotes(el.textContent);
+        if (!text || normalizeTurnKeyPart(text) !== want) continue;
+        if (found !== null) return null;
+        found = text;
+      }
+      return found;
+    } catch (e) {
+      return null;
+    }
+  }
   function canonicalAnswerBody(text) {
     var wrapper = answerWrapperParts(text);
     if (wrapper) return wrapper.body;
@@ -608,12 +779,28 @@
     var parts = turnIdentityParts(turn);
     return parts.u + "||" + parts.a;
   }
+  function wrapperQuestion(text) {
+    var s = String(text == null ? "" : text);
+    var prefix = wrapperPrefix(s);
+    if (!prefix) return "";
+    var rest = s.slice(prefix.length);
+    var firstWs = -1;
+    for (var i = 0; i < rest.length; i++) {
+      if (rest.charAt(i) !== '"') continue;
+      var tail = rest.slice(i + 1);
+      if (!isAnswerWrapperTail(tail)) continue;
+      if (/^[\r\n]/.test(tail)) return rest.slice(0, i).trim();
+      if (firstWs === -1 && /^\s/.test(tail)) firstWs = i;
+    }
+    if (firstWs !== -1) return rest.slice(0, firstWs).trim();
+    var legacy = answerWrapperParts(s);
+    return legacy ? legacy.question : "";
+  }
   function canonicalizeTurnForThread(turn) {
     if (!turn) return turn;
     var question = turn.userText == null ? "" : String(turn.userText).trim();
     if (!question) {
-      var wrapper = answerWrapperParts(turn.assistantText);
-      if (wrapper) question = wrapper.question;
+      question = wrapperQuestion(turn.assistantText);
     }
     return {
       id: turn.id,
@@ -720,6 +907,13 @@
       var hasKey = key !== "||" && Object.prototype.hasOwnProperty.call(byKey, key);
       var at = hasId ? byId[id] : hasKey ? byKey[key] : findPrefixCompatibleIndex(out, t);
       if (at !== -1) {
+        var otherParts = turnIdentityParts(out[at]);
+        var parts = turnIdentityParts(t);
+        if (hasId && !hasKey && parts.u && otherParts.u && parts.u !== otherParts.u && !bodiesPrefixCompatible(otherParts.a, parts.a)) {
+          byKey[key] = out.length;
+          out.push(turnRecord(t, id));
+          return;
+        }
         var richer = hasId || hasKey ? isBetterTurn(t, out[at]) : isFullerTurn(t, out[at]);
         if (richer) {
           out[at] = turnRecord(t, out[at].id);
@@ -756,13 +950,116 @@
         return;
       }
       var richer = hasKey ? isBetterTurn(t, out[at]) : isFullerTurn(t, out[at]);
+      var prevUserText = out[at].userText;
       if (richer) {
         out[at] = turnRecord(t, out[at].id);
+        if (!out[at].userText && prevUserText) out[at].userText = prevUserText;
+        reindexTurnKey(byKey, out, at);
+      }
+      if (!out[at].userText && t.userText) {
+        out[at] = { id: out[at].id, userText: t.userText, assistantText: out[at].assistantText };
+        delete byKey[key];
         reindexTurnKey(byKey, out, at);
       }
     }
     for (var i = 0; i < baseTurns.length; i++) add(baseTurns[i]);
     for (var j = 0; j < extraTurns.length; j++) add(extraTurns[j]);
+    return out;
+  }
+  function fillMissingUserText(baseTurns, extraTurns) {
+    if (!Array.isArray(baseTurns) || baseTurns.length === 0) {
+      return Array.isArray(baseTurns) ? baseTurns : [];
+    }
+    if (!Array.isArray(extraTurns) || extraTurns.length === 0) return baseTurns;
+    var byKey = {};
+    var ambiguous = {};
+    var byAnswer = {};
+    var ambiguousAnswer = {};
+    for (var i = 0; i < extraTurns.length; i++) {
+      var t = extraTurns[i];
+      if (!t || !t.userText) continue;
+      var body = turnIdentityParts(t).a;
+      if (body) {
+        if (Object.prototype.hasOwnProperty.call(byAnswer, body)) {
+          if (byAnswer[body] !== t.userText) {
+            delete byAnswer[body];
+            ambiguousAnswer[body] = true;
+          }
+        } else if (!ambiguousAnswer[body]) {
+          byAnswer[body] = t.userText;
+        }
+      }
+      var key = canonicalTurnKeyOf(t);
+      if (key === "||" || ambiguous[key]) continue;
+      if (Object.prototype.hasOwnProperty.call(byKey, key)) {
+        if (byKey[key] !== t.userText) {
+          delete byKey[key];
+          ambiguous[key] = true;
+        }
+        continue;
+      }
+      byKey[key] = t.userText;
+    }
+    var out = [];
+    var filled = false;
+    for (var j = 0; j < baseTurns.length; j++) {
+      var turn = baseTurns[j];
+      var fill = null;
+      if (turn && !turn.userText) {
+        var ownKey = canonicalTurnKeyOf(turn);
+        if (ownKey !== "||" && Object.prototype.hasOwnProperty.call(byKey, ownKey)) fill = byKey[ownKey];
+        if (!fill) {
+          var answerBody = turnIdentityParts(turn).a;
+          if (answerBody && Object.prototype.hasOwnProperty.call(byAnswer, answerBody)) {
+            fill = byAnswer[answerBody];
+          }
+        }
+      }
+      if (!fill) {
+        out.push(turn);
+        continue;
+      }
+      out.push({ id: turn.id, userText: fill, assistantText: turn.assistantText });
+      filled = true;
+    }
+    return filled ? out : baseTurns;
+  }
+  var TAIL_QUESTION_MIN = 12;
+  function tailEchoQuestion(assistantText, questionText) {
+    var q = String(questionText == null ? "" : questionText);
+    if (q.length < TAIL_QUESTION_MIN) return false;
+    var echo = String(assistantText == null ? "" : assistantText);
+    var prefix = wrapperPrefix(echo);
+    if (!prefix) return false;
+    var rest = echo.slice(prefix.length).replace(/^["»”'\u00ab\u201c\u2018\s]+/, "");
+    return rest.indexOf(q) === 0;
+  }
+  function foldTailTurns(turns) {
+    var out = turns;
+    for (var iter = 0; iter < 3; iter++) {
+      if (out.length < 2) break;
+      var first = out[out.length - 2];
+      var second = out[out.length - 1];
+      if (!first || !second) break;
+      var firstA = first.assistantText == null ? "" : String(first.assistantText);
+      var secondA = second.assistantText == null ? "" : String(second.assistantText);
+      var firstU = first.userText == null ? "" : String(first.userText);
+      var secondU = second.userText == null ? "" : String(second.userText);
+      if (firstA && secondA && firstA === secondA && (firstU ? 1 : 0) + (secondU ? 1 : 0) === 1) {
+        out[out.length - 2] = { id: first.id, userText: firstU || secondU, assistantText: firstA };
+        out.pop();
+        continue;
+      }
+      var folded = null;
+      if (!firstA && firstU && secondA && (!secondU || secondU === firstU) && tailEchoQuestion(secondA, firstU)) {
+        folded = { id: second.id, userText: firstU, assistantText: secondA };
+      } else if (!secondA && secondU && firstA && (!firstU || firstU === secondU) && tailEchoQuestion(firstA, secondU)) {
+        folded = { id: first.id, userText: secondU, assistantText: firstA };
+      }
+      if (!folded) break;
+      out[out.length - 2] = folded;
+      out.pop();
+    }
     return out;
   }
   function dedupeTurns(turns) {
@@ -782,11 +1079,17 @@
       }
       var richer = hasKey ? isBetterTurn(t, out[at]) : isFullerTurn(t, out[at]);
       if (richer) {
-        out[at] = t;
+        var prevUserText = out[at].userText;
+        if (!t.userText && prevUserText) {
+          out[at] = turnRecord(t, out[at].id);
+          out[at].userText = prevUserText;
+        } else {
+          out[at] = t;
+        }
         reindexTurnKey(byKey, out, at);
       }
     }
-    return out;
+    return foldTailTurns(out);
   }
   function classifyFolwrContinuation(input) {
     var i = input || {};
@@ -853,12 +1156,23 @@
       turnIdentityParts,
       bodiesPrefixCompatible,
       dedupeTurns,
+      // BUG-M: probe разрешён только по курсору истории; folif-mstk курсором не считается.
+      isHistoryCursor,
+      // BUG-G: A-only ход — вопрос из DOM-пузыря (эхо-валидация) и узкий fill-only добор
+      // userText по каноническому ключу; повторной копии алгоритма у адаптера/перехватчика нет.
+      resolveUserQuestionForTurn,
+      fillMissingUserText,
+      // BUG-J: порядок ходов по живому DOM — эталон направления для open-пути перехватчика.
+      orderTurnsByDom,
       // O-45: общий рендер код-блоков (```lang … ```) и отбор узлов DOM-пути —
       // переиспользуются адаптером (adapters/google-search-adapter.js) и тестами.
       renderCodeBlock,
       answerTextOf,
       answerDomNodes,
-      isCodeBlockElement
+      isCodeBlockElement,
+      // BUG-08/фаза 4: эхо-обёртки GSA снимаются только на проекции файла.
+      stripGsaUserEcho,
+      stripGsaAssistantEcho
     };
   }
 })();

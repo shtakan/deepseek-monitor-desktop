@@ -81,12 +81,13 @@ var __aiCmDebugClassic = (() => {
       return;
     }
     var enabled = DEBUG;
+    var key = level;
     try {
       if (typeof window !== "undefined" && window.__aiCmDebugLogs === true) enabled = true;
     } catch (e) {
     }
     if (enabled) {
-      (console[level] || console.log).apply(console, args);
+      (console[key] || console.log).apply(console, args);
     }
   }
   function swallow(error, tag) {

@@ -361,7 +361,7 @@
         // разделяем вопрос пользователя и ответ модели, сохраняем таблицы.
         var segs = [];
         if (typeof window !== 'undefined' && window.GeminiBatchexecuteParser) {
-          try { segs = window.GeminiBatchexecuteParser.splitTurnMessages(t); } catch (e) { segs = []; }
+          try { segs = (typeof aiCmMergeTurnSegments === 'function') ? aiCmMergeTurnSegments(window.GeminiBatchexecuteParser.splitTurnMessages(t)) : window.GeminiBatchexecuteParser.splitTurnMessages(t); } catch (e) { segs = []; }
         }
         if (!segs || !segs.length) {
           // fallback: прежний сбор одним текстом (без ролей)
@@ -1322,9 +1322,30 @@
     orderCounter = orderState.orderCounter;
     prependCursor = orderState.prependCursor;
 
+    // BIG-04 (2.1.5): vf5-cursor-continue может принести уже принятую пару
+    // user+assistant с ДРУГИМ r-id — дедуп по id её не видит. Сверяем содержимое
+    // пары с хвостом базы и не добавляем повторно (см. 06-gemini, L).
+    var pairSkip = {};
+    var existingOrdered = [];
+    var eoKeys = Object.keys(turnsMap);
+    eoKeys.sort(function (a, b) { return (turnsMap[a].order || 0) - (turnsMap[b].order || 0); });
+    for (var eo = 0; eo < eoKeys.length; eo++) {
+      var eoRec = turnsMap[eoKeys[eo]];
+      if (eoRec) existingOrdered.push({ id: eoKeys[eo], role: eoRec.role, text: eoRec.text });
+    }
+    var pd = (typeof aiCmGeminiPairDedupe === 'function')
+      ? aiCmGeminiPairDedupe(existingOrdered, pageSeq)
+      : { skip: {}, skipped: 0 };
+    pairSkip = pd.skip || {};
+    if (pd.skipped) {
+      debugLog('log', '[AI CM][gemini] pair-dedupe skipped=' + pd.skipped + ' src=' + src +
+        ' convId=' + (getConvId() || '(none)'));
+    }
+
     var added = 0;
     for (var i = 0; i < pageSeq.length; i++) {
       var p = pageSeq[i];
+      if (pairSkip[p.id]) continue;
       if (!turnsMap[p.id]) {
         turnsMap[p.id] = { text: p.text, modelName: p.modelName, order: pageOrders[i], pageMode: src, ts: p.ts || 0, role: (p.role === 'user') ? 'user' : 'assistant', turnId: p.turnId || null, r1: p.r1 || null, files: p.files || null, filePool: p.filePool || null };
         added++;
@@ -1497,3 +1518,76 @@
   Fn.__bind = __bind;
   if (typeof window !== 'undefined') { window.AiCmGeminiIngest = Fn; }
 }());
+
+// BIG-04 (2.1.5) → 2.2/фаза 3: склейка сегментов хода переехала в шов
+// utils/messages/turns.ts. В MAIN-мир её привозит classic-артефакт
+// utils/messages/turns.js (build.mjs: writeMessagesTurnsClassic), который
+// публикует globalThis.AiCmMessagesTurns. Локальный legacy-фолбэк оставлен
+// для срез-песочниц тестов и старых регистраций, где артефакта нет.
+function aiCmMergeTurnSegments(segs) {
+  var api = (typeof globalThis !== 'undefined' && globalThis.AiCmMessagesTurns)
+    ? globalThis.AiCmMessagesTurns : null;
+  if (api && typeof api.mergeTurnSegments === 'function') return api.mergeTurnSegments(segs);
+  return aiCmMergeTurnSegmentsLegacy(segs);
+}
+
+function aiCmMergeTurnSegmentsLegacy(segs) {
+  if (!Array.isArray(segs) || !segs.length) return segs;
+  var out = [];
+  for (var i = 0; i < segs.length; i++) {
+    var seg = segs[i];
+    var txt = (seg && seg.text) ? String(seg.text).trim() : '';
+    if (!txt) continue;
+    var role = (seg.role === 'user') ? 'user' : 'assistant';
+    if (out.length && out[out.length - 1].role === role) {
+      out[out.length - 1].text += '\n\n' + txt;
+    } else {
+      out.push({ role: role, text: txt });
+    }
+  }
+  return out;
+}
+
+// BIG-04 (2.1.5): дедуп пары user+assistant по содержимому.
+// vf5-cursor-continue приносит уже принятую пару с другим r-id; id-дедуп её не ловит.
+function aiCmGeminiPairHash(text) {
+  var s = (text == null) ? '' : String(text).replace(/\s+/g, ' ').trim();
+  if (!s) return '';
+  var h = 0x811c9dc5;
+  for (var i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = (h + ((h << 1) + (h << 4) + (h << 7) + (h << 8) + (h << 24))) >>> 0;
+  }
+  return ('00000000' + h.toString(16)).slice(-8) + ':' + s.length;
+}
+
+function aiCmGeminiPairDedupe(existingOrdered, incoming) {
+  var skip = {};
+  var skipped = 0;
+  if (!Array.isArray(existingOrdered) || !Array.isArray(incoming) || !incoming.length) {
+    return { skip: skip, skipped: skipped };
+  }
+  // Только хвост базы: дубль приходит на стыке vf5-окна, старые совпадения не трогаем.
+  var tail = existingOrdered.slice(-16);
+  var known = {};
+  for (var i = 0; i + 1 < tail.length; i++) {
+    var u = tail[i], a = tail[i + 1];
+    if (!u || !a || u.role !== 'user' || a.role !== 'assistant') continue;
+    var ku = aiCmGeminiPairHash(u.text), ka = aiCmGeminiPairHash(a.text);
+    if (!ku || !ka) continue;
+    known[ku + '|' + ka] = 1;
+  }
+  for (var j = 0; j + 1 < incoming.length; j++) {
+    var iu = incoming[j], ia = incoming[j + 1];
+    if (!iu || !ia || iu.role !== 'user' || ia.role !== 'assistant') continue;
+    var kiu = aiCmGeminiPairHash(iu.text), kia = aiCmGeminiPairHash(ia.text);
+    if (!kiu || !kia) continue;
+    if (known[kiu + '|' + kia]) {
+      if (iu.id) skip[iu.id] = 1;
+      if (ia.id) skip[ia.id] = 1;
+      skipped += 2;
+      j++;
+    }
+  }
+  return { skip: skip, skipped: skipped };
+}

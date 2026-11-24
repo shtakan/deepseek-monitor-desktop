@@ -286,6 +286,7 @@
     if (!own) return 0;
     var all = collectTurnFiles(turn);
     var pool = filePoolForConv(convId, true);
+    if (!pool) return 0;
     if (!all.length) {
       if (pool && pool.turns[own]) delete pool.turns[own];
       return 0;
@@ -306,15 +307,20 @@
   function previousPoolTurn(pool, rec, all) {
     var ids = Object.keys(pool.turns);
     var chrono = null;
+    var chronoLen = 0;
     var i;
     for (i = 0; i < ids.length; i++) {
       if (ids[i] === rec.turnId) continue;
       var cand = pool.turns[ids[i]];
       if (!cand || !Array.isArray(cand.refs)) continue;
       if (!isTurnBefore(cand, rec)) continue;
-      if (!chrono || isTurnBefore(chrono, cand)) chrono = cand;
+      if (!chrono || isTurnBefore(chrono, cand)) {
+        chrono = cand;
+        chronoLen = cand.refs.length;
+      }
     }
     var donor = null;
+    var donorLen = 0;
     for (i = 0; i < ids.length; i++) {
       if (ids[i] === rec.turnId) continue;
       var reg = pool.turns[ids[i]];
@@ -322,9 +328,12 @@
       var len = reg.refs.length;
       if (!len || len >= all.length) continue;
       if (poolSharedPrefixLen(reg.refs, all) !== len) continue;
-      if (!donor || len > donor.refs.length) donor = reg;
+      if (!donor || len > donorLen) {
+        donor = reg;
+        donorLen = len;
+      }
     }
-    if (donor && (!chrono || donor.refs.length > chrono.refs.length)) return donor;
+    if (donor && (!chrono || donorLen > chronoLen)) return donor;
     return chrono;
   }
   function poolDelta(prevRefs, all) {
@@ -370,6 +379,7 @@
     if (!own) return all;
     if (!all.length) return [];
     var pool = filePoolForConv(convId, true);
+    if (!pool) return all;
     var rec = pool.turns[own];
     if (!rec) {
       pool.seq++;
@@ -381,7 +391,7 @@
     if (fileOwnerOrder(order) >= 0) rec.order = fileOwnerOrder(order);
     var prev = previousPoolTurn(pool, rec, all);
     if (!prev) return all;
-    return poolDelta(prev.refs, all);
+    return poolDelta(prev.refs || [], all);
   }
   function __resetFileOwners(convId) {
     if (convId === void 0 || convId === null || convId === "") {

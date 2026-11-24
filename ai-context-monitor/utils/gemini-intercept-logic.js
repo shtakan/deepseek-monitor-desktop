@@ -20,7 +20,7 @@
   }
   function restoredRoleOf(m) {
     if (m && m.role) return m.role === "user" ? "user" : "assistant";
-    var id = m && m.id || "";
+    var id = String(m && m.id || "");
     if (/_user$/.test(id)) return "user";
     if (/_assistant$/.test(id)) return "assistant";
     return "";
@@ -214,7 +214,7 @@
       if (mode === "older") state.prependCursor -= pageLen;
     }
     ordered.sort(function(a, b) {
-      return a.order - b.order;
+      return (a.order || 0) - (b.order || 0);
     });
     return ordered.map(function(x) {
       return { id: x.id, text: x.text, role: x.role, r1: x.r1 };
@@ -257,7 +257,10 @@
         if (ra !== rb) return ra - rb;
         return (a.order || 0) - (b.order || 0);
       });
-      for (var m = 0; m < msgs.length; m++) ids.push(msgs[m].id);
+      for (var m = 0; m < msgs.length; m++) {
+        var mid = msgs[m].id;
+        if (mid != null) ids.push(mid);
+      }
     }
     return { ok: true, ids };
   }
@@ -286,7 +289,10 @@
           if (ra !== rb) return ra - rb;
           return 0;
         });
-        for (var m = 0; m < msgs.length; m++) ids.push(msgs[m].id);
+        for (var m = 0; m < msgs.length; m++) {
+          var mid = msgs[m].id;
+          if (mid != null) ids.push(mid);
+        }
       }
       return ids;
     }
@@ -327,7 +333,7 @@
     }
     function roleOf(m2) {
       if (m2 && m2.role) return m2.role === "user" ? "user" : "assistant";
-      var id = m2 && m2.id || "";
+      var id = String(m2 && m2.id || "");
       if (/_user$/.test(id)) return "user";
       if (/_assistant$/.test(id)) return "assistant";
       return "";
@@ -398,12 +404,13 @@
       while (cur && turns[cur] && !seen[cur] && chain.length < guard) {
         seen[cur] = true;
         chain.push(cur);
-        if (!turns[cur].r1) break;
-        if (seen[turns[cur].r1]) {
+        var nx = turns[cur].r1;
+        if (!nx) break;
+        if (seen[nx]) {
           cur = null;
           break;
         }
-        cur = turns[cur].r1;
+        cur = nx;
       }
       if (chain.length) chains.push(chain);
     }
@@ -433,7 +440,7 @@
       if (!it || !it.r1) continue;
       tk = it.turnId || it.id;
       var rp = pos[it.r1];
-      if (rp !== void 0 && pos[tk] !== void 0 && pos[tk] < rp) inv++;
+      if (tk && rp !== void 0 && pos[tk] !== void 0 && pos[tk] < rp) inv++;
     }
     return inv;
   }
@@ -472,7 +479,10 @@
         return 0;
       });
       var ids = [];
-      for (var am = 0; am < archItems.length; am++) ids.push(archItems[am].id);
+      for (var am = 0; am < archItems.length; am++) {
+        var aid = archItems[am].id;
+        if (aid != null) ids.push(aid);
+      }
       for (var rm = 0; rm < res.ids.length; rm++) ids.push(res.ids[rm]);
       return { ids, mode: res.mode };
     } catch (e) {
@@ -480,6 +490,8 @@
         return x && x.id;
       }).map(function(x) {
         return x.id;
+      }).filter(function(v) {
+        return v != null;
       }), mode: "order-sort" };
     }
   }
@@ -501,12 +513,16 @@
       });
       return { ids: byOrder.map(function(x) {
         return x.id;
+      }).filter(function(v) {
+        return v != null;
       }), mode: "order-sort" };
     } catch (e) {
       return { ids: orderItems.filter(function(x) {
         return x && x.id;
       }).map(function(x) {
         return x.id;
+      }).filter(function(v) {
+        return v != null;
       }), mode: "order-sort" };
     }
   }
@@ -595,6 +611,7 @@
       seenSeg[M[i]] = true;
       while (stack.length) {
         var nd = stack.pop();
+        if (nd === void 0) break;
         comp.push(nd);
         var fw = turns[nd].next;
         if (fw && turns[fw] && !seenSeg[fw]) {
@@ -642,7 +659,10 @@
         if (ra !== rb) return ra - rb;
         return (a.order || 0) - (b.order || 0);
       });
-      for (var m = 0; m < msgs.length; m++) ids.push(msgs[m].id);
+      for (var m = 0; m < msgs.length; m++) {
+        var mid = msgs[m].id;
+        if (mid != null) ids.push(mid);
+      }
     }
     return { ok: true, ids };
   }
@@ -779,8 +799,9 @@
     var out = [];
     var prev = null;
     var seenUserIds = {};
-    for (var i = 0; i < messages.length; i++) {
-      var m = messages[i];
+    var list = Array.isArray(messages) ? messages : [];
+    for (var i = 0; i < list.length; i++) {
+      var m = list[i];
       if (!m) continue;
       var role = m.role === "user" ? "user" : "assistant";
       var id = m.id != null ? String(m.id) : null;
@@ -1009,7 +1030,7 @@
   }
   function extractStreamUserTurn(raw) {
     try {
-      var fr = streamLastFrame(raw, { I4z33b: 1 });
+      var fr = streamLastFrame(raw, { I4z33b: 1, aPya6c: 1 });
       if (!fr) return null;
       var meNode = null;
       (function walk(n) {
@@ -1049,7 +1070,7 @@
   }
   function extractStreamModelTurn(raw) {
     try {
-      var fr = streamLastFrame(raw, { Bsxleb: 1 });
+      var fr = streamLastFrame(raw, { Bsxleb: 1, TUa2Cd: 1 });
       if (!fr) return null;
       var entry = null;
       (function walk(n) {
