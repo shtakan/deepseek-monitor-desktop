@@ -3,6 +3,24 @@
 Все заметные изменения проекта. Формат — [Keep a Changelog](https://keepachangelog.com/ru/1.1.0/),
 версионирование — [Semantic Versioning](https://semver.org/lang/ru/).
 
+## [1.3.0] - 2026-11-27
+
+Обновлён встроенный AI Context Monitor (**2.2.0 → 2.4.0**): Stage 0–9
+(`content.ts` 3 005, `processAndSend` 397), нативный экспорт Qwen/ChatGPT,
+безопасный манифест Qwen JSON `files[]`, PDF reload-fix, browser mediators.
+
+### Изменено
+
+- Встроенное расширение синхронизировано с 2.4.0; `polyfill.js` и
+  `pake-bundle.deepseek.js` пересобраны.
+- MSI собран с `--app-version 1.3.0`.
+
+### Проверено
+
+- `node scripts/check-version-sync.mjs` — app 1.3.0 / ext 2.4.0.
+- `node --check ai-context-monitor/pake-bundle.deepseek.js`.
+- `npx eslint . --ext .js`.
+
 ## [1.2.0] - 2026-11-24
 
 Обновление поставки встроенного расширения AI Context Monitor (**2.1.1 → 2.2.0**):
